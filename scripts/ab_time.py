@@ -7,6 +7,8 @@ RDO, without loading or writing). Every pair of outputs is compared byte for byt
 output-preserving should report all identical.
 
 A configuration is `EXT|ARGS`: the output extension and the arguments after `encode IMG -o OUT`.
+`--head-args` adds arguments to the head's encodes only, so one build can be timed against itself with
+a different setting (outputs then differ, as expected).
 
 Usage:
   python scripts/ab_time.py test-images/kodak --base old/mipple --head target/release/mipple --cpu 1 \
@@ -54,6 +56,7 @@ def main():
     ap.add_argument("--runs", type=int, default=3, help="best of N timings per image")
     ap.add_argument("--limit", type=int, default=0, help="first N images only")
     ap.add_argument("--cpu", type=int, default=None, help="pin this script and the encoders to this logical CPU")
+    ap.add_argument("--head-args", default="", help="extra arguments for the head's encodes only")
     ap.add_argument("--out", type=Path, default=ROOT / "bench-results" / "ab")
     a = ap.parse_args()
     if a.cpu is not None:
@@ -75,7 +78,7 @@ def main():
             bb = bh = float("inf")
             for _ in range(a.runs):
                 bb = min(bb, encode(a.base, img, ob, args, env))
-                bh = min(bh, encode(a.head, img, oh, args, env))
+                bh = min(bh, encode(a.head, img, oh, args + shlex.split(a.head_args), env))
             tb += bb
             th += bh
             same += ob.read_bytes() == oh.read_bytes()

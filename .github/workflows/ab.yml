@@ -19,6 +19,9 @@ on:
       configs:
         description: "`;`-separated EXT|ARGS"
         default: "dds|-f bc7 -l 1 --no-mips"
+      head_args:
+        description: Extra encode arguments for the head only
+        default: ""
       images:
         description: Kodak images (first N of 24)
         default: "24"
@@ -39,6 +42,7 @@ jobs:
       CONFIGS: ${{ inputs.configs }}
       IMAGES: ${{ inputs.images }}
       RUNS: ${{ inputs.runs }}
+      HEAD_ARGS: ${{ inputs.head_args }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -72,11 +76,11 @@ jobs:
             echo "## A/B: Kodak (first $IMAGES), one thread pinned to CPU 1, best of $RUNS"
             echo
             echo "- CPU: $(lscpu | sed -n 's/^Model name: *//p'), $(nproc) logical CPUs"
-            echo "- head: \`$HEAD\` ($(git -C head rev-parse --short HEAD)), base: \`$BASE\` ($(git -C base rev-parse --short HEAD))"
+            echo "- head: \`$HEAD\` ($(git -C head rev-parse --short HEAD)) \`$HEAD_ARGS\`, base: \`$BASE\` ($(git -C base rev-parse --short HEAD))"
             echo
           } > summary.md
           python3 head/scripts/ab_time.py head/test-images/kodak --base bin/mipple-base --head bin/mipple-head \
-            --cpu 1 --runs "$RUNS" --limit "$IMAGES" --out out "${args[@]}" | tee -a summary.md
+            --cpu 1 --runs "$RUNS" --limit "$IMAGES" --out out --head-args="$HEAD_ARGS" "${args[@]}" | tee -a summary.md
           cat summary.md >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v7
         with:
