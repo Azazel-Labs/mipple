@@ -169,10 +169,11 @@ impl RdoParams {
     /// Haven −0.71% vs 256 deep without it, same time), 32 for BC7 with it (as good as 64 on
     /// held-out Poly Haven textures), 256 otherwise.
     pub fn max_back_for(&self, format: Format) -> usize {
-        // BC7 16 rather than 32 (the localized search finds the rest): Kodak-24 BD-rate -0.00%.
+        // BC7 8 rather than 32 (the localized search finds the rest): 16 was Kodak-24 BD-rate
+        // -0.00%; 8 is about 5% faster for 0.1 point of the λ 40 equal-RMSE lead over Oodle.
         self.max_back.unwrap_or(match self.local_k_for(format) {
             0 => 256,
-            _ if format == Format::Bc7 => 16,
+            _ if format == Format::Bc7 => 8,
             _ => 128,
         })
     }
@@ -216,18 +217,21 @@ impl RdoParams {
     /// λ 10-40, for 1.07× the time), off for BC5 (−0.2% at depth 32, −0.3% at 256, but BC5 RDO
     /// has no time to spare against bc7enc_rdo). For EAC 256 (RG11 Kodak-8: 2-4% smaller at
     /// λ 0.5-2 for 0.04-0.16 dB), off for ETC2 RGB (Kodak-8: even, so not worth its time).
+    /// BC7 refines 128 deep: 256 is 11-13% slower for 0.1-0.2 points of each lead over Oodle.
     pub fn refine_back_for(&self, format: Format) -> usize {
         self.refine_back.unwrap_or(match format {
-            Format::Bc1 | Format::Bc3 | Format::Bc4 | Format::Bc7 => 256,
+            Format::Bc7 => 128,
+            Format::Bc1 | Format::Bc3 | Format::Bc4 => 256,
             Format::Etc2Rgba | Format::EacR11 | Format::EacRg11 => 256,
             Format::Bc5 | Format::Bc6h | Format::Etc2Rgb => 0,
             Format::Astc4x4 | Format::Astc6x6 | Format::Astc8x8 => 0,
         })
     }
 
-    /// Deferred-decision margin: by default 0.3 (a runner-up within 30% of the best).
-    pub fn defer_for(&self, _format: Format) -> f32 {
-        self.defer.unwrap_or(0.3)
+    /// Deferred-decision margin: by default 0.3 (a runner-up within 30% of the best), 0.15 for
+    /// BC7 (0.3 is about 5% slower for 0.1 point of the λ 20-40 equal-RMSE lead over Oodle).
+    pub fn defer_for(&self, format: Format) -> f32 {
+        self.defer.unwrap_or(if format == Format::Bc7 { 0.15 } else { 0.3 })
     }
 
     /// Bytes per independently optimized chunk: by default 64 KiB for BC7 (6 chunks per Kodak

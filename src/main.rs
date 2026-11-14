@@ -107,7 +107,7 @@ struct RdoArgs {
     #[arg(long)]
     window: Option<usize>,
     /// Previous blocks to try copying from (also capped by --window) [default: 128 for BC4/BC5
-    /// and 16 for BC7 with the localized search, 256 otherwise].
+    /// and 8 for BC7 with the localized search, 256 otherwise].
     #[arg(long)]
     max_back: Option<usize>,
     /// Nearest previous blocks to also try partial byte-span copies from [default: 8 for BC1/BC4,
@@ -115,8 +115,8 @@ struct RdoArgs {
     #[arg(long)]
     span_back: Option<usize>,
     /// Previous blocks whose single fields are tried in the chosen block after the search
-    /// (0 disables) [default: 256 for BC1/BC3/BC4/BC7, ETC2 RGBA and EAC, 0 for BC5 and ETC2
-    /// RGB].
+    /// (0 disables) [default: 256 for BC1/BC3/BC4, ETC2 RGBA and EAC, 128 for BC7, 0 for BC5
+    /// and ETC2 RGB].
     #[arg(long)]
     refine_back: Option<usize>,
     /// Beyond --max-back, earlier blocks whose endpoints are tried re-indexed, each distinct pair
@@ -134,7 +134,8 @@ struct RdoArgs {
     #[arg(long)]
     chunk_bytes: Option<usize>,
     /// Deferred decision: when a block's runner-up scores within this fraction of its best, the
-    /// next block is searched after each and the better pair kept (0 disables) [default: 0.3].
+    /// next block is searched after each and the better pair kept (0 disables) [default: 0.15 for
+    /// BC7, 0.3 otherwise].
     #[arg(long)]
     defer: Option<f32>,
     /// Distortion multiplier for flat blocks (protects gradients).
