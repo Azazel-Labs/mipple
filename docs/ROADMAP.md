@@ -64,7 +64,7 @@ Shipped:
 - [x] **vs Oodle Texture 2.9.16 (Unreal Engine 5.8), true source:** `scripts/ue_oodle/` gets Oodle's real blocks
   out of a stock UE cook (bit-exact, no engine source) and scores them on Zstd-19 next to a mipple sweep
   (`bench-results/oodle-ue/`). Kodak-24 at Oodle λ 10-40, mipple's size at equal RMSE / equal SSIM: BC1 −11.5% to
-  −11.0% / −7.5% to −6.7%, BC4 −15.1% to −6.6% / −5.1% to −2.1%, BC7 −3.2% to −1.7% / −3.9% to −2.0%, BC5
+  −11.0% / −7.5% to −6.7%, BC4 −15.1% to −6.6% / −5.1% to −2.1%, BC7 −2.8% to −1.4% / −3.8% to −1.8% (BC7 rerun at d242683), BC5
   −21.2% to −10.7% / −6.7% to −4.2% (rerun at 4e8547d); ahead at every λ in every format, λ 0-1 included.
 - [x] **Learned BC7 ranker** (`src/ranker/bc7.rs`, trained only on CC0 Poly Haven): a 32-deep exhaustive search,
   the 1024-block far search, then 16 blocks from anywhere in the 64 KiB chunk, picked by a two-key prefilter
@@ -104,6 +104,16 @@ Open for v0.9.x:
   lookups; the 4% of blocks that aren't mode 6 decode), 14 rate estimates and 0.06 wins.
   - Kept: in refinement, a mode-6 block skips other modes' first halves (about 3% less at λ 1, byte-identical on
     Kodak-24 and the Poly Haven test set).
+  - Kept: cheaper defaults (d242683): near search 8 deep instead of 16, refinement 128 instead of 256, deferral
+    margin 0.15 instead of 0.3. Each alone (cloud A/B, Kodak-24) saves about 5% / 11-13% / 5% for 0.1 / 0.1-0.2 /
+    0.1-0.2 points of the lead; together 1.22× / 1.24× / 1.21× less time at λ 1 / 10 / 30, with every cell still
+    ahead (equal RMSE −1.4% to −2.8%, equal SSIM −1.8% to −3.8%). Refinement 64 deep on top is 1.31× / 1.38× for
+    −1.2% / −1.6% minimum leads, and deferral 0.1 1.26× / 1.29× for −1.3% / −1.7%.
+  - Kept: masked 128-bit block compares instead of runtime-length slice compares (`bcmp`), byte-identical,
+    1.4-2.2% less time (cloud A/B).
+  - Tooling: `.github/workflows/ab.yml` (paired timing, `head_args` to time one build against itself with other
+    settings), `profile.yml` (perf on one pinned core) and `oodle.yml` (the Oodle table re-run with extra
+    arguments) run on fresh GitHub-hosted VMs, so speed and quality settings can be checked off the dev machine.
   - Rejected (quality, or slower with no gain): see [DEADENDS.md](DEADENDS.md#bc7-rdo).
   - Measured, not pursued: whole blocks and index halves are only 0-10% repeated within the ranker's 2048-block
     reach at λ 1 on most images (30-60% at λ 4+), so a deduplicated prefilter scan pays mostly at higher λ.

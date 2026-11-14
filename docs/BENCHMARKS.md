@@ -70,7 +70,7 @@ search width and the span distance leave the output byte-identical. BC7 spends t
 context: an 8 KiB window and 64 KiB chunks (6 per Kodak image) instead of 2 KiB and 16 KiB took BC7 from
 −23.7% / −20.8% to −28.4% / −26.7% at about 1.5× the time (12.2-18.9 s before).
 
-Field-swap refinement (`--refine-back`, default 256 for BC1/BC4/BC7): after the search picks a block, try replacing
+Field-swap refinement (`--refine-back`, default 256 for BC1/BC4, 128 for BC7): after the search picks a block, try replacing
 one of its fields (endpoints or indices) with that field of each of the previous 256 blocks, so a block can
 take its endpoints from one earlier block and its indices from another. Kodak-24 BD-rate (`mipple check`): BC1
 −0.98%, BC4 −0.39%; vs bc7enc_rdo BC1 −19.2% → −19.8%, BC4 −16.8% → −17.0%. It is off for BC5, where it gains
@@ -377,16 +377,20 @@ mipple's size at Oodle's quality, relative to Oodle's size (Kodak-24 totals; neg
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | 0 | −18.9% | −9.4% | −6.5% (15/24 images) | −2.6% (4/24) | −13.4% | −5.4% | −31.1% | −11.3% |
 | 1 | −15.1% | −6.8% | −2.9% (12/24) | −0.9% (4/24) | −4.0% | −1.7% | −4.5% | −1.8% |
-| 10 | −11.5% | −7.5% | −1.9% | −3.9% | −6.6% | −2.1% | −10.7% | −4.2% |
-| 20 | −11.0% | −7.3% | −1.7% | −2.8% | −9.6% | −3.2% | −15.7% | −5.7% |
-| 30 | −11.3% | −6.9% | −2.3% | −2.4% | −12.6% | −4.3% | −19.0% | −6.3% |
-| 40 | −11.5% | −6.7% | −3.2% | −2.0% | −15.1% | −5.1% | −21.2% | −6.7% |
+| 10 | −11.5% | −7.5% | −1.8% | −3.8% | −6.6% | −2.1% | −10.7% | −4.2% |
+| 20 | −11.0% | −7.3% | −1.4% | −2.6% | −9.6% | −3.2% | −15.7% | −5.7% |
+| 30 | −11.3% | −6.9% | −2.0% | −2.2% | −12.6% | −4.3% | −19.0% | −6.3% |
+| 40 | −11.5% | −6.7% | −2.8% | −1.8% | −15.1% | −5.1% | −21.2% | −6.7% |
 
 All four are rerun at 4e8547d (the near-tie deferred decision, the neighbourhood smoothness weight, BC1
 lookahead and the BC7 far-search gate; before it BC1 was −8.8% / −4.0% to −5.7% at λ 10-40 and BC7 −0.4% to
 −1.3% at RMSE, −0.2% to −3.0% at SSIM), on top of mipple 0.9.18's smooth weight (4×, halved at channel std
 12), BC4/BC5 RDO from an effort-8 base, and the BC7 speedups below. BC5's R16G16 input is rebuilt from the
 PNG as UE's import does (XY of the normalized RGB, to 16 bits), which reproduces the recorded λ 0 scores exactly.
+BC7 is rerun at d242683 (cheaper BC7 RDO defaults: near search 8 deep, refinement 128, deferral margin 0.15),
+which gave up 0.1-0.4 points of each lead (from −1.9% / −1.7% / −2.3% / −3.2% at RMSE and −3.9% / −2.8% /
+−2.4% / −2.0% at SSIM) for 1.22× / 1.24× / 1.21× less time at λ 1 / 10 / 30 (GitHub-hosted AMD EPYC 7763,
+one thread, `ab.yml`).
 
 Speed (BC7, Core Ultra 7 155H): Oodle's CPU time is UE's process CPU time for a cook with an empty DDC minus
 the same cook with a full one, about 62 CPU-seconds for Kodak-24 at λ 30 (High). mipple reaches that quality

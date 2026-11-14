@@ -35,7 +35,9 @@ CPU times come from paired runs on the same core.
 - **A smaller near-tie threshold for the deferred decision, to save time.** `--defer` 0.1 against 0.3
   (λ 1, one thread on one P-core) keeps most of the time cost: 1.49× / 1.13× / 1.27× the RDO time of no
   deferral for BC5 / BC7 / BC3, against 1.51× / 1.21× / 1.31×, for about two thirds of the BD-rate gain
-  (BC5 −0.16% vs −0.27%). The cost is in deferring at all, so 0.3 stays for every format.
+  (BC5 −0.16% vs −0.27%). The cost is in deferring at all, so 0.3 stays for every format. BC7 later moved to 0.15
+  (d242683) as one of three cheaper defaults: against Oodle it costs only 0.1-0.2 points of the λ 20-40
+  equal-RMSE lead for about 5% less time (cloud A/B, Kodak-24).
 - **Averaging the per-channel smoothness terms** (k²/(k²+σ²) per channel instead of with the
   largest channel's variance). BC7 moves strongly toward RMSE (−1.9% to −2.8% size at Oodle
   Texture's RMSE) but falls behind Oodle on SSIM at λ 30-40 (+0.6% / +1.1%).
@@ -44,7 +46,8 @@ CPU times come from paired runs on the same core.
 
 - **Cutting refinement or the ranker's picks to save CPU.** `--refine-back 0` saves 16% CPU,
   `64` saves 12% and `--local 0` saves 26%, but each puts λ 40 SSIM behind Oodle (+0.2% to
-  +1.0%). Refinement and the ranker carry real quality.
+  +1.0%). Refinement and the ranker carry real quality. (Measured when the λ 40 SSIM lead was −0.3%; with today's wider lead
+  BC7 refines 128 deep by default, see the ROADMAP's BC7 speed item.)
 - **Far re-indexing of multi-subset heads (modes 0-3, 7).** These almost never won, and removing
   them moved every Kodak-24 delta against Oodle by 0.02% or less. Only mode-6 heads are worth
   re-indexing.
