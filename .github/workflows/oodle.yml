@@ -47,7 +47,7 @@ jobs:
           python3 -m pip install -q --break-system-packages numpy pillow
           read -ra fmts <<< "$FORMATS"
           python3 scripts/ue_oodle/compare.py --scores bench-results/oodle-ue/results.json --formats "${fmts[@]}" \
-            --exe target/release/mipple --jobs "$(nproc)" --mipple-args="$ARGS" --out out --work work
+            --images $(ls test-images/kodak | sed -n "s/.png$//p") --exe target/release/mipple --jobs "$(nproc)" --mipple-args="$ARGS" --out out --work work
           {
             echo "- ref \`$(git rev-parse --short HEAD)\`, args \`$ARGS\`"
             echo
