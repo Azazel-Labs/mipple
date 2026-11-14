@@ -9,6 +9,7 @@
   .s2 { stroke: #1baf7a; } .f2 { fill: #1baf7a; }
   .s3 { stroke: #8a5cd6; } .f3 { fill: #8a5cd6; }
   .good { fill: #006300; } .wh { stroke: #52514e; }
+  .halo { paint-order: stroke; stroke: #fcfcfb; stroke-width: 3px; stroke-linejoin: round; }
   @media (prefers-color-scheme: dark) {
     .bg { fill: #1a1a19; } .ink { fill: #f0efec; } .ink2 { fill: #c3c2b7; }
     .grid { stroke: #2c2c2a; } .axis { stroke: #383835; } .ring { stroke: #1a1a19; }
@@ -17,6 +18,7 @@
     .s2 { stroke: #199e70; } .f2 { fill: #199e70; }
     .s3 { stroke: #9d78ea; } .f3 { fill: #9d78ea; }
     .good { fill: #0ca30c; } .wh { stroke: #c3c2b7; }
+    .halo { stroke: #1a1a19; }
   }
   text { font-family: system-ui, -apple-system, &quot;Segoe UI&quot;, Helvetica, Arial, sans-serif; }
   .num { font-variant-numeric: tabular-nums; }

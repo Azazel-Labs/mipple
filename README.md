@@ -164,8 +164,9 @@ WebGPU and win (BC7 effort 5: 42 vs 902 ms for a 512² mip chain in Chrome). Car
   Compressonator. CPU only.
 - ASTC LDR 4x4, 6x6 and 8x8 (1-3 partitions, dual plane, every weight grid of the footprint) encoders and
   a decoder for every 2D footprint, to KTX2 or `.astc`, encoded for sRGB or linear decoding;
-  `scripts/compete_astc.py` grades them against Intel ISPC and Arm's astcenc (effort 0 beats ISPC fast in
-  PSNR and SSIM at all three footprints on the 24 Kodak images). CPU only; its RDO pass reads the surface itself (blocks are
+  `scripts/compete_astc.py` grades them against Intel ISPC and Arm's astcenc (on the 24 Kodak images, effort 0
+  beats ISPC fast in PSNR and SSIM in less time, and some effort beats each astcenc preset, fast to thorough,
+  in PSNR and SSIM in less time, at all three footprints). CPU only; its RDO pass reads the surface itself (blocks are
   not 4x4).
 - An RDO pass shared by all formats, with an LZ rate model, smooth-block protection, a per-block error cap,
   and a real-Zstd check that reverts any chunk RDO didn't shrink.

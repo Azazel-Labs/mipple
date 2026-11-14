@@ -654,59 +654,70 @@ R11 from the red channel and RG11 from red and green, PSNR over those channels:
 
 ## ASTC vs ISPC and astcenc
 
-ASTC LDR on all 24 Kodak images, top level only, on a throwaway GitHub Actions runner (AMD EPYC 9V45, 4
-logical CPUs) with every encoder on one thread pinned to CPU 1: `gh workflow run bench.yml -f head=<sha>
--f efforts=0,1,2,5 -f runs=2` (`.github/workflows/bench.yml`, which runs `scripts/compete_astc.py`). The
-encoders are mipple 8631eda; Intel's ISPC Texture Compressor 79ddbc9 built with ISPC 1.32.0 (`ispc_astc:<W>x<H>`
-in `bcn_harness`, its fast profile, the only ASTC profile it has for opaque images); and Arm's astcenc 5.7.1
-(the prebuilt AVX2 release, `-cl`, presets fast / medium / thorough). All encode for linear decoding and are
-scored by `mipple score --astc-linear`: PSNR over RGB, luma SSIM, and bits/texel after Zstd-19 and Deflate-9.
-Time is the sum over the images of each image's best of two runs: mipple's encode loop, the harness's block
-loop, astcenc's own "Coding time" line (none include loading or writing files). Runner CPUs differ from run to
-run, so times compare only within one run; this table is one run:
+ASTC LDR on all 24 Kodak images, top level only, on a throwaway GitHub Actions runner (AMD EPYC 9V74, 4
+logical CPUs) with every encoder on one thread pinned to CPU 1: `gh workflow run bench.yml -f head=<full sha>
+-f efforts=0,1,2,3,4,5,6,7 -f astcenc=fast,medium,thorough -f runs=3` (`.github/workflows/bench.yml`, which
+runs `scripts/compete_astc.py`). The encoders are mipple 6727c53; Intel's ISPC Texture Compressor 79ddbc9 built
+with ISPC 1.32.0 (`ispc_astc:<W>x<H>` in `bcn_harness`, its fast profile, the only ASTC profile it has for
+opaque images); and Arm's astcenc 5.7.1 (the prebuilt AVX2 release, `-cl`, presets fast / medium / thorough).
+All encode for linear decoding and are scored by `mipple score --astc-linear`: PSNR over RGB, luma SSIM, and
+bits/texel after Zstd-19 and Deflate-9. Time is the sum over the images of each image's best of three runs:
+mipple's encode loop, the harness's block loop, astcenc's own "Coding time" line (none include loading or
+writing files). Runner CPUs differ from run to run, so times compare only within one run; this table is one
+run:
 
 | footprint | encoder | PSNR dB | SSIM | Zstd-19 bpt | Deflate-9 bpt | time s |
 | --- | --- | ---: | ---: | ---: | ---: | ---: |
-| 4x4 | ISPC fast | 43.790 | 0.99677 | 7.286 | 7.431 | 1.29 |
-| 4x4 | astcenc fast | 44.580 | 0.99722 | 7.216 | 7.362 | 1.96 |
-| 4x4 | astcenc medium | 45.223 | 0.99750 | 7.363 | 7.483 | 8.69 |
-| 4x4 | astcenc thorough | 45.472 | 0.99759 | 7.453 | 7.560 | 22.82 |
-| 4x4 | mipple effort 0 | 44.555 | 0.99746 | 7.092 | 7.262 | 1.29 |
-| 4x4 | mipple effort 1 | 45.041 | 0.99760 | 7.290 | 7.432 | 4.15 |
-| 4x4 | mipple effort 2 | 45.122 | 0.99763 | 7.302 | 7.440 | 5.38 |
-| 4x4 | mipple effort 5 | 45.312 | 0.99764 | 7.349 | 7.474 | 18.68 |
-| 6x6 | ISPC fast | 37.563 | 0.98365 | 3.332 | 3.368 | 0.95 |
-| 6x6 | astcenc fast | 37.657 | 0.98337 | 3.205 | 3.262 | 1.53 |
-| 6x6 | astcenc medium | 38.218 | 0.98561 | 3.298 | 3.340 | 5.19 |
-| 6x6 | astcenc thorough | 38.451 | 0.98664 | 3.384 | 3.407 | 23.04 |
-| 6x6 | mipple effort 0 | 37.690 | 0.98536 | 3.290 | 3.336 | 1.01 |
-| 6x6 | mipple effort 1 | 37.999 | 0.98574 | 3.338 | 3.372 | 2.52 |
-| 6x6 | mipple effort 2 | 38.084 | 0.98590 | 3.344 | 3.377 | 3.25 |
-| 6x6 | mipple effort 5 | 38.252 | 0.98619 | 3.359 | 3.387 | 10.58 |
-| 8x8 | ISPC fast | 33.650 | 0.95837 | 1.881 | 1.896 | 0.85 |
-| 8x8 | astcenc fast | 33.682 | 0.95448 | 1.742 | 1.770 | 1.71 |
-| 8x8 | astcenc medium | 34.404 | 0.96329 | 1.843 | 1.863 | 6.20 |
-| 8x8 | astcenc thorough | 34.635 | 0.96589 | 1.917 | 1.926 | 23.05 |
-| 8x8 | mipple effort 0 | 33.932 | 0.96256 | 1.881 | 1.898 | 0.89 |
-| 8x8 | mipple effort 1 | 34.170 | 0.96339 | 1.901 | 1.914 | 1.99 |
-| 8x8 | mipple effort 2 | 34.248 | 0.96374 | 1.903 | 1.916 | 2.64 |
-| 8x8 | mipple effort 5 | 34.413 | 0.96452 | 1.910 | 1.921 | 7.87 |
+| 4x4 | ISPC fast | 43.790 | 0.99677 | 7.286 | 7.431 | 1.80 |
+| 4x4 | astcenc fast | 44.580 | 0.99722 | 7.216 | 7.362 | 2.45 |
+| 4x4 | astcenc medium | 45.223 | 0.99750 | 7.363 | 7.483 | 11.03 |
+| 4x4 | astcenc thorough | 45.472 | 0.99759 | 7.453 | 7.560 | 29.12 |
+| 4x4 | mipple effort 0 | 44.555 | 0.99746 | 7.091 | 7.260 | 1.63 |
+| 4x4 | mipple effort 1 | 44.784 | 0.99753 | 7.196 | 7.348 | 2.04 |
+| 4x4 | mipple effort 2 | 45.417 | 0.99778 | 7.400 | 7.521 | 8.27 |
+| 4x4 | mipple effort 3 | 45.526 | 0.99781 | 7.426 | 7.542 | 12.68 |
+| 4x4 | mipple effort 4 | 45.661 | 0.99784 | 7.436 | 7.549 | 23.00 |
+| 4x4 | mipple effort 5 | 45.741 | 0.99786 | 7.463 | 7.570 | 38.47 |
+| 4x4 | mipple effort 6 | 45.779 | 0.99787 | 7.470 | 7.575 | 49.37 |
+| 4x4 | mipple effort 7 | 45.825 | 0.99789 | 7.488 | 7.589 | 82.53 |
+| 6x6 | ISPC fast | 37.563 | 0.98365 | 3.332 | 3.368 | 1.37 |
+| 6x6 | astcenc fast | 37.657 | 0.98337 | 3.205 | 3.262 | 2.00 |
+| 6x6 | astcenc medium | 38.218 | 0.98561 | 3.298 | 3.340 | 6.87 |
+| 6x6 | astcenc thorough | 38.451 | 0.98664 | 3.384 | 3.407 | 30.63 |
+| 6x6 | mipple effort 0 | 37.659 | 0.98530 | 3.287 | 3.334 | 1.22 |
+| 6x6 | mipple effort 1 | 38.019 | 0.98608 | 3.370 | 3.399 | 2.26 |
+| 6x6 | mipple effort 2 | 38.324 | 0.98681 | 3.386 | 3.411 | 5.73 |
+| 6x6 | mipple effort 3 | 38.397 | 0.98697 | 3.392 | 3.415 | 8.46 |
+| 6x6 | mipple effort 4 | 38.455 | 0.98709 | 3.393 | 3.416 | 12.50 |
+| 6x6 | mipple effort 5 | 38.561 | 0.98722 | 3.398 | 3.420 | 25.88 |
+| 6x6 | mipple effort 6 | 38.592 | 0.98726 | 3.400 | 3.422 | 32.42 |
+| 6x6 | mipple effort 7 | 38.628 | 0.98729 | 3.405 | 3.425 | 50.50 |
+| 8x8 | ISPC fast | 33.650 | 0.95837 | 1.881 | 1.896 | 1.24 |
+| 8x8 | astcenc fast | 33.682 | 0.95448 | 1.742 | 1.770 | 2.43 |
+| 8x8 | astcenc medium | 34.404 | 0.96329 | 1.843 | 1.863 | 8.83 |
+| 8x8 | astcenc thorough | 34.635 | 0.96589 | 1.917 | 1.926 | 32.87 |
+| 8x8 | mipple effort 0 | 33.913 | 0.96247 | 1.879 | 1.897 | 1.12 |
+| 8x8 | mipple effort 1 | 34.178 | 0.96369 | 1.912 | 1.923 | 1.96 |
+| 8x8 | mipple effort 2 | 34.430 | 0.96520 | 1.919 | 1.928 | 4.88 |
+| 8x8 | mipple effort 3 | 34.499 | 0.96564 | 1.922 | 1.931 | 7.11 |
+| 8x8 | mipple effort 4 | 34.557 | 0.96600 | 1.923 | 1.931 | 10.48 |
+| 8x8 | mipple effort 5 | 34.643 | 0.96635 | 1.925 | 1.933 | 21.28 |
+| 8x8 | mipple effort 6 | 34.671 | 0.96651 | 1.926 | 1.934 | 26.27 |
+| 8x8 | mipple effort 7 | 34.709 | 0.96666 | 1.928 | 1.935 | 39.12 |
 
-Against ISPC fast, effort 0 is 0.77 / 0.13 / 0.28 dB ahead at 4x4 / 6x6 / 8x8 with higher SSIM. It takes the
-same time at 4x4 and 6% / 5% more at 6x6 / 8x8. Its files are 2.7% / 1.3% smaller after Zstd at 4x4 / 6x6
-and the same size at 8x8. Above 16 texels, effort 0 encodes one candidate with two polish passes and skips
-base+offset and base+scale endpoints for the candidate's weights: on the tiled Kodak image, that is 16% / 7%
-less time than the previous settings at 6x6 / 8x8 for 0.10 / 0.03 dB.
+Every astcenc preset is beaten in PSNR and SSIM, in less time, at every footprint:
 
-Against astcenc fast, effort 0 takes 66% / 66% / 52% of its time and leads in SSIM at every footprint. It is
-0.025 dB behind in PSNR at 4x4 with files 1.7% smaller, and 0.03 / 0.25 dB ahead at 6x6 / 8x8 with files 2.7%
-/ 8.0% larger. Effort 1 beats astcenc fast by 0.46 / 0.34 / 0.49 dB in 2.1× / 1.6× / 1.2× its time. astcenc
-medium leads effort 2 by 0.10 / 0.13 / 0.16 dB in 1.6× / 1.6× / 2.3× effort 2's time; effort 5 is 0.09 / 0.03
-/ 0.01 dB ahead of medium in 2.1× / 2.0× / 1.3× medium's time. astcenc thorough has the highest PSNR at every
-footprint, 0.16 / 0.20 / 0.22 dB above effort 5 in 1.2× / 2.2× / 2.9× effort 5's time, and the highest SSIM at
-6x6 and 8x8; at 4x4, efforts 1-5 have higher SSIM than every astcenc preset. At 4x4, effort 2's files are 0.8%
-/ 2.0% smaller than medium's / thorough's; at 6x6 and 8x8, efforts 2 and 5 are 1.4-3.6% larger than medium's
-and 0.4-1.2% smaller than thorough's.
+- **fast:** effort 1 at 4x4 (+0.20 dB in 83% of its time; effort 0 is 0.025 dB behind in 67% with files 1.7%
+  smaller), effort 0 at 6x6 (+0.002 dB, SSIM 0.98530 against 0.98337, in 61%) and at 8x8 (+0.23 dB in 46%).
+  astcenc fast's files are smaller after Zstd at 6x6 and 8x8 (effort 0's are 2.6% / 7.9% larger).
+- **medium:** effort 2, +0.19 / +0.11 / +0.03 dB at 4x4 / 6x6 / 8x8 in 75% / 83% / 55% of its time; files
+  0.5% / 2.7% / 4.1% larger after Zstd.
+- **thorough:** effort 3 at 4x4 (+0.05 dB in 44% of its time, files 0.4% smaller), effort 4 at 6x6 (+0.004
+  dB in 41%, files 0.3% larger) and effort 5 at 8x8 (+0.008 dB in 65%, files 0.4% larger). Effort 7 leads it
+  by 0.35 / 0.18 / 0.07 dB in 2.8× / 1.6× / 1.2× its time.
+
+Against ISPC fast, effort 0 is 0.77 / 0.10 / 0.26 dB ahead at 4x4 / 6x6 / 8x8 with higher SSIM, in 91% / 89%
+/ 90% of its time, with files 2.7% / 1.4% / 0.1% smaller after Zstd.
 
 Scoring astcenc's files exposed a decoder bug, fixed: a 2- or 3-partition block may spell equal CEMs the long
 way (with the extra CEM bits below the weights), and the decoder read those blocks with the short form's
