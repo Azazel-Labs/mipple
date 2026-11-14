@@ -1,0 +1,59 @@
+# mipple vs Oodle Texture 2.9.16 at equal RMSE and SSIM (scripts/ue_oodle/compare.py) on a fresh
+# GitHub-hosted VM, from Oodle's committed scores (bench-results/oodle-ue/results.json): re-runs only
+# mipple's lambda sweep, with optional extra encoder arguments. For checking what a speed or quality
+# setting does to the lead over Oodle; several can run at once.
+#
+# gh workflow run oodle.yml -f ref=<sha> -f args="--refine-back 128" -f formats=bc7
+name: Oodle
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Ref to build
+        default: main
+      args:
+        description: Extra mipple encode arguments
+        default: ""
+      formats:
+        description: Space-separated formats (bc1 bc7 bc4 bc5)
+        default: bc7
+
+permissions:
+  contents: read
+
+jobs:
+  oodle:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 300
+    env:
+      ARGS: ${{ inputs.args }}
+      FORMATS: ${{ inputs.formats }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --release --locked
+      - uses: actions/cache@v6
+        with:
+          path: test-images/kodak
+          key: kodak-24
+      - name: Fetch Kodak
+        run: bash scripts/fetch-kodak.sh
+      - name: Compare
+        run: |
+          python3 -m pip install -q --break-system-packages numpy pillow
+          read -ra fmts <<< "$FORMATS"
+          python3 scripts/ue_oodle/compare.py --scores bench-results/oodle-ue/results.json --formats "${fmts[@]}" \
+            --exe target/release/mipple --jobs "$(nproc)" --mipple-args="$ARGS" --out out --work work
+          {
+            echo "- ref \`$(git rev-parse --short HEAD)\`, args \`$ARGS\`"
+            echo
+            cat out/summary.md
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: oodle
+          path: out
