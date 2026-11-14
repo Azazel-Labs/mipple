@@ -111,6 +111,9 @@ Open for v0.9.x:
     −1.2% / −1.6% minimum leads, and deferral 0.1 1.26× / 1.29× for −1.3% / −1.7%.
   - Kept: masked 128-bit block compares instead of runtime-length slice compares (`bcmp`), byte-identical,
     1.4-2.2% less time (cloud A/B).
+  - Kept: the ranker prefilter keeps each top-8 list sorted by insertion, with an exact cut-off, instead of a
+    32-entry buffer trimmed by selection, so more SIMD lanes skip the test: byte-identical, 2.3-2.5% less time
+    (cloud A/B).
   - Tooling: `.github/workflows/ab.yml` (paired timing, `head_args` to time one build against itself with other
     settings), `profile.yml` (perf on one pinned core) and `oodle.yml` (the Oodle table re-run with extra
     arguments) run on fresh GitHub-hosted VMs, so speed and quality settings can be checked off the dev machine.
