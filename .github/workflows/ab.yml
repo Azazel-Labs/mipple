@@ -1,0 +1,84 @@
+# A/B timing of two mipple builds on a fresh GitHub-hosted VM: the same encodes, one thread pinned to
+# CPU 1, the builds taking turns per image, every pair of outputs compared byte for byte
+# (scripts/ab_time.py). For speed changes meant to keep the output, including the RDO passes.
+#
+# Configurations are separated by `;`, each `EXT|ARGS` (the arguments after `encode IMG -o OUT`).
+# Running with base = head measures the run's own noise.
+#
+# gh workflow run ab.yml -f head=<sha> -f base=<sha> -f configs="dds|-f bc7 -l 1 --no-mips"
+name: AB
+on:
+  workflow_dispatch:
+    inputs:
+      head:
+        description: Ref to measure
+        default: main
+      base:
+        description: Ref to compare against
+        required: true
+      configs:
+        description: "`;`-separated EXT|ARGS"
+        default: "dds|-f bc7 -l 1 --no-mips"
+      images:
+        description: Kodak images (first N of 24)
+        default: "24"
+      runs:
+        description: Best of N timings per image
+        default: "3"
+
+permissions:
+  contents: read
+
+jobs:
+  ab:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 300
+    env:
+      HEAD: ${{ inputs.head }}
+      BASE: ${{ inputs.base }}
+      CONFIGS: ${{ inputs.configs }}
+      IMAGES: ${{ inputs.images }}
+      RUNS: ${{ inputs.runs }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.head }}
+          path: head
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.base }}
+          path: base
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: head
+      - name: Build
+        run: |
+          mkdir bin
+          (cd head && cargo build --release --locked) && cp head/target/release/mipple bin/mipple-head
+          (cd base && cargo build --release --locked) && cp base/target/release/mipple bin/mipple-base
+      - uses: actions/cache@v6
+        with:
+          path: head/test-images/kodak
+          key: kodak-24
+      - name: Fetch Kodak
+        run: bash head/scripts/fetch-kodak.sh
+      - name: Run
+        run: |
+          args=()
+          IFS=';' read -ra cfgs <<< "$CONFIGS"
+          for c in "${cfgs[@]}"; do args+=(--config "$c"); done
+          {
+            echo "## A/B: Kodak (first $IMAGES), one thread pinned to CPU 1, best of $RUNS"
+            echo
+            echo "- CPU: $(lscpu | sed -n 's/^Model name: *//p'), $(nproc) logical CPUs"
+            echo "- head: \`$HEAD\` ($(git -C head rev-parse --short HEAD)), base: \`$BASE\` ($(git -C base rev-parse --short HEAD))"
+            echo
+          } > summary.md
+          python3 head/scripts/ab_time.py head/test-images/kodak --base bin/mipple-base --head bin/mipple-head \
+            --cpu 1 --runs "$RUNS" --limit "$IMAGES" --out out "${args[@]}" | tee -a summary.md
+          cat summary.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ab
+          path: summary.md
