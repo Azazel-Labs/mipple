@@ -2393,7 +2393,7 @@ fn optimize_chunk(
             for (c, known) in &cands {
                 // Different previous blocks often yield the same candidate (e.g. a copied span
                 // they share); within one block the model is unchanged, so a repeat scores the same.
-                if same_bytes(&c, &base, 0, n) || !seen.insert(c) {
+                if same_bytes(c, &base, 0, n) || !seen.insert(c) {
                     continue;
                 }
                 let t = thr(&best, &runner);
@@ -3156,7 +3156,7 @@ mod tests {
                 t_gen += t0.elapsed();
                 n_gen += cands.len();
                 for (ci, (c, known)) in cands.iter().enumerate() {
-                    if same_bytes(&c, &base, 0, n) || !seen.insert(c) {
+                    if same_bytes(c, &base, 0, n) || !seen.insert(c) {
                         n_dup += 1;
                         continue;
                     }
