@@ -38,7 +38,50 @@ const PASSES: usize = 1;
 /// and grid.
 struct Prev {
     bytes: [u8; 16],
-    sym: Option<Box<(Symbolic, Layout, usize)>>,
+    sym: Option<Box<PrevSym>>,
+}
+
+/// An earlier block's fields, labels and grid, and what refitting endpoints to its weights needs
+/// from it alone (`None` if its mode leaves no range for the refitted endpoints).
+struct PrevSym {
+    sym: Symbolic,
+    lay: Layout,
+    gi: usize,
+    /// Each partition's decoded endpoints.
+    eps: [([i32; 4], [i32; 4]); 3],
+    refit: Option<RefitBase>,
+}
+
+/// The parts of a refit onto an earlier block's weights that do not depend on the texels: the
+/// weights infilled to the texels, the endpoint mode and range written, and each partition's and
+/// plane's texel count, weight sum and squared weight sum.
+struct RefitBase {
+    w: [[u8; MAX_TEXELS]; 2],
+    cem: u8,
+    color_quant: u8,
+    sums: [[[i32; 3]; 2]; 3],
+}
+
+/// The current block's per-channel texel sums and squared sums, over all its texels.
+struct BlockSums {
+    sx: [i32; 4],
+    sxx: [i32; 4],
+}
+
+impl BlockSums {
+    fn of(t: &Texels) -> Self {
+        let mut b = BlockSums {
+            sx: [0; 4],
+            sxx: [0; 4],
+        };
+        for c in 0..4 {
+            for &x in &t.xl[c][..t.n] {
+                b.sx[c] += x as i32;
+                b.sxx[c] += x as i32 * x as i32;
+            }
+        }
+        b
+    }
 }
 
 /// One block's texels for the error kernels, all four channels counted (a copied block may carry
@@ -93,7 +136,7 @@ fn layout_of(fp: &Footprint, sym: &Symbolic) -> Layout {
 /// `bytes`' fields, labels and grid, if the candidates can build on them: up to three partitions,
 /// each luminance (0), direct (8, 12), base+offset (9, 13) or base+scale (6, 10), as the encoder
 /// writes.
-fn prev_sym(fp: &Footprint, bytes: [u8; 16]) -> Option<Box<(Symbolic, Layout, usize)>> {
+fn prev_sym(fp: &Footprint, bytes: [u8; 16]) -> Option<Box<PrevSym>> {
     let sym = Symbolic::read(u128::from_le_bytes(bytes), fp.bw, fp.bh)?;
     let p = sym.partitions as usize;
     if p > 3
@@ -108,36 +151,136 @@ fn prev_sym(fp: &Footprint, bytes: [u8; 16]) -> Option<Box<(Symbolic, Layout, us
         .iter()
         .position(|g| g.gx == sym.mode.gx && g.gy == sym.mode.gy)?;
     let lay = layout_of(fp, &sym);
-    Some(Box::new((sym, lay, gi)))
+    let refit = refit_base(fp, &lay, gi, &sym);
+    let mut eps = [([0i32; 4], [0i32; 4]); 3];
+    for (q, e) in eps.iter_mut().enumerate().take(p) {
+        *e = sym_endpoints(&sym, q);
+    }
+    Some(Box::new(PrevSym {
+        sym,
+        lay,
+        gi,
+        eps,
+        refit,
+    }))
+}
+
+/// The texel-independent parts of refitting endpoints to `sym`'s weights (see [`RefitBase`]).
+fn refit_base(fp: &Footprint, lay: &Layout, gi: usize, sym: &Symbolic) -> Option<RefitBase> {
+    let grid = &fp.grids[gi];
+    let wu = &WEIGHT_UNQUANT[sym.mode.quant as usize];
+    let planes = 1 + sym.mode.dual as usize;
+    let kk = grid.rev.len() * planes;
+    let mut g = [0u8; 64];
+    for j in 0..kk {
+        g[j] = wu[sym.weights[j] as usize];
+    }
+    let mut w = [[0u8; MAX_TEXELS]; 2];
+    for (pl, wp) in w.iter_mut().enumerate().take(planes) {
+        infill(grid, &g, planes, pl, wp);
+    }
+    // Refitted endpoints are written direct: RGB (CEM 8) for RGB heads, RGBA (CEM 12) for the rest.
+    let p = sym.partitions as usize;
+    let cem = if sym.cems[..p].iter().all(|c| matches!(c, 0 | 6 | 8 | 9)) {
+        8
+    } else {
+        12
+    };
+    let color_quant = if sym.cems[..p].iter().any(|&c| c != cem) {
+        color_range(sym.mode, sym.partitions, &[cem; 4])?
+    } else {
+        sym.color_quant
+    };
+    let mut sums = [[[0i32; 3]; 2]; 3];
+    for i in 0..fp.texels() {
+        let s = &mut sums[lay.labels[i] as usize];
+        for (pl, wp) in w.iter().enumerate() {
+            let wi = wp[i] as i32;
+            s[pl][0] += 1;
+            s[pl][1] += wi;
+            s[pl][2] += wi * wi;
+        }
+    }
+    Some(RefitBase {
+        w,
+        cem,
+        color_quant,
+        sums,
+    })
 }
 
 /// `sym` with weights chosen for `t`: each texel projected onto its partition's endpoint segment,
 /// decimated to the grid, quantized and polished with the endpoints held. Returns it and its error,
 /// or `None` if no weights for these endpoints can bring the error down to `max_err`.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the earlier block's parts and the texels' sums"
+)]
 fn reweight(
     fp: &Footprint,
     t: &Texels,
     lay: &Layout,
     gi: usize,
     sym: &Symbolic,
+    eps: &[([i32; 4], [i32; 4]); 3],
+    bs: &BlockSums,
     max_err: f32,
 ) -> Option<(Symbolic, u32)> {
     let grid = &fp.grids[gi];
     let n = t.n;
     let planes = 1 + sym.mode.dual as usize;
     let ccs = lay.ccs;
-    let mut eps = [([0i32; 4], [0i32; 4]); 3];
-    let mut inv = [0f32; 3];
-    for p in 0..lay.count as usize {
-        eps[p] = sym_endpoints(sym, p);
-        let (e0, e1) = eps[p];
-        let len2: i32 = (0..4).filter(|&c| c != ccs).map(|c| (e1[c] - e0[c]).pow(2)).sum();
-        inv[p] = if len2 > 0 { 64.0 / len2 as f32 } else { 0.0 };
-    }
+    let count = lay.count as usize;
     // A texel decodes to its weight's point on the segment rounded per channel, within 0.5 of it
     // in each channel: so within `slack` of the segment over the first plane's channels, and its
     // error is at least its distance from the segment less that.
     let slack = if ccs < NO_CCS { 0.75f32.sqrt() } else { 1.0 };
+    // That bound, (distance - slack)^2 where positive, is convex in the texel, so over a partition
+    // it is at least its texel count times its value at their mean: checked first, from sums.
+    let mut sx = [[0i32; 4]; 3];
+    let mut m = [0i32; 3];
+    if count == 1 {
+        sx[0] = bs.sx;
+        m[0] = n as i32;
+    } else {
+        for i in 0..n {
+            let l = lay.labels[i] as usize;
+            m[l] += 1;
+            for c in 0..4 {
+                sx[l][c] += t.xl[c][i] as i32;
+            }
+        }
+    }
+    let mut mean_lb = 0f64;
+    for p in 0..count {
+        if m[p] == 0 {
+            continue;
+        }
+        let (e0, e1) = eps[p];
+        let mu: [f64; 4] = std::array::from_fn(|c| sx[p][c] as f64 / m[p] as f64);
+        let (mut dot, mut len2) = (0f64, 0f64);
+        for c in (0..4).filter(|&c| c != ccs) {
+            let d = (e1[c] - e0[c]) as f64;
+            dot += (mu[c] - e0[c] as f64) * d;
+            len2 += d * d;
+        }
+        let f = if len2 > 0.0 { (dot / len2).clamp(0.0, 1.0) } else { 0.0 };
+        let d2: f64 = (0..4)
+            .filter(|&c| c != ccs)
+            .map(|c| (mu[c] - e0[c] as f64 - f * (e1[c] - e0[c]) as f64).powi(2))
+            .sum();
+        mean_lb += m[p] as f64 * (d2.sqrt() - slack as f64).max(0.0).powi(2);
+    }
+    // A little under, for the per-texel bound's float rounding: this only skips what it rejects.
+    if mean_lb * 0.999 - 0.01 > max_err as f64 {
+        return None;
+    }
+    let mut inv = [0f32; 3];
+    for p in 0..count {
+        let (e0, e1) = eps[p];
+        let len2: i32 = (0..4).filter(|&c| c != ccs).map(|c| (e1[c] - e0[c]).pow(2)).sum();
+        inv[p] = if len2 > 0 { 64.0 / len2 as f32 } else { 0.0 };
+    }
     let mut lb = 0f32;
     let mut u = [0f32; MAX_TEXELS];
     let mut u2 = [0f32; MAX_TEXELS];
@@ -185,62 +328,60 @@ fn reweight(
 /// `sym` with endpoints refitted to `t` for its weights, quantized and polished with the weights
 /// held. Returns it and its error, or `None` if no endpoints for these weights can bring the error
 /// down to `max_err`.
+#[expect(clippy::too_many_arguments, reason = "the earlier block's parts and the texels' sums")]
 fn refit_to(
     fp: &Footprint,
     t: &Texels,
     lay: &Layout,
     gi: usize,
     sym: &Symbolic,
+    rb: &RefitBase,
+    bs: &BlockSums,
     max_err: f32,
 ) -> Option<(Symbolic, u32)> {
     let grid = &fp.grids[gi];
     let tb = tables();
-    let wu = &WEIGHT_UNQUANT[sym.mode.quant as usize];
-    let planes = 1 + sym.mode.dual as usize;
-    let kk = grid.rev.len() * planes;
-    let mut g = [0u8; 64];
-    for j in 0..kk {
-        g[j] = wu[sym.weights[j] as usize];
-    }
-    let mut w = [[0u8; MAX_TEXELS]; 2];
-    for (pl, wp) in w.iter_mut().enumerate().take(planes) {
-        infill(grid, &g, planes, pl, wp);
-    }
-    // Refitted endpoints are written direct: RGB (CEM 8) for RGB heads, RGBA (CEM 12) for the rest.
+    let w = &rb.w;
+    let cem = rb.cem;
     let p = sym.partitions as usize;
-    let cem = if sym.cems[..p].iter().all(|c| matches!(c, 0 | 6 | 8 | 9)) {
-        8
-    } else {
-        12
-    };
     let mut out = sym.clone();
     if sym.cems[..p].iter().any(|&c| c != cem) {
         out.cems = [cem; 4];
-        out.color_quant = color_range(sym.mode, sym.partitions, &out.cems)?;
+        out.color_quant = rb.color_quant;
     }
     let cq = out.color_quant as usize;
     let (cqt, cu) = (&tb.cq[cq], &COLOR_UNQUANT[cq]);
     let nv = if cem == 12 { 4 } else { 3 };
     // With the weights held, no endpoints fit better than each channel's least-squares line (not
     // clamped to the color range), and decoding moves each texel at most 0.5 per channel from its
-    // line point, so at most sqrt(n) over the block.
-    let mut sums = [[[0f64; 6]; 4]; 3];
-    for i in 0..t.n {
-        let s = &mut sums[lay.labels[i] as usize];
-        for c in 0..4 {
-            let (x, wi) = (t.px[i][c] as f64, if c == lay.ccs { w[1][i] } else { w[0][i] } as f64);
-            let a = &mut s[c];
-            a[0] += 1.0;
-            a[1] += wi;
-            a[2] += wi * wi;
-            a[3] += x;
-            a[4] += x * wi;
-            a[5] += x * x;
+    // line point, so at most sqrt(n) over the block. The weights' sums are the earlier block's;
+    // only the texels' products with them (and, with partitions, the texels' sums) are per pair.
+    let count = lay.count as usize;
+    let mut sx = [[0i32; 4]; 3];
+    let mut sxx = [[0i32; 4]; 3];
+    let mut sxw = [[0i32; 4]; 3];
+    for c in 0..4 {
+        let wp = &w[(c == lay.ccs) as usize][..t.n];
+        let xs = &t.xl[c][..t.n];
+        if count == 1 {
+            sx[0][c] = bs.sx[c];
+            sxx[0][c] = bs.sxx[c];
+            sxw[0][c] = xs.iter().zip(wp).map(|(&x, &wi)| x as i32 * wi as i32).sum();
+        } else {
+            for (i, (&x, &wi)) in xs.iter().zip(wp).enumerate() {
+                let (x, l) = (x as i32, lay.labels[i] as usize);
+                sx[l][c] += x;
+                sxx[l][c] += x * x;
+                sxw[l][c] += x * wi as i32;
+            }
         }
     }
     let mut res = 0f64;
-    for s in &sums[..lay.count as usize] {
-        for (c, &[n, sw, sww, sx, sxw, sxx]) in s.iter().enumerate() {
+    for pi in 0..count {
+        for c in 0..4 {
+            let ws = &rb.sums[pi][(c == lay.ccs) as usize];
+            let (n, sw, sww) = (ws[0] as f64, ws[1] as f64, ws[2] as f64);
+            let (sx, sxw, sxx) = (sx[pi][c] as f64, sxw[pi][c] as f64, sxx[pi][c] as f64);
             res += if cem == 8 && c == 3 {
                 // RGB endpoints decode alpha to 255.
                 sxx - 510.0 * sx + 65025.0 * n
@@ -348,6 +489,8 @@ fn optimize_chunk(
     };
     let mut prevs: Vec<Prev> = Vec::with_capacity(count);
     let mut decs: Vec<Rgba> = vec![[0; 4]; count * n];
+    // Each chosen block's decoded channel sums.
+    let mut dsums: Vec<[i32; 4]> = Vec::with_capacity(count);
     let mut px = vec![[0u8; 4]; n];
     let mut dec = [[0u8; 4]; MAX_TEXELS];
     let mut seen: HashSet<u128> = HashSet::new();
@@ -357,6 +500,7 @@ fn optimize_chunk(
         let bi = first + i;
         read_block(s, bw, bh, (bi % nx) as u32, (bi / nx) as u32, &mut px);
         let t = texels(&px);
+        let bs = BlockSums::of(&t);
         let smooth = smooth_factor(&px, p);
         let score = |err: u64, bits: f32| smooth * err as f64 / 16.0 + lambda * bits as f64;
         let base: [u8; 16] = data[i * 16..i * 16 + 16].try_into().unwrap();
@@ -389,6 +533,13 @@ fn optimize_chunk(
         for d in 1..=max_back.min(i) {
             let j = i - d;
             if seen.insert(u128::from_le_bytes(prevs[j].bytes)) {
+                // The error is at least each channel's summed difference squared over the texels
+                // (Cauchy-Schwarz): too much, and `consider` would reject it, so skip the decode.
+                let lb =
+                    (0..4).map(|c| ((bs.sx[c] - dsums[j][c]) as f64).powi(2)).sum::<f64>() / n as f64 * (1.0 - 1e-9);
+                if lb > limit as f64 || smooth * lb / 16.0 >= best.0 {
+                    continue;
+                }
                 consider(prevs[j].bytes, sse(&px, &decs[j * n..j * n + n]), &mut best);
             }
         }
@@ -397,7 +548,13 @@ fn optimize_chunk(
         for d in 1..=REFIT_BACK.min(i) {
             let j = i - d;
             let Some(ps) = &prevs[j].sym else { continue };
-            let (sym, lay, gi) = &**ps;
+            let PrevSym {
+                sym,
+                lay,
+                gi,
+                eps,
+                refit,
+            } = &**ps;
             let v = u128::from_le_bytes(prevs[j].bytes);
             let below = 128 - sym.mode.weight_bits();
             let config = if sym.partitions == 1 { 17 } else { 29 };
@@ -408,11 +565,13 @@ fn optimize_chunk(
             let cap = (limit as f64).min(best.0 * 16.0 / smooth) as f32 * 1.001 + 1.0;
             let mut cands = [None, None];
             if heads.insert(v & ((1u128 << below) - 1)) {
-                cands[0] = reweight(fp, &t, lay, *gi, sym, cap);
+                cands[0] = reweight(fp, &t, lay, *gi, sym, eps, &bs, cap);
             }
             let tail = (v & ((1u128 << config) - 1)) | (sym.ccs as u128) << config | (v >> below) << below;
-            if tails.insert(tail) {
-                cands[1] = refit_to(fp, &t, lay, *gi, sym, cap);
+            if tails.insert(tail)
+                && let Some(rb) = refit
+            {
+                cands[1] = refit_to(fp, &t, lay, *gi, sym, rb, &bs, cap);
             }
             for (c, err) in cands.into_iter().flatten() {
                 let Some(b) = c.write() else { continue };
@@ -434,6 +593,9 @@ fn optimize_chunk(
         }
         data[i * 16..i * 16 + 16].copy_from_slice(&best.1);
         decode_block(&best.1, bw, bh, srgb, &mut decs[i * n..i * n + n]);
+        dsums.push(std::array::from_fn(|c| {
+            decs[i * n..i * n + n].iter().map(|d| d[c] as i32).sum()
+        }));
         prevs.push(Prev {
             bytes: best.1,
             sym: prev_sym(fp, best.1),

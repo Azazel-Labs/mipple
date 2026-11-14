@@ -724,30 +724,34 @@ way (with the extra CEM bits below the weights), and the decoder read those bloc
 endpoint range. mipple's own files never use the long form, so earlier mipple scores are unchanged.
 
 RDO at effort 0 on the same images, run locally on one thread pinned to one P-core of the Core Ultra 7 155H
-(logical CPU 16), `mipple bench test-images/kodak -f astc-4x4,astc-6x6,astc-8x8 -l 0,0.5,1,2,4,8 -e 0` with
-`RAYON_NUM_THREADS=1` (mipple 8631eda). Each cell is PSNR dB / SSIM / Zstd-19 bpt; the RDO pass's time is its
-total over the 24 images. The λ 0 rows match the cloud table's effort-0 encodes:
+(logical CPU 4), `mipple bench test-images/kodak -f astc-4x4,astc-6x6,astc-8x8 -l 0,0.5,1,2,4,8 -e 0` with
+`RAYON_NUM_THREADS=1`. Each cell is PSNR dB / SSIM / Zstd-19 bpt; the RDO pass's time is its total over the 24
+images. The λ 0 rows are the cloud table's effort-0 encodes:
 
 | λ | 4x4 | 6x6 | 8x8 |
 | --- | --- | --- | --- |
-| 0 | 44.555 / 0.99746 / 7.092 | 37.690 / 0.98536 / 3.290 | 33.932 / 0.96256 / 1.881 |
-| 0.5 | 43.072 / 0.99357 / 5.120 (59 s) | 37.699 / 0.98449 / 2.945 (45 s) | 34.010 / 0.96264 / 1.756 (42 s) |
-| 1 | 41.566 / 0.98672 / 4.264 (53 s) | 37.511 / 0.98192 / 2.674 (45 s) | 33.975 / 0.96156 / 1.658 (42 s) |
-| 2 | 39.760 / 0.97635 / 3.569 (49 s) | 37.045 / 0.97477 / 2.284 (40 s) | 33.877 / 0.95837 / 1.499 (38 s) |
-| 4 | 37.558 / 0.95934 / 2.954 (47 s) | 36.308 / 0.96480 / 1.960 (38 s) | 33.665 / 0.95201 / 1.326 (36 s) |
-| 8 | 34.853 / 0.92573 / 2.275 (45 s) | 35.078 / 0.94633 / 1.642 (37 s) | 33.249 / 0.94127 / 1.160 (35 s) |
-| ISPC fast | 43.790 / 0.99677 / 7.286 | 37.563 / 0.98365 / 3.332 | 33.650 / 0.95837 / 1.881 |
+| 0 | 44.56 / 0.99746 / 7.091 | 37.66 / 0.98530 / 3.287 | 33.91 / 0.96247 / 1.879 |
+| 0.5 | 43.07 / 0.99357 / 5.121 (65 s) | 37.67 / 0.98444 / 2.940 (40 s) | 33.99 / 0.96256 / 1.755 (34 s) |
+| 1 | 41.56 / 0.98669 / 4.262 (60 s) | 37.48 / 0.98185 / 2.667 (41 s) | 33.96 / 0.96147 / 1.656 (35 s) |
+| 2 | 39.76 / 0.97634 / 3.566 (59 s) | 37.02 / 0.97464 / 2.276 (38 s) | 33.86 / 0.95828 / 1.497 (33 s) |
+| 4 | 37.57 / 0.95926 / 2.952 (58 s) | 36.30 / 0.96467 / 1.954 (37 s) | 33.65 / 0.95195 / 1.323 (31 s) |
+| 8 | 34.87 / 0.92572 / 2.276 (55 s) | 35.09 / 0.94662 / 1.638 (36 s) | 33.24 / 0.94127 / 1.159 (31 s) |
+| ISPC fast | 43.79 / 0.99677 / 7.286 | 37.56 / 0.98365 / 3.332 | 33.65 / 0.95837 / 1.881 |
 
-At ISPC fast's PSNR (interpolated along each λ curve in log rate), mipple's files are 17.7% / 17.6% / 29.8%
-smaller at 4x4 / 6x6 / 8x8 after Zstd-19, and 17.1% / 17.0% / 29.2% smaller after Deflate-9 (ISPC fast: 7.431 /
-3.368 / 1.896 bpt; mipple λ 0: 7.262 / 3.336 / 1.898; λ 1: 4.434 / 2.723 / 1.679). At 6x6 and 8x8, light RDO
-raises PSNR (0.01 / 0.08 dB at λ 0.5): a polished re-weight or refit of an earlier block is sometimes closer
-to the source than effort 0's own encode of the block. The candidates are whole copies of the previous 256
-blocks, an earlier block's head (mode, partition, endpoints) with the weights re-chosen, and an earlier
-block's weights with the endpoints refitted, each polished once; exact error lower bounds skip most of them
-without changing the output. The pass runs on whole surfaces (blocks are not 4x4) and costs 0.9-3.3 s per
-Kodak image on one thread, 16-57× the effort-0 encode; it parallelizes across 16 KiB chunks like the other
-formats' passes.
+At ISPC fast's PSNR (interpolated in log rate along each λ curve's Pareto front), mipple's files are 17.7% /
+16.6% / 29.8% smaller at 4x4 / 6x6 / 8x8 after Zstd-19, and 17.1% / 16.1% / 29.1% smaller after Deflate-9
+(ISPC fast: 7.431 / 3.368 / 1.896 bpt; mipple λ 0: 7.260 / 3.334 / 1.897; λ 1: 4.429 / 2.715 / 1.676). At 6x6
+and 8x8, light RDO raises PSNR (0.01 / 0.08 dB at λ 0.5): a polished re-weight or refit of an earlier block is
+sometimes closer to the source than effort 0's own encode of the block. The candidates are whole copies of the
+previous 256 blocks, an earlier block's head (mode, partition, endpoints) with the weights re-chosen, and an
+earlier block's weights with the endpoints refitted, each polished once. Exact error lower bounds skip most of
+them without changing the output: from each channel's summed difference for a whole copy, from the texels'
+mean distance to each endpoint segment for a re-weight, and from the per-pair least-squares residual for a
+refit, whose weight sums are cached with the earlier block. The pass runs on whole surfaces (blocks are not
+4x4) and costs 0.8-4.1 s per Kodak image on one thread, 13-46× the effort-0 encode; it parallelizes across 16
+KiB chunks like the other formats' passes. The cached refit sums and the re-weight and copy bounds made it
+1.22-1.43× / 1.49-1.75× / 1.70-1.89× faster at 4x4 / 6x6 / 8x8 over the λ range, output byte-identical (6727c53
+on the same core: 67-93 s / 54-71 s / 52-64 s).
 
 ## Lossless field split (`--prep`)
 

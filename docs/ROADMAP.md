@@ -150,8 +150,9 @@ Open for v0.9.x:
   effort 3 / 4 / 5 at 4x4 / 6x6 / 8x8 (41-65% of its time).
   - [x] RDO for ASTC: its own pass over the surface (blocks are not 4x4) with whole-block copies, earlier
     heads re-weighted and earlier weights refitted. On Kodak at λ 1, Zstd size falls 40% / 19% / 12% at
-    4x4 / 6x6 / 8x8, costing 3.0 and 0.18 dB at 4x4 and 6x6 and nothing at 8x8 (PSNR 0.04 dB higher). At
-    ISPC fast's PSNR the files are 17.7% / 17.6% / 29.8% smaller after Zstd (BENCHMARKS.md).
+    4x4 / 6x6 / 8x8, costing 3.0 and 0.18 dB at 4x4 and 6x6 and nothing at 8x8 (PSNR 0.05 dB higher). At
+    ISPC fast's PSNR the files are 17.7% / 16.6% / 29.8% smaller after Zstd. Cached refit sums and exact
+    bounds on re-weights and whole copies made the pass 1.2-1.9× faster, output unchanged (BENCHMARKS.md).
   - [x] Effort 0 faster than ISPC fast at 6x6 and 8x8; close the PSNR gap to astcenc medium / thorough.
   - [ ] Smaller Zstd files at equal effort: at 6x6 / 8x8, effort 2's are 2.7% / 4.1% larger than astcenc
     medium's (for 0.11 / 0.03 dB more), effort 0's 2.6% / 7.9% larger than astcenc fast's.

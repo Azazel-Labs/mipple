@@ -250,6 +250,13 @@ Measured on Kodak images 1-3, single thread, effort 0, unless noted. ISPC fast t
   another 0.3% / 0.5% / 0.7% smaller at equal PSNR at 4x4 / 6x6 / 8x8 for 1.8× the RDO time (one thread,
   one P-core, with the error lower bounds on). 256 against 32 was worth 4.8-6.6% for 2.4×, so the curve
   has flattened; 256 also matches the whole-copy window.
+- **A rate penalty on rare block modes in the plain ASTC encode.** astcenc's files are 4-8% smaller
+  under Zstd, and the block-mode bits are the largest single part of that: its fast preset writes
+  65% of 8x8 blocks in one mode, while mipple spreads them over about 300. Adding a per-mode cost
+  (from a mode histogram) to the candidate score at the final choice alone saves 0.5-0.7% of Zstd
+  size per 0.01-0.04 dB at effort 2. Adding it to the estimate stage as well saves 1.2-1.7% at 8x8 for
+  0.015-0.03 dB. That is too little, and the PSNR it costs is more than the 0.002 dB margin by which
+  effort 0 beats astcenc fast at 6x6. Light RDO (λ 0.05-0.2) wins on both size and PSNR instead.
 
 ## ETC2 / EAC
 
