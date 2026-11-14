@@ -1,0 +1,85 @@
+# CPU profile of one mipple build on a fresh GitHub-hosted VM (perf, sampling cpu-clock), one thread
+# pinned to CPU 1: self time per function and per source line. For finding hot spots when the local
+# machine is busy; confirm a speedup with the AB workflow.
+#
+# gh workflow run profile.yml -f ref=<sha> -f args="-f bc7 -l 1 --no-mips" -f images="kodim05 kodim23"
+name: Profile
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Ref to profile
+        default: main
+      args:
+        description: Arguments after `encode IMG -o OUT`
+        default: "-f bc7 -l 1 --no-mips"
+      ext:
+        description: Output extension
+        default: dds
+      images:
+        description: Space-separated Kodak image names
+        default: "kodim05"
+
+permissions:
+  contents: read
+
+jobs:
+  profile:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 120
+    env:
+      ARGS: ${{ inputs.args }}
+      EXT: ${{ inputs.ext }}
+      IMAGES: ${{ inputs.images }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --release --locked
+      - name: Install perf
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -yq "linux-tools-$(uname -r)" linux-tools-common || sudo apt-get install -yq linux-tools-azure linux-tools-common
+          sudo sysctl -w kernel.perf_event_paranoid=-1 kernel.kptr_restrict=0
+      - uses: actions/cache@v6
+        with:
+          path: test-images/kodak
+          key: kodak-24
+      - name: Fetch Kodak
+        run: bash scripts/fetch-kodak.sh
+      - name: Profile
+        run: |
+          read -ra args <<< "$ARGS"
+          for img in $IMAGES; do
+            RAYON_NUM_THREADS=1 taskset -c 1 perf record -e cpu-clock -F 4000 -o "perf-$img.data" -- \
+              target/release/mipple encode "test-images/kodak/$img.png" -o "out.$EXT" "${args[@]}"
+          done
+          {
+            echo "## Profile: \`$ARGS\` on $IMAGES"
+            echo
+            echo "- CPU: $(lscpu | sed -n 's/^Model name: *//p'), ref \`$(git rev-parse --short HEAD)\`"
+            for img in $IMAGES; do
+              echo
+              echo "### $img: self time by function"
+              echo '```'
+              perf report -i "perf-$img.data" --no-children --sort symbol --percent-limit 0.5 --stdio 2>/dev/null \
+                | grep -v '^#' | sed '/^$/d' | cut -c1-160 | head -60
+              echo '```'
+              echo
+              echo "### $img: self time by source line"
+              echo '```'
+              perf report -i "perf-$img.data" --no-children --sort srcline --percent-limit 0.3 --stdio 2>/dev/null \
+                | grep -v '^#' | sed '/^$/d' | cut -c1-160 | head -80
+              echo '```'
+            done
+          } > summary.md
+          cat summary.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: profile
+          path: |
+            summary.md
+            perf-*.data
