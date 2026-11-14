@@ -144,15 +144,17 @@ Open for v0.9.x:
 - [x] ASTC LDR 4x4, 6x6 and 8x8 (1-3 partitions, dual plane, every weight grid of the footprint), to KTX2
   (sRGB or UNORM) or `.astc`, through the CLI, library, `mipple check` and the web demo, with
   base+offset and base+scale endpoints and per-partition CEMs. On Kodak, one thread on a cloud EPYC
-  (BENCHMARKS.md), effort 0 is 0.77 / 0.13 / 0.28 dB ahead of ISPC fast at 4x4 / 6x6 / 8x8 with higher
-  SSIM, in the same time at 4x4 and 6% / 5% more at 6x6 / 8x8; against astcenc fast it is within 0.03 dB or
-  ahead in PSNR, ahead in SSIM, in 52-66% of its time. astcenc medium leads effort 2 by 0.10-0.16 dB, taking
-  1.6-2.3× effort 2's time; thorough is 0.16-0.22 dB above effort 5.
+  (BENCHMARKS.md, 6727c53), effort 0 is 0.77 / 0.10 / 0.26 dB ahead of ISPC fast at 4x4 / 6x6 / 8x8 with
+  higher SSIM in about 90% of its time, and every astcenc 5.7.1 preset is beaten in PSNR and SSIM in less
+  time: fast by effort 1 at 4x4 and effort 0 above, medium by effort 2 (55-83% of its time), thorough by
+  effort 3 / 4 / 5 at 4x4 / 6x6 / 8x8 (41-65% of its time).
   - [x] RDO for ASTC: its own pass over the surface (blocks are not 4x4) with whole-block copies, earlier
     heads re-weighted and earlier weights refitted. On Kodak at λ 1, Zstd size falls 40% / 19% / 12% at
     4x4 / 6x6 / 8x8, costing 3.0 and 0.18 dB at 4x4 and 6x6 and nothing at 8x8 (PSNR 0.04 dB higher). At
     ISPC fast's PSNR the files are 17.7% / 17.6% / 29.8% smaller after Zstd (BENCHMARKS.md).
-  - [ ] Effort 0 faster than ISPC fast at 6x6 and 8x8; close the PSNR gap to astcenc medium / thorough.
+  - [x] Effort 0 faster than ISPC fast at 6x6 and 8x8; close the PSNR gap to astcenc medium / thorough.
+  - [ ] Smaller Zstd files at equal effort: at 6x6 / 8x8, effort 2's are 2.7% / 4.1% larger than astcenc
+    medium's (for 0.11 / 0.03 dB more), effort 0's 2.6% / 7.9% larger than astcenc fast's.
   - [ ] A GPU kernel, a SIMD batch encoder, other footprints (the decoder already reads every 2D one), HDR.
 - [x] ETC2 / EAC for mobile fallbacks: ETC2 RGB (all five modes), ETC2 RGBA8 and EAC R11 / RG11 (unsigned),
   KTX2 only, with the RDO pass. On Kodak, one thread, effort 0 is 0.37 dB ahead of Compressonator in an
