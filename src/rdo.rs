@@ -83,6 +83,9 @@ pub struct RdoParams {
     /// Localized search (BC4, BC5, BC7): beyond `max_back`, the format's learned ranker
     /// ([`crate::ranker`]) picks this many earlier blocks of the chunk for the full search. `None` picks a per-format default ([`RdoParams::local_k_for`]); 0 disables it.
     pub local_k: Option<usize>,
+    /// BC7 localized search: how many blocks back the ranker's prefilter scans. `None` picks
+    /// 2048 (`LOCAL7_REACH`).
+    pub local_reach: Option<usize>,
     /// Blocks per row of the surface (blocks are in raster order), or 0 when unknown. The
     /// localized search also tries the blocks around the one directly above.
     pub row: usize,
@@ -122,6 +125,7 @@ impl Default for RdoParams {
             verify_zstd_level: Some(19),
             reduce_entropy: false,
             local_k: None,
+            local_reach: None,
             row: 0,
             defer: None,
         }
@@ -2260,7 +2264,7 @@ fn optimize_chunk(
                 rs.prefilter_top(
                     &rblocks7,
                     i,
-                    back + 1..=i.min(LOCAL7_REACH),
+                    back + 1..=i.min(p.local_reach.unwrap_or(LOCAL7_REACH)),
                     LOCAL7_M,
                     &mut pre7,
                     &mut res7,
