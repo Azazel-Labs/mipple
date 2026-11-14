@@ -132,6 +132,9 @@ struct RdoArgs {
     /// BC7 localized search: how many blocks back the ranker's prefilter scans [default: 2048].
     #[arg(long)]
     local_reach: Option<usize>,
+    /// BC7 localized search: blocks each prefilter key passes to the ranker [default: 8].
+    #[arg(long)]
+    local_m: Option<usize>,
     /// Bytes per independently optimized chunk (the unit of parallelism; matches are not
     /// searched across chunks) [default: 65536 for BC7, 16384 otherwise].
     #[arg(long)]
@@ -172,6 +175,7 @@ impl RdoArgs {
             far_back: self.far_back,
             local_k: self.local,
             local_reach: self.local_reach,
+            local_m: self.local_m,
             chunk_bytes: self.chunk_bytes,
             defer: self.defer,
             smooth_scale: self.smooth_scale,

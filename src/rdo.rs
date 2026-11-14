@@ -86,6 +86,9 @@ pub struct RdoParams {
     /// BC7 localized search: how many blocks back the ranker's prefilter scans. `None` picks
     /// 2048 (`LOCAL7_REACH`).
     pub local_reach: Option<usize>,
+    /// BC7 localized search: blocks each prefilter key passes to the ranker. `None` picks 8
+    /// (`LOCAL7_M`).
+    pub local_m: Option<usize>,
     /// Blocks per row of the surface (blocks are in raster order), or 0 when unknown. The
     /// localized search also tries the blocks around the one directly above.
     pub row: usize,
@@ -126,6 +129,7 @@ impl Default for RdoParams {
             reduce_entropy: false,
             local_k: None,
             local_reach: None,
+            local_m: None,
             row: 0,
             defer: None,
         }
@@ -2265,7 +2269,7 @@ fn optimize_chunk(
                     &rblocks7,
                     i,
                     back + 1..=i.min(p.local_reach.unwrap_or(LOCAL7_REACH)),
-                    LOCAL7_M,
+                    p.local_m.unwrap_or(LOCAL7_M),
                     &mut pre7,
                     &mut res7,
                 );
