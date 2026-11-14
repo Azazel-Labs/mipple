@@ -873,8 +873,6 @@ fn round_pos(x: f32) -> usize {
 struct Best {
     err: u32,
     sym: Option<Symbolic>,
-    /// Its layout and grid.
-    at: (usize, usize),
 }
 
 /// Where partition `p`'s endpoint values start in `sym.colors`, and how many it has.
@@ -2215,6 +2213,13 @@ struct Effort {
     /// 0.15 / 0.12 / 0.07 dB at 4x4 / 6x6 / 8x8 at effort 2 for 13-20% more time, 0.20 / 0.14 /
     /// 0.08 dB at effort 5 for 12-25%; at effort 0 (4x4) 0.09 dB for 20%, so not there.
     alts: u8,
+    /// The closest candidates' encodings (after refinement) each polished, the best kept: polish
+    /// reorders them, so the closest before polish is often not the closest after. On the Kodak
+    /// tile (one thread), against polishing only the closest: effort 1 at 6x6 / 8x8 +0.077 /
+    /// +0.055 dB (2 kept) for 16% more time; effort 2 at 4x4 / 8x8 +0.091 / +0.068 dB (4 kept) for
+    /// 17% / 20%; effort 5 at 8x8 +0.085 dB (12 kept) for 23%; effort 6 at 4x4 +0.123 dB (16
+    /// kept). More per unit of time than the next effort's wider search.
+    top: usize,
 }
 
 /// The settings for `effort` on a footprint of `texels` texels.
@@ -2235,7 +2240,7 @@ fn effort_table(effort: u8, texels: usize) -> Effort {
     #[cfg(test)]
     if effort == u8::MAX {
         // Tuning runs:
-        // `MIPPLE_ASTC_EFFORT=p2,p3,candidates,refine,polish,dual,line2,line3,line_dual,shortlist`.
+        // `MIPPLE_ASTC_EFFORT=p2,p3,candidates,refine,polish,dual,line2,line3,line_dual,shortlist,rerank,top`.
         static E: std::sync::OnceLock<Effort> = std::sync::OnceLock::new();
         return *E.get_or_init(|| {
             let mut v: Vec<f64> = std::env::var("MIPPLE_ASTC_EFFORT")
@@ -2243,7 +2248,7 @@ fn effort_table(effort: u8, texels: usize) -> Effort {
                 .split(',')
                 .map(|x| x.parse().unwrap())
                 .collect();
-            v.resize(11, 0.0);
+            v.resize(12, 0.0);
             let u = |i: usize| v[i] as usize;
             Effort {
                 patterns: [u(0), u(1)],
@@ -2255,6 +2260,7 @@ fn effort_table(effort: u8, texels: usize) -> Effort {
                 line: [v[6] as f32, v[7] as f32, v[8] as f32],
                 rerank: u(10),
                 alts: 2,
+                top: u(11).max(1),
             }
         });
     }
@@ -2273,6 +2279,7 @@ fn effort_table(effort: u8, texels: usize) -> Effort {
             line: [16.0, 16.0, 8.0],
             rerank: 0,
             alts: 0,
+            top: 1,
         },
         0 => Effort {
             patterns: [1, 0],
@@ -2284,6 +2291,7 @@ fn effort_table(effort: u8, texels: usize) -> Effort {
             line: [8.0, 16.0, 2.0],
             rerank: 0,
             alts: 1,
+            top: 1,
         },
         // Effort 0's search with the line-fit rerank, every alternative endpoint mode for the
         // weights and, above 16 texels, a second candidate. On the Kodak tile (one thread, CPU
@@ -2299,6 +2307,7 @@ fn effort_table(effort: u8, texels: usize) -> Effort {
             line: [16.0, 16.0, 8.0],
             rerank: 32,
             alts: 2,
+            top: 2,
         },
         1 => Effort {
             patterns: [1, 0],
@@ -2310,6 +2319,7 @@ fn effort_table(effort: u8, texels: usize) -> Effort {
             line: [8.0, 16.0, 2.0],
             rerank: 16,
             alts: 2,
+            top: 1,
         },
         2 => Effort {
             patterns: [2, 1],
@@ -2321,6 +2331,7 @@ fn effort_table(effort: u8, texels: usize) -> Effort {
             line: [2.0, 16.0, 0.0],
             rerank: 64,
             alts: 2,
+            top: 4,
         },
         3 => Effort {
             patterns: [3, 1],
@@ -2332,6 +2343,7 @@ fn effort_table(effort: u8, texels: usize) -> Effort {
             line: [1.0, 8.0, 0.0],
             rerank: 64,
             alts: 2,
+            top: 6,
         },
         // From effort 4 at 4x4 and effort 5 above, every pattern is re-ranked (half of them above
         // 16 texels): with the patterns scored by `QuadSums` lookups, that gains more than the next
@@ -2348,6 +2360,7 @@ fn effort_table(effort: u8, texels: usize) -> Effort {
             line: [1.0, 8.0, 0.0],
             rerank: if texels > 16 { 64 } else { 1024 },
             alts: 2,
+            top: 8,
         },
         5 => Effort {
             patterns: [6, 3],
@@ -2359,6 +2372,7 @@ fn effort_table(effort: u8, texels: usize) -> Effort {
             line: [0.5, 4.0, 0.0],
             rerank: 1024,
             alts: 2,
+            top: 12,
         },
         6 => Effort {
             patterns: [8, 4],
@@ -2370,6 +2384,7 @@ fn effort_table(effort: u8, texels: usize) -> Effort {
             line: [0.5, 4.0, 0.0],
             rerank: 1024,
             alts: 2,
+            top: 16,
         },
         7 => Effort {
             patterns: [12, 6],
@@ -2381,6 +2396,7 @@ fn effort_table(effort: u8, texels: usize) -> Effort {
             line: [0.25, 2.0, 0.0],
             rerank: 1024,
             alts: 2,
+            top: 16,
         },
         8 => Effort {
             patterns: [16, 8],
@@ -2392,6 +2408,7 @@ fn effort_table(effort: u8, texels: usize) -> Effort {
             line: [0.25, 2.0, 0.0],
             rerank: 1024,
             alts: 2,
+            top: 16,
         },
         _ => Effort {
             patterns: [32, 16],
@@ -2403,6 +2420,7 @@ fn effort_table(effort: u8, texels: usize) -> Effort {
             line: [0.0, 0.0, 0.0],
             rerank: 1024,
             alts: 2,
+            top: 16,
         },
     }
 }
@@ -2658,11 +2676,9 @@ pub fn encode_block(fp: &Footprint, px: &[Rgba], srgb: bool, effort: u8) -> [u8;
     }
     cands.truncate(keep);
     cands.sort_unstable_by(by_score);
-    let mut best = Best {
-        err: u32::MAX,
-        sym: None,
-        at: (0, 0),
-    };
+    // The `es.top` closest candidates' encodings, closest first.
+    let topk = es.top.max(1);
+    let mut top: Vec<(u32, Symbolic, (usize, usize))> = Vec::with_capacity(topk + 1);
     let mut codes = [0u8; 64];
     // Base+offset and base+scale endpoints for the same weights are tried on each candidate's last
     // refinement only: on Kodak at effort 2, against every refinement, 12% / 3% / 3% less time at
@@ -2680,7 +2696,10 @@ pub fn encode_block(fp: &Footprint, px: &[Rgba], srgb: bool, effort: u8) -> [u8;
         let planes = 1 + bm.dual as usize;
         let at = measured.iter().position(|m| m.0 == li && m.1 == gi).expect("measured");
         quantize_decimated(grid, q, planes, &decimated[at], &mut codes);
-        let before = best.err;
+        let mut best = Best {
+            err: if top.len() < topk { u32::MAX } else { top[topk - 1].0 },
+            sym: None,
+        };
         let mut eps = try_candidate(
             &t,
             lay,
@@ -2731,17 +2750,25 @@ pub fn encode_block(fp: &Footprint, px: &[Rgba], srgb: bool, effort: u8) -> [u8;
                 if r + 1 == es.refine { es.alts } else { 0 },
             );
         }
-        if best.err < before {
-            best.at = (li as usize, gi as usize);
+        if let Some(sym) = best.sym {
+            let i = top.partition_point(|e| e.0 <= best.err);
+            top.insert(i, (best.err, sym, (li as usize, gi as usize)));
+            top.truncate(topk);
         }
     }
-    if es.polish > 0
-        && let Some(sym) = best.sym.as_mut()
-    {
-        let (li, gi) = best.at;
-        best.err = polish(&t, &layouts[li], &fp.grids[gi], sym, es.polish);
+    // Polish reorders the candidates' errors, so each finalist is polished and the best kept.
+    let mut best: Option<(u32, Symbolic)> = None;
+    for (err, mut sym, (li, gi)) in top {
+        let err = if es.polish > 0 {
+            polish(&t, &layouts[li], &fp.grids[gi], &mut sym, es.polish)
+        } else {
+            err
+        };
+        if best.as_ref().is_none_or(|b| err < b.0) {
+            best = Some((err, sym));
+        }
     }
-    match best.sym.and_then(|s| s.write()) {
+    match best.and_then(|(_, s)| s.write()) {
         Some(v) => v.to_le_bytes(),
         None => void_extent(ERROR),
     }

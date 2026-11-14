@@ -234,6 +234,15 @@ Measured on Kodak images 1-3, single thread, effort 0, unless noted. ISPC fast t
   first's measured error saves little time and loses quality, like the estimate-margin stop above. Kept: two candidates,
   two passes and a shortlist of 5 (37.649 dB at ISPC's time). A second candidate makes Zstd
   output about 0.9% larger than the old effort 0, though it is still 1.7% smaller than ISPC's.
+- **A first-try cascade over a wider candidate pool.** Trying 32 candidates once each (no
+  refinement) and refining only the best 16 by that error, at 8x8 effort 6 on the Kodak tile:
+  33.671 dB against 33.658, with SSIM lower and files 0.08% larger; encoding 32 candidates outright
+  gives 33.667 dB, and a pool of 48 33.673 dB for 1.4× the time. A looser early-abandon bound for
+  the pool's errors changed nothing. The estimate's ranking is not the weak link after refinement:
+  polish is, so polishing several finalists (`Effort::top`, +0.077 dB at 8 kept) won instead.
+- **Fewer polish passes for the runner-up finalists.** Polishing every kept encoding with one or two
+  passes and only the best of those with the rest loses 0.002-0.013 dB at 8x8 effort 6 and saves no
+  time: the full passes stop early once nothing improves.
 - **A second polish pass on ASTC RDO candidates.** Polishing a re-weighted or refitted candidate's
   re-chosen half twice instead of once is even on Kodak 24 (BD-rate within 0.25% at every footprint)
   for up to 7% more RDO time; not polishing at all costs 0.5-1.4%. One pass stays.

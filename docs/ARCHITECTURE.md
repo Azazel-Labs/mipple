@@ -110,7 +110,8 @@ every weight grid the footprint allows by exact least squares (the infill taken 
 weight range, partitioning) candidate is ranked by an estimate of weight and endpoint quantization noise from
 per-footprint mode tables; the best few (one at effort 0, one at 4x4 and two above at effort 1; more with effort) are
 encoded exactly, with weights
-re-derived from the quantized endpoints and a coordinate-descent polish over the final block. Each candidate's
+re-derived from the quantized endpoints, then the closest few encodings (one at effort 0, up to 16 from effort 6)
+each get a coordinate-descent polish and the best is kept, since polish reorders them. Each candidate's
 weights are tried with direct endpoints (CEM 8 / 12), base+offset (CEM 9 / 13, the same number of values, more
 precise for short segments) and base+scale (CEM 6 / 10: a line through black in four values, so a finer
 endpoint range). Opaque layouts are also ranked as base+scale on their own, with the error off the best line
