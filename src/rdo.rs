@@ -282,6 +282,20 @@ const RING: usize = 16;
 #[repr(align(64))]
 struct Bucket([i32; RING]);
 
+/// Mask of bytes `lo..hi` of a 16-byte block read as a little-endian `u128`.
+#[inline(always)]
+fn byte_mask(lo: usize, hi: usize) -> u128 {
+    let upto = |k: usize| if k >= 16 { u128::MAX } else { (1u128 << (8 * k)) - 1 };
+    upto(hi) & !upto(lo)
+}
+
+/// `a[lo..hi] == b[lo..hi]` as one 128-bit compare (a slice compare of runtime length calls `bcmp`,
+/// about 3% of BC7 RDO time).
+#[inline(always)]
+fn same_bytes(a: &[u8; 16], b: &[u8; 16], lo: usize, hi: usize) -> bool {
+    (u128::from_le_bytes(*a) ^ u128::from_le_bytes(*b)) & byte_mask(lo, hi) == 0
+}
+
 #[inline]
 fn hash3(a: u8, b: u8, c: u8) -> usize {
     let v = a as u32 | (b as u32) << 8 | (c as u32) << 16;
@@ -2004,7 +2018,7 @@ fn bc7_far(
             }
         }
         for &(c, err) in &pair[..np] {
-            if err > limit || c[..n] == base[..n] || !seen.insert(&c) {
+            if err > limit || same_bytes(&c, &base, 0, n) || !seen.insert(&c) {
                 continue;
             }
             let dist = smooth * err as f64 / 16.0;
@@ -2175,7 +2189,7 @@ fn optimize_chunk(
         // Other base encodings (BC7: see `pipeline::encode`): the block starts from whichever
         // scores best.
         for a in alts.iter().map(|a| a[i]) {
-            if a[..n] == base[..n] {
+            if same_bytes(&a, &base, 0, n) {
                 continue;
             }
             format.decode_block(&a[..n], &mut dec);
@@ -2367,7 +2381,7 @@ fn optimize_chunk(
             for (c, known) in &cands {
                 // Different previous blocks often yield the same candidate (e.g. a copied span
                 // they share); within one block the model is unchanged, so a repeat scores the same.
-                if c[..n] == base[..n] || !seen.insert(c) {
+                if same_bytes(&c, &base, 0, n) || !seen.insert(c) {
                     continue;
                 }
                 let t = thr(&best, &runner);
@@ -2463,7 +2477,7 @@ fn optimize_chunk(
         if fast {
             for k in 0..pool.len() {
                 let (c, err) = pool[k];
-                if err > limit || c[..n] == base[..n] || !seen.insert(&c) {
+                if err > limit || same_bytes(&c, &base, 0, n) || !seen.insert(&c) {
                     continue;
                 }
                 let t = thr(&best, &runner);
@@ -2504,7 +2518,7 @@ fn optimize_chunk(
                         continue;
                     }
                     let c = far.candidate(&base, &blocks[j], h, s, w);
-                    if c[..n] == base[..n] || !seen.insert(&c) {
+                    if same_bytes(&c, &base, 0, n) || !seen.insert(&c) {
                         continue;
                     }
                     let bnd = limit.min(((t - floor(&c)).max(0.0) * 16.0 / smooth) as u64 + 2);
@@ -2580,7 +2594,7 @@ fn optimize_chunk(
                 let (r, rgb_err) = bc1::reindex_err(&blocks[j][..8], s, w);
                 let mut c = [0u8; 16];
                 c[..8].copy_from_slice(&r);
-                if c[..n] == base[..n] || !seen.insert(&c) {
+                if same_bytes(&c, &base, 0, n) || !seen.insert(&c) {
                     continue;
                 }
                 let t = thr(&best, &runner);
@@ -2615,7 +2629,7 @@ fn optimize_chunk(
 
         // Refinement: the search copies whole blocks, whole fields with the other refit, and
         // nearby spans; mixing one field of an earlier block into the chosen one can still win.
-        if refine_back > 0 && best.1[..n] != base[..n] && !fast {
+        if refine_back > 0 && !same_bytes(&best.1, &base, 0, n) && !fast {
             let flds: &[(usize, usize)] = match format {
                 Format::Bc1 => &[(0, 4), (4, 8)],
                 Format::Bc3 => &[(0, 2), (2, 8), (8, 12), (12, 16)],
@@ -2647,12 +2661,12 @@ fn optimize_chunk(
             for &(a, b) in flds {
                 for d in 1..=depth {
                     let prev = &blocks[i - d];
-                    if prev[a..b] == cur[a..b] || (m6.is_some() && a == 0 && !bc7::is_mode6(prev)) {
+                    if same_bytes(prev, &cur, a, b) || (m6.is_some() && a == 0 && !bc7::is_mode6(prev)) {
                         continue;
                     }
                     let mut c = cur;
                     c[a..b].copy_from_slice(&prev[a..b]);
-                    if c[..n] == base[..n] || !seen.insert(&c) {
+                    if same_bytes(&c, &base, 0, n) || !seen.insert(&c) {
                         continue;
                     }
                     let t = thr(&best, &runner);
@@ -2692,7 +2706,7 @@ fn optimize_chunk(
                 let best: Best = $best;
                 let base: [u8; 16] = $base;
                 let bb: f32 = $bb;
-                let changed = best.1[..n] != base[..n];
+                let changed = !same_bytes(&best.1, &base, 0, n);
                 saved = Some((model.snapshot(), blocks[k], bb, best.2, changed));
                 stats.est_bits_before += bb as f64;
                 stats.est_bits_after += best.2 as f64;
@@ -3130,7 +3144,7 @@ mod tests {
                 t_gen += t0.elapsed();
                 n_gen += cands.len();
                 for (ci, (c, known)) in cands.iter().enumerate() {
-                    if c[..n] == base[..n] || !seen.insert(c) {
+                    if same_bytes(&c, &base, 0, n) || !seen.insert(c) {
                         n_dup += 1;
                         continue;
                     }
