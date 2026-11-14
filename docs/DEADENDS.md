@@ -121,7 +121,13 @@ CPU times come from paired runs on the same core.
   is possible in 15-95% of blocks, and there the candidate generator's memos need the loose bound
   (they assume the bound only shrinks); elsewhere λ·min_bits is a small part of best. The matching
   whole-block exit (best ≤ λ·min_bits) can never fire: without a continuation every candidate,
-  the base included, costs at least the minimum.
+  the base included, costs at least the minimum. The floor is in the encoder anyway (9a28d13, shared
+  with ASTC, where the cloud A/B measured 1.3-4.3% less time); for BC7 the cloud A/B on Kodak-24 at
+  λ 1 and 10 again showed no change.
+- **The rate model's hash chains as one 16-entry ring per bucket** (one cache line, no links to chase;
+  510ab06). Byte-identical, and the match search was the largest self-time function in a local λ 1
+  profile, but the cloud A/B on Kodak-24 measured 0.999× for BC7 λ 1 and λ 10, 0.995× for ASTC 6x6 and
+  0.996× for BC1. Kept, since it is no slower.
 - **A pattern-establishment prepass (crunch / GST style).** Each chunk encoded twice; in pass 2
   block i also tries the endpoint and index fields pass 1 chose for the next 256 blocks, with a credit
   of C bits for fields pass 1 introduced. Best BC1 result (6 Kodak images): C = 4, −0.66% BD-rate for
