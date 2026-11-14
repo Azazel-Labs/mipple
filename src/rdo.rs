@@ -84,7 +84,7 @@ pub struct RdoParams {
     /// ([`crate::ranker`]) picks this many earlier blocks of the chunk for the full search. `None` picks a per-format default ([`RdoParams::local_k_for`]); 0 disables it.
     pub local_k: Option<usize>,
     /// BC7 localized search: how many blocks back the ranker's prefilter scans. `None` picks
-    /// 2048 (`LOCAL7_REACH`).
+    /// 512 (`LOCAL7_REACH`).
     pub local_reach: Option<usize>,
     /// BC7 localized search: blocks each prefilter key passes to the ranker. `None` picks 8
     /// (`LOCAL7_M`).
@@ -2894,10 +2894,10 @@ const DUMP_EVERY: usize = 512;
 /// BC7 localized search: blocks each prefilter key passes to the ranker. On Kodak-24 against Oodle, 16
 /// matched 8 within 0.07% at every λ for about 2% more CPU time (and 32 cost 6% more again); 4 lost about 0.07%.
 const LOCAL7_M: usize = 8;
-/// Localized BC7 search: how far back the prefilter looks. Half a 64 KiB chunk (the chunk size the ranker was
-/// trained on): the whole chunk matched it on Kodak-24 but cost more, and with larger `--chunk-bytes`,
-/// scanning the whole chunk would cost quadratically more.
-const LOCAL7_REACH: usize = 2048;
+/// Localized BC7 search: how far back the prefilter looks. An eighth of a 64 KiB chunk: against 2048 (cloud A/B
+/// and Oodle table, Kodak-24), 1.17× / 1.21× less time at λ 1 / 10 for 0.1-0.4 points of each λ 10-40 lead over
+/// Oodle; 1024 was 1.07× faster for 0.1-0.2, and 256 no faster than 512 for more loss.
+const LOCAL7_REACH: usize = 512;
 /// BC7 ranker training dumps: blocks dumped per prefilter key (see `optimize_chunk`).
 const DUMP7_M: usize = 64;
 

@@ -129,7 +129,7 @@ struct RdoArgs {
     /// BC4/BC5/BC7 only].
     #[arg(long)]
     local: Option<usize>,
-    /// BC7 localized search: how many blocks back the ranker's prefilter scans [default: 2048].
+    /// BC7 localized search: how many blocks back the ranker's prefilter scans [default: 512].
     #[arg(long)]
     local_reach: Option<usize>,
     /// BC7 localized search: blocks each prefilter key passes to the ranker [default: 8].

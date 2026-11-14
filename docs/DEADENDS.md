@@ -48,6 +48,10 @@ CPU times come from paired runs on the same core.
   `64` saves 12% and `--local 0` saves 26%, but each puts λ 40 SSIM behind Oodle (+0.2% to
   +1.0%). Refinement and the ranker carry real quality. (Measured when the λ 40 SSIM lead was −0.3%; with today's wider lead
   BC7 refines 128 deep by default, see the ROADMAP's BC7 speed item.)
+- **A shorter far search or fewer ranker picks (cloud A/B and Oodle table, Kodak-24, at 5ab6183's
+  defaults).** `--far-back 512` saved 6% at λ 1 but only 1% at λ 10, for 0.2-0.4 points of every
+  λ 10-40 lead. `--local 6` saved 2% for 0.1-0.2 points. A shorter ranker reach buys far more
+  time for the same loss (see the ROADMAP's BC7 speed item).
 - **Far re-indexing of multi-subset heads (modes 0-3, 7).** These almost never won, and removing
   them moved every Kodak-24 delta against Oodle by 0.02% or less. Only mode-6 heads are worth
   re-indexing.
@@ -59,9 +63,11 @@ CPU times come from paired runs on the same core.
   - Building the second base only where the entropy-reduced base errs by 64λ or more costs 1.9×
     the CPU, because that base also bounds the search.
 - **Ranker prefilter with 4 blocks per key** (instead of 8) lost about 0.07%.
-- **A shorter ranker reach (1024 or 512 blocks instead of 2048).** No measurable time saved (8 Kodak
-  images, λ 1, one pinned core, interleaved best of three: 11.20 / 11.29 / 11.12 s) for 0.3% / 0.4% larger
-  Zstd files. Profiles put the prefilter scan near 15% of λ 1 time, but halving it doesn't show up.
+- **A ranker reach of 256 blocks, or more blocks per prefilter key.** On the cloud, a 256-block reach
+  saved no more time than 512 (1.18× / 1.21× vs 2048) and lost 0.1-0.3 points more of each lead over
+  Oodle. At 512, keeping 12 or 16 blocks per key (`--local-m`) instead of 8 gave back most of the time
+  for no gain. (The 512 reach itself is kept. An earlier timing on the busy dev machine had shown no gain
+  from 1024 or 512.)
 - **Per-field refinement depth.** Refining only 64 blocks back for the endpoint half saves about 2% of
   λ 1 time, and for the index half about 4%, but each shrinks the lead over Oodle by 0.1-0.3 points
   (λ 40 SSIM −1.5% to −1.3% / −1.2%).
@@ -104,7 +110,7 @@ CPU times come from paired runs on the same core.
   (SSIM 0.2-0.3 behind too), for no measurable time saved on 8 Kodak images (the gated effort-8 alt is already
   only about 10% of λ 1).
 - **A deduplicated prefilter scan at low λ.** Whole blocks and index halves are only 0-10%
-  repeated within the ranker's 2048-block reach at λ 1 (30-60% at λ 4+), so deduplication pays
+  repeated within a 2048-block ranker reach at λ 1 (30-60% at λ 4+), so deduplication pays
   only at higher λ.
 - **Video-codec style fast-decision gates (skip the far search, build the plain alt lazily) as a
   25% speedup.** The ceilings are too low (Kodak 1-6, λ 1-8). Once the far back-reference search runs

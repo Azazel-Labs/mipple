@@ -64,7 +64,7 @@ Shipped:
 - [x] **vs Oodle Texture 2.9.16 (Unreal Engine 5.8), true source:** `scripts/ue_oodle/` gets Oodle's real blocks
   out of a stock UE cook (bit-exact, no engine source) and scores them on Zstd-19 next to a mipple sweep
   (`bench-results/oodle-ue/`). Kodak-24 at Oodle λ 10-40, mipple's size at equal RMSE / equal SSIM: BC1 −11.5% to
-  −11.0% / −7.5% to −6.7%, BC4 −15.1% to −6.6% / −5.1% to −2.1%, BC7 −2.8% to −1.4% / −3.8% to −1.8% (BC7 rerun at d242683), BC5
+  −11.0% / −7.5% to −6.7%, BC4 −15.1% to −6.6% / −5.1% to −2.1%, BC7 −2.5% to −1.2% / −3.7% to −1.4% (BC7 rerun with the ranker's 512-block reach), BC5
   −21.2% to −10.7% / −6.7% to −4.2% (rerun at 4e8547d); ahead at every λ in every format, λ 0-1 included.
 - [x] **Learned BC7 ranker** (`src/ranker/bc7.rs`, trained only on CC0 Poly Haven): a 32-deep exhaustive search,
   the 1024-block far search, then 16 blocks from anywhere in the 64 KiB chunk, picked by a two-key prefilter
@@ -118,10 +118,14 @@ Open for v0.9.x:
     settings), `profile.yml` (perf on one pinned core) and `oodle.yml` (the Oodle table re-run with extra
     arguments) run on fresh GitHub-hosted VMs, so speed and quality settings can be checked off the dev machine.
   - Rejected (quality, or slower with no gain): see [DEADENDS.md](DEADENDS.md#bc7-rdo).
-  - Measured, not pursued: whole blocks and index halves are only 0-10% repeated within the ranker's 2048-block
+  - Measured, not pursued: whole blocks and index halves are only 0-10% repeated within a 2048-block ranker
     reach at λ 1 on most images (30-60% at λ 4+), so a deduplicated prefilter scan pays mostly at higher λ.
-  - Measured, not pursued: a ranker reach of 1024 or 512 saves no measurable time (the profile's 15% for the
-    scan overstates it), and neither does a shallower rate-model hash chain (depth 4 is slower).
+  - Kept: the ranker prefilter scans 512 blocks back instead of 2048 (`--local-reach`): 1.17× / 1.21× less
+    time at λ 1 / 10 (cloud A/B), every cell still ahead (equal RMSE −2.5% to −1.2%, equal SSIM −3.7% to
+    −1.4%, from −2.8% to −1.4% and −3.8% to −1.8%). The scan was 18-21% of a cloud profile at λ 1; an earlier
+    timing on the busy dev machine had shown no gain. 1024 was 1.07× faster for 0.1-0.2 points, 256 no faster than
+    512 for more loss, and keeping 12 or 16 blocks per key instead of 8 (`--local-m`) cost time for no gain.
+  - Measured, not pursued: a shallower rate-model hash chain saves no time (depth 4 is slower).
   - Next: structural cuts to the far re-indexing and the second base, using the cross-domain research
     sweep's ideas (hash-based block matching from screen-content video coding, lower-bound cascades).
 - [ ] BC7 mode 4 in the fast encoder, p-bit search in quantization, and a faster uber step.

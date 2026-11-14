@@ -375,12 +375,12 @@ mipple's size at Oodle's quality, relative to Oodle's size (Kodak-24 totals; neg
 
 | Oodle λ | BC1 at RMSE | BC1 at SSIM | BC7 at RMSE | BC7 at SSIM | BC4 at RMSE | BC4 at SSIM | BC5 at RMSE | BC5 at SSIM |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 0 | −18.9% | −9.4% | −6.5% (15/24 images) | −2.6% (4/24) | −13.4% | −5.4% | −31.1% | −11.3% |
-| 1 | −15.1% | −6.8% | −2.9% (12/24) | −0.9% (4/24) | −4.0% | −1.7% | −4.5% | −1.8% |
-| 10 | −11.5% | −7.5% | −1.8% | −3.8% | −6.6% | −2.1% | −10.7% | −4.2% |
-| 20 | −11.0% | −7.3% | −1.4% | −2.6% | −9.6% | −3.2% | −15.7% | −5.7% |
-| 30 | −11.3% | −6.9% | −2.0% | −2.2% | −12.6% | −4.3% | −19.0% | −6.3% |
-| 40 | −11.5% | −6.7% | −2.8% | −1.8% | −15.1% | −5.1% | −21.2% | −6.7% |
+| 0 | −18.9% | −9.4% | −6.4% (15/24 images) | −2.6% (4/24) | −13.4% | −5.4% | −31.1% | −11.3% |
+| 1 | −15.1% | −6.8% | −2.9% (12/24) | −0.8% (4/24) | −4.0% | −1.7% | −4.5% | −1.8% |
+| 10 | −11.5% | −7.5% | −1.6% | −3.7% | −6.6% | −2.1% | −10.7% | −4.2% |
+| 20 | −11.0% | −7.3% | −1.2% | −2.3% | −9.6% | −3.2% | −15.7% | −5.7% |
+| 30 | −11.3% | −6.9% | −1.8% | −1.9% | −12.6% | −4.3% | −19.0% | −6.3% |
+| 40 | −11.5% | −6.7% | −2.5% | −1.4% | −15.1% | −5.1% | −21.2% | −6.7% |
 
 All four are rerun at 4e8547d (the near-tie deferred decision, the neighbourhood smoothness weight, BC1
 lookahead and the BC7 far-search gate; before it BC1 was −8.8% / −4.0% to −5.7% at λ 10-40 and BC7 −0.4% to
@@ -390,7 +390,9 @@ PNG as UE's import does (XY of the normalized RGB, to 16 bits), which reproduces
 BC7 is rerun at d242683 (cheaper BC7 RDO defaults: near search 8 deep, refinement 128, deferral margin 0.15),
 which gave up 0.1-0.4 points of each lead (from −1.9% / −1.7% / −2.3% / −3.2% at RMSE and −3.9% / −2.8% /
 −2.4% / −2.0% at SSIM) for 1.22× / 1.24× / 1.21× less time at λ 1 / 10 / 30 (GitHub-hosted AMD EPYC 7763,
-one thread, `ab.yml`).
+one thread, `ab.yml`). It is rerun again for the ranker's 512-block reach (was 2048; see the ROADMAP's BC7
+speed item), which gave up 0.1-0.4 points more (from −1.8% / −1.4% / −2.0% / −2.8% at RMSE and −3.8% / −2.6%
+/ −2.2% / −1.8% at SSIM) for 1.17× / 1.21× less time at λ 1 / 10.
 
 Speed (BC7, Core Ultra 7 155H): Oodle's CPU time is UE's process CPU time for a cook with an empty DDC minus
 the same cook with a full one, about 62 CPU-seconds for Kodak-24 at λ 30 (High). mipple reaches that quality
