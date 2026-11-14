@@ -273,6 +273,15 @@ impl RdoStats {
 
 const HASH_BITS: u32 = 13;
 
+/// The most hash-chain entries a match search looks at ([`LzModel::new`]'s `depth`).
+const RING: usize = 16;
+
+/// A hash bucket's newest positions, newest first (−1: none): the first [`RING`] entries of its
+/// hash chain in one cache line, so a search reads them without chasing links.
+#[derive(Clone, Copy)]
+#[repr(align(64))]
+struct Bucket([i32; RING]);
+
 #[inline]
 fn hash3(a: u8, b: u8, c: u8) -> usize {
     let v = a as u32 | (b as u32) << 8 | (c as u32) << 16;
@@ -304,7 +313,8 @@ pub struct LzUndo {
 /// match that runs across block boundaries.
 pub struct LzModel {
     hist: Vec<u8>,
-    head: Vec<i32>,
+    head: Vec<Bucket>,
+    /// The position each one pushed out of its bucket, for [`undo`](Self::undo).
     prev: Vec<i32>,
     counts: [u32; 256],
     max_count: u32,
@@ -329,9 +339,10 @@ pub struct LzModel {
 
 impl LzModel {
     pub fn new(window: usize, depth: usize) -> Self {
+        assert!(depth <= RING, "chain depth {depth} over {RING}");
         let mut m = Self {
             hist: Vec::new(),
-            head: vec![-1; 1 << HASH_BITS],
+            head: vec![Bucket([-1; RING]); 1 << HASH_BITS],
             prev: Vec::new(),
             counts: [0; 256],
             max_count: 0,
@@ -401,8 +412,10 @@ impl LzModel {
             if n >= 3 {
                 let q = n - 3;
                 let h = hash3(self.hist[q], self.hist[q + 1], self.hist[q + 2]);
-                self.prev[q] = self.head[h];
-                self.head[h] = q as i32;
+                let b = &mut self.head[h].0;
+                self.prev[q] = b[RING - 1];
+                b.copy_within(0..RING - 1, 1);
+                b[0] = q as i32;
             }
         }
         self.state = state;
@@ -427,7 +440,9 @@ impl LzModel {
         let (l, n) = (u.len, self.hist.len());
         for q in (l.saturating_sub(2)..n.saturating_sub(2)).rev() {
             let h = hash3(self.hist[q], self.hist[q + 1], self.hist[q + 2]);
-            self.head[h] = self.prev[q];
+            let b = &mut self.head[h].0;
+            b.copy_within(1..RING, 0);
+            b[RING - 1] = self.prev[q];
             self.prev[q] = -1;
         }
         if !self.frozen {
@@ -528,9 +543,10 @@ impl LzModel {
             }
             if pos + 3 <= cand.len() {
                 let h = hash3(cand[pos], cand[pos + 1], cand[pos + 2]);
-                let mut q = self.head[h];
-                let mut d = 0;
-                while q >= 0 && d < self.depth {
+                for &q in &self.head[h].0[..self.depth] {
+                    if q < 0 {
+                        break;
+                    }
                     let qs = q as usize;
                     let off = abs - qs;
                     if off > self.window {
@@ -545,8 +561,6 @@ impl LzModel {
                             best = (l, off, rep_of(&reps, off));
                         }
                     }
-                    q = self.prev[qs];
-                    d += 1;
                     if best.0 == max {
                         break; // nothing can beat a match to the end
                     }
