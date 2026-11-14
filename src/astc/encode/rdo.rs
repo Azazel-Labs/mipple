@@ -328,7 +328,10 @@ fn reweight(
 /// `sym` with endpoints refitted to `t` for its weights, quantized and polished with the weights
 /// held. Returns it and its error, or `None` if no endpoints for these weights can bring the error
 /// down to `max_err`.
-#[expect(clippy::too_many_arguments, reason = "the earlier block's parts and the texels' sums")]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the earlier block's parts and the texels' sums"
+)]
 fn refit_to(
     fp: &Footprint,
     t: &Texels,
@@ -537,7 +540,12 @@ fn optimize_chunk(
                 // (Cauchy-Schwarz): too much, and `consider` would reject it, so skip the decode.
                 let lb =
                     (0..4).map(|c| ((bs.sx[c] - dsums[j][c]) as f64).powi(2)).sum::<f64>() / n as f64 * (1.0 - 1e-9);
-                if lb > limit as f64 || smooth * lb / 16.0 >= best.0 {
+                let floor = if model.may_continue(&prevs[j].bytes) {
+                    0.0
+                } else {
+                    min_bits
+                };
+                if lb > limit as f64 || smooth * lb / 16.0 + floor >= best.0 {
                     continue;
                 }
                 consider(prevs[j].bytes, sse(&px, &decs[j * n..j * n + n]), &mut best);
@@ -561,8 +569,15 @@ fn optimize_chunk(
             // Candidates from the same fields come out the same: each head and each set of weights
             // (with its mode, partitioning and second-plane channel) once.
             // A candidate must beat the best on distortion alone (with a little room for rounding
-            // in the bounds).
-            let cap = (limit as f64).min(best.0 * 16.0 / smooth) as f32 * 1.001 + 1.0;
+            // in the bounds), and on distortion plus the fewest bits a block can cost unless it
+            // continues the previous match. Both kinds keep this block's first byte (its mode's low
+            // bits), so whether one can is known before building it.
+            let floor = if model.may_continue(&prevs[j].bytes) {
+                0.0
+            } else {
+                min_bits
+            };
+            let cap = (limit as f64).min((best.0 - floor).max(0.0) * 16.0 / smooth) as f32 * 1.001 + 1.0;
             let mut cands = [None, None];
             if heads.insert(v & ((1u128 << below) - 1)) {
                 cands[0] = reweight(fp, &t, lay, *gi, sym, eps, &bs, cap);
@@ -577,6 +592,7 @@ fn optimize_chunk(
                 let Some(b) = c.write() else { continue };
                 if seen.insert(b) {
                     let b = b.to_le_bytes();
+                    debug_assert_eq!(b[0], prevs[j].bytes[0]);
                     debug_assert_eq!(err as u64, {
                         let mut d = [[0u8; 4]; MAX_TEXELS];
                         decode_block(&b, bw, bh, srgb, &mut d[..n]);

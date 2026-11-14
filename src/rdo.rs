@@ -464,11 +464,14 @@ impl LzModel {
     /// which [`min_cost`](Self::min_cost) does not bound.
     #[inline]
     pub fn may_continue(&self, cand: &[u8]) -> bool {
+        self.continue_byte() == Some(cand[0])
+    }
+
+    /// The first byte a candidate needs to continue the previous block's match, if any can.
+    #[inline]
+    pub fn continue_byte(&self) -> Option<u8> {
         let r = self.state.reps[0];
-        self.state.tail_match && r > 0 && r <= self.hist.len() && {
-            let src = self.hist.len() - r;
-            self.hist[src] == cand[0]
-        }
+        (self.state.tail_match && r > 0 && r <= self.hist.len()).then(|| self.hist[self.hist.len() - r])
     }
 
     /// Estimated bits to code `cand` after the current history, and the parser state after it.
@@ -1941,9 +1944,16 @@ fn bc7_far(
     // The bound only tightens as `best` improves, so the filter's verdicts at the starting
     // bound hold for the whole scan. A dropped block's endpoints are not marked seen: a later
     // block with the same ones is dropped too, and anywhere else they would be rejected.
-    let q = f7
-        .pre
-        .query(s, w, &base, limit.min((best.0 * 16.0 / smooth) as u64 + 2));
+    // A candidate that cannot continue the previous match must beat the best on distortion plus
+    // the fewest bits a block can cost; both kinds here start with the earlier block's first byte.
+    let cont = model.continue_byte();
+    let floor = |b0: u8| if cont == Some(b0) { 0.0 } else { min_bits };
+    let q = f7.pre.query(
+        s,
+        w,
+        &base,
+        limit.min(((best.0 - if cont.is_some() { 0.0 } else { min_bits }).max(0.0) * 16.0 / smooth) as u64 + 2),
+    );
     let lo = i - far;
     f7.pre.filter(lo, i - back, &q);
     for d in back + 1..=far {
@@ -1955,7 +1965,7 @@ fn bc7_far(
         let prev = blocks[j];
         let mut pair = [([0u8; 16], UNKNOWN); 2];
         let mut np = 0;
-        let bnd = limit.min((best.0 * 16.0 / smooth) as u64 + 2);
+        let bnd = limit.min(((best.0 - floor(prev[0])).max(0.0) * 16.0 / smooth) as u64 + 2);
         if keep & 1 != 0
             && let Some((_, prev_dec)) = &fin[j]
         {
@@ -2167,6 +2177,10 @@ fn optimize_chunk(
         let base_unpacked = unpack_final(format, &base).map(|(u, _)| u);
         let base_half = base_half_err(format, &base, s, w);
         let min_bits = lambda * model.min_cost(n) as f64;
+        // A candidate that cannot continue the previous match costs at least `min_bits`, so it must
+        // beat the threshold by that much in distortion alone (the model is fixed within a block).
+        let cont = model.continue_byte();
+        let floor = |c: &[u8; 16]| if cont == Some(c[0]) { 0.0 } else { min_bits };
         // Error budget: a multiple of the base error, plus a floor so near-lossless blocks still
         // have room to move.
         let limit = p.error_limit(base_err, channels);
@@ -2345,7 +2359,7 @@ fn optimize_chunk(
                 let t = thr(&best, &runner);
                 let err = match *known {
                     UNKNOWN => {
-                        let b = bound(t);
+                        let b = bound((t - floor(c)).max(0.0));
                         block_err(format, &c[..n], s, w, b, (&base, base_half), &mut dec)
                     }
                     e => e,
@@ -2479,7 +2493,7 @@ fn optimize_chunk(
                     if c[..n] == base[..n] || !seen.insert(&c) {
                         continue;
                     }
-                    let bnd = limit.min((t * 16.0 / smooth) as u64 + 2);
+                    let bnd = limit.min(((t - floor(&c)).max(0.0) * 16.0 / smooth) as u64 + 2);
                     let err = block_err(format, &c[..n], s, w, bnd, (&base, base_half), &mut dec);
                     if err > limit {
                         continue;
@@ -2559,7 +2573,7 @@ fn optimize_chunk(
                 let err = if w[3] == 0 {
                     rgb_err
                 } else {
-                    let bnd = limit.min((t * 16.0 / smooth) as u64 + 2);
+                    let bnd = limit.min(((t - floor(&c)).max(0.0) * 16.0 / smooth) as u64 + 2);
                     block_err(format, &c[..n], s, w, bnd, (&base, base_half), &mut dec)
                 };
                 if err > limit {
@@ -2628,7 +2642,7 @@ fn optimize_chunk(
                         continue;
                     }
                     let t = thr(&best, &runner);
-                    let bnd = limit.min((t * 16.0 / smooth) as u64 + 2);
+                    let bnd = limit.min(((t - floor(&c)).max(0.0) * 16.0 / smooth) as u64 + 2);
                     let err = match &m6 {
                         Some((lo, _)) if a == 8 => lo.err(half(&c, 1), bnd),
                         Some((_, hi)) if bc7::is_mode6(prev) => hi.err(half(&c, 0), s, w, bnd),
