@@ -222,26 +222,31 @@ fn cross_sq(s: &RankBlock7, p: &RankBlock7) -> [u32; 4] {
     }
 }
 
-/// Adds pair `k` to `l` if it is below `t`, the `m`-th smallest of `l` at its last cut (`l`
-/// collects pairs below that, and is cut back to its `m` smallest whenever it holds `4m`).
+/// Adds pair `k` to `l`, kept sorted with at most `m` pairs, if it is below `t`: the largest of
+/// `l` once it holds `m` (so `t` is always the exact bound, and SIMD lanes above it skip the
+/// test), `(u32::MAX, usize::MAX)` before.
 #[inline(always)]
 fn offer(l: &mut Vec<(u32, usize)>, t: &mut (u32, usize), m: usize, k: (u32, usize)) {
     if k < *t {
+        if l.len() == m {
+            l.pop();
+        }
         l.push(k);
-        if l.len() == 4 * m {
-            l.select_nth_unstable(m - 1);
-            l.truncate(m);
+        let mut p = l.len() - 1;
+        while p > 0 && l[p - 1] > k {
+            l[p] = l[p - 1];
+            p -= 1;
+        }
+        l[p] = k;
+        if l.len() == m {
             *t = l[m - 1];
         }
     }
 }
 
-/// Cuts `l` back to its `m` smallest pairs.
+/// Cuts `l` back to its `m` smallest pairs ([`offer`] already keeps at most `m`).
 fn keep_smallest(l: &mut Vec<(u32, usize)>, m: usize) {
-    if m < l.len() {
-        l.select_nth_unstable(m);
-        l.truncate(m);
-    }
+    l.truncate(m);
 }
 
 /// [`RankSrc7::prefilter_top`] with the key function `key` (`m` > 0).
@@ -728,10 +733,22 @@ mod tests {
             let (mut pre, mut res, mut pre2, mut res2) = (vec![], vec![], vec![], vec![]);
             rs.prefilter_top(&blocks, 599, 1..=599, 24, &mut pre, &mut res);
             top_with(&blocks, 599, 1..=599, 24, &mut pre2, &mut res2, |p| rs.prefilter(p));
-            for l in [&mut pre, &mut res, &mut pre2, &mut res2] {
+            // Exactly the 24 smallest (key, d) pairs of each key, as a full sort picks them.
+            let all: Vec<(u32, u32, usize)> = (1..=599usize)
+                .map(|d| {
+                    let (v, r) = rs.prefilter(&blocks[599 - d]);
+                    (v, r, d)
+                })
+                .collect();
+            let mut pre3: Vec<(u32, usize)> = all.iter().map(|&(v, _, d)| (v, d)).collect();
+            let mut res3: Vec<(u32, usize)> = all.iter().map(|&(_, r, d)| (r, d)).collect();
+            for l in [&mut pre, &mut res, &mut pre2, &mut res2, &mut pre3, &mut res3] {
                 l.sort_unstable();
             }
-            assert_eq!((pre, res), (pre2, res2), "source {k}");
+            pre3.truncate(24);
+            res3.truncate(24);
+            assert_eq!((&pre, &res), (&pre2, &res2), "source {k}");
+            assert_eq!((pre, res), (pre3, res3), "source {k}");
         }
     }
 
