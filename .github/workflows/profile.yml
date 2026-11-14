@@ -19,6 +19,9 @@ on:
       images:
         description: Space-separated Kodak image names
         default: "kodim05"
+      callers:
+        description: "Also record call stacks (DWARF): inclusive time, and the callers of these symbols (`|`-separated substrings)"
+        default: ""
 
 permissions:
   contents: read
@@ -31,6 +34,7 @@ jobs:
       ARGS: ${{ inputs.args }}
       EXT: ${{ inputs.ext }}
       IMAGES: ${{ inputs.images }}
+      CALLERS: ${{ inputs.callers }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -54,7 +58,8 @@ jobs:
         run: |
           read -ra args <<< "$ARGS"
           for img in $IMAGES; do
-            RAYON_NUM_THREADS=1 taskset -c 1 perf record -e cpu-clock -F 4000 -o "perf-$img.data" -- \
+            g=(); [ -n "$CALLERS" ] && g=(--call-graph dwarf,32768)
+            RAYON_NUM_THREADS=1 taskset -c 1 perf record -e cpu-clock -F 4000 "${g[@]}" -o "perf-$img.data" -- \
               target/release/mipple encode "test-images/kodak/$img.png" -o "out.$EXT" "${args[@]}"
           done
           {
@@ -74,6 +79,21 @@ jobs:
               perf report -i "perf-$img.data" --no-children --sort srcline --percent-limit 0.3 --stdio 2>/dev/null \
                 | grep -v '^#' | sed '/^$/d' | cut -c1-160 | head -80
               echo '```'
+              if [ -n "$CALLERS" ]; then
+                echo
+                echo "### $img: inclusive time by function"
+                echo '```'
+                perf report -i "perf-$img.data" --children --sort symbol --percent-limit 1 --stdio -g none 2>/dev/null                   | grep -v '^#' | sed '/^$/d' | cut -c1-160 | head -60
+                echo '```'
+                IFS='|' read -ra syms <<< "$CALLERS"
+                for sym in "${syms[@]}"; do
+                  echo
+                  echo "### $img: callers of \`$sym\`"
+                  echo '```'
+                  perf report -i "perf-$img.data" --no-children --sort symbol --stdio -g graph,0.5,callee,function,percent                     2>/dev/null | awk -v s="$sym" '/^ +[0-9.]+%/{p=index($0,s)>0} p' | cut -c1-160 | head -40
+                  echo '```'
+                done
+              fi
             done
           } > summary.md
           cat summary.md >> "$GITHUB_STEP_SUMMARY"
