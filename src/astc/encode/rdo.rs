@@ -649,6 +649,7 @@ fn optimize_chunk(
     // Safety net: the rate model is an estimate. If real Zstd says RDO did not help this chunk,
     // keep the base encoding.
     if let (Some(level), Some(original)) = (p.verify_zstd_level, original) {
+        let level = level.min(VERIFY_MAX_LEVEL);
         let size = crate::rdo::zstd_size;
         // Level 1 alone decides a chunk it shrinks a lot, or a fair amount and by about what the
         // rate model estimated (the model misjudges chunks long matches at level 19 favour).
@@ -670,6 +671,12 @@ fn optimize_chunk(
 /// synthetic set (footprints 4x4 to 8x8, λ 0.1 to 4) grew at level 19.
 const VERIFY_SURE: f64 = 0.98;
 const VERIFY_AGREE: f64 = 0.03;
+
+/// The check runs at most at this level, a fraction of level 19's time. It keeps or reverts the same
+/// chunks as level 19 for all 24 Kodak images (6x6, λ 0.25, window 1) and for 146 of 150 encodes of
+/// 16 Poly Haven, 6 synthetic and 8 Kodak images (4x4 to 8x8, λ 0.5 to 4); the other four end up
+/// within 41 bytes of level 19's Zstd-19 size (three larger, one smaller), at the same PSNR.
+const VERIFY_MAX_LEVEL: i32 = 15;
 
 /// Runs RDO in place over one level's ASTC blocks (`data`, raster order, as
 /// [`super::encode_surface`] writes them) of surface `s`.
