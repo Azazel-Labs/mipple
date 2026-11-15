@@ -1925,32 +1925,17 @@ pub fn with_indices(base: &Bc7Block, idx: &[u8; 16], px: &Block, w: &[u32; 4], r
 pub fn refit_exceeds(mode: u8, partition: u8, idx: &[u8; 16], px: &Block, w: &[u32; 4], bound: u64) -> bool {
     let mi = MODES[mode as usize];
     debug_assert_eq!(mi.ib2, 0);
-    let wt = weights(mi.ib);
     // Per subset: n, Σw, Σw², then per channel Σx, Σx², Σwx, with w = 64 t: integers, exact (and
     // equal to the f64 sums over t, which are exact too: multiples of 1/4096 far below 2^53).
-    let mut si = [[0u32; 15]; 3];
-    let add = |s: &mut [u32; 15], i: usize| {
-        let t = wt[idx[i] as usize];
-        let p = px[i];
-        s[0] += 1;
-        s[1] += t;
-        s[2] += t * t;
-        for c in 0..4 {
-            let x = u32::from(p[c]);
-            s[3 + c] += x;
-            s[7 + c] += x * x;
-            s[11 + c] += t * x;
-        }
-    };
-    if mi.ns == 1 {
-        for i in 0..16 {
-            add(&mut si[0], i);
-        }
+    #[cfg(target_arch = "x86_64")]
+    let si = if crate::simd::level() == crate::simd::Level::Avx2 {
+        // SAFETY: AVX2 was detected.
+        unsafe { refit_sums_avx2(mi.ns, partition, mi.ib, idx, px) }
     } else {
-        for i in 0..16 {
-            add(&mut si[subset_of(mi.ns, partition, i)], i);
-        }
-    }
+        refit_sums(mi.ns, partition, mi.ib, idx, px)
+    };
+    #[cfg(not(target_arch = "x86_64"))]
+    let si = refit_sums(mi.ns, partition, mi.ib, idx, px);
     let sum: [[f64; 15]; 3] = si.map(|s| {
         std::array::from_fn(|k| {
             let v = f64::from(s[k]);
@@ -1987,6 +1972,133 @@ pub fn refit_exceeds(mode: u8, partition: u8, idx: &[u8; 16], px: &Block, w: &[u
         }
     }
     lb * 0.999 > bound as f64
+}
+
+/// [`refit_exceeds`]'s per-subset sums: n, Σw, Σw², then per channel Σx, Σx², Σwx (w = 64 t).
+fn refit_sums(ns: u8, partition: u8, ib: u8, idx: &[u8; 16], px: &Block) -> [[u32; 15]; 3] {
+    let wt = weights(ib);
+    let mut si = [[0u32; 15]; 3];
+    let add = |s: &mut [u32; 15], i: usize| {
+        let t = wt[idx[i] as usize];
+        let p = px[i];
+        s[0] += 1;
+        s[1] += t;
+        s[2] += t * t;
+        for c in 0..4 {
+            let x = u32::from(p[c]);
+            s[3 + c] += x;
+            s[7 + c] += x * x;
+            s[11 + c] += t * x;
+        }
+    };
+    if ns == 1 {
+        for i in 0..16 {
+            add(&mut si[0], i);
+        }
+    } else {
+        for i in 0..16 {
+            add(&mut si[subset_of(ns, partition, i)], i);
+        }
+    }
+    si
+}
+
+/// The subset of each texel of each partition of `ns` subsets (2 or 3), as bytes.
+const fn subset_bytes(ns: u8) -> [[u8; 16]; 64] {
+    let mut t = [[0u8; 16]; 64];
+    let mut p = 0;
+    while p < 64 {
+        let mut i = 0;
+        while i < 16 {
+            t[p][i] = if ns == 2 { (PART2[p] >> i & 1) as u8 } else { (PART3[p] >> (2 * i) & 3) as u8 };
+            i += 1;
+        }
+        p += 1;
+    }
+    t
+}
+static SUB2: [[u8; 16]; 64] = subset_bytes(2);
+static SUB3: [[u8; 16]; 64] = subset_bytes(3);
+
+/// [`refit_sums`] with AVX2: the same integer sums exactly.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+fn refit_sums_avx2(ns: u8, partition: u8, ib: u8, idx: &[u8; 16], px: &Block) -> [[u32; 15]; 3] {
+    use std::arch::x86_64::*;
+    const fn bytes(w: &[u32]) -> [u8; 16] {
+        let mut b = [0u8; 16];
+        let mut k = 0;
+        while k < w.len() {
+            b[k] = w[k] as u8;
+            k += 1;
+        }
+        b
+    }
+    static WB: [[u8; 16]; 3] = [bytes(&W2), bytes(&W3), bytes(&W4)];
+    // SAFETY: 16-byte loads of 16-byte arrays.
+    let ld16 = |a: &[u8; 16]| unsafe { _mm_loadu_si128(a.as_ptr().cast::<__m128i>()) };
+    // SAFETY: 32-byte loads of texels 0-7 and 8-15 of the 64-byte block.
+    let px8 = |k: usize| unsafe { _mm256_loadu_si256(px.as_ptr().add(k).cast::<__m256i>()) };
+    // The weights (at most 64) per texel; indices are below 16.
+    let t = _mm_shuffle_epi8(ld16(&WB[usize::from(ib.clamp(2, 4) - 2)]), ld16(idx));
+    let sub = match ns {
+        1 => _mm_setzero_si128(),
+        2 => ld16(&SUB2[usize::from(partition)]),
+        _ => ld16(&SUB3[usize::from(partition)]),
+    };
+    // Per 128-bit lane, four texels channel-major (RRRR GGGG BBBB AAAA): texels 0-7, 8-15.
+    let planar = _mm256_setr_epi8(
+        0, 4, 8, 12, 1, 5, 9, 13, 2, 6, 10, 14, 3, 7, 11, 15, 0, 4, 8, 12, 1, 5, 9, 13, 2, 6, 10, 14, 3, 7, 11, 15,
+    );
+    let x = [_mm256_shuffle_epi8(px8(0), planar), _mm256_shuffle_epi8(px8(8), planar)];
+    // A per-texel byte vector spread to the planar layout of `x[h]`.
+    let rep = [
+        _mm256_setr_epi8(0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 4, 5, 6, 7, 4, 5, 6, 7, 4, 5, 6, 7, 4, 5, 6, 7),
+        _mm256_setr_epi8(
+            8, 9, 10, 11, 8, 9, 10, 11, 8, 9, 10, 11, 8, 9, 10, 11, 12, 13, 14, 15, 12, 13, 14, 15, 12, 13, 14, 15, 12,
+            13, 14, 15,
+        ),
+    ];
+    let spread = |v: __m128i, h: usize| _mm256_shuffle_epi8(_mm256_broadcastsi128_si256(v), rep[h]);
+    let z = _mm256_setzero_si256();
+    let (ones8, ones16) = (_mm256_set1_epi8(1), _mm256_set1_epi16(1));
+    // The two lanes' [R, G, B, A] added.
+    let lanes = |v: __m256i| _mm_add_epi32(_mm256_castsi256_si128(v), _mm256_extracti128_si256::<1>(v));
+    let mut si = [[0u32; 15]; 3];
+    for (s, out) in si.iter_mut().enumerate().take(usize::from(ns)) {
+        let m = _mm_cmpeq_epi8(sub, _mm_set1_epi8(s as i8));
+        let ts = _mm_and_si128(t, m);
+        let mut acc = [z; 3];
+        for h in 0..2 {
+            let mh = spread(m, h);
+            // Σx: bytes times 0/1; Σwx: bytes times the weights (at most 64), pairs under 2^15.
+            let sx = _mm256_maddubs_epi16(x[h], _mm256_and_si256(mh, ones8));
+            let swx = _mm256_maddubs_epi16(x[h], spread(ts, h));
+            // Σx² in 16-bit lanes: [R0..R3, G0..G3] and [B0..B3, A0..A3] per lane.
+            let (xl, xh) = (_mm256_unpacklo_epi8(x[h], z), _mm256_unpackhi_epi8(x[h], z));
+            let (ml, mu) = (_mm256_unpacklo_epi8(mh, mh), _mm256_unpackhi_epi8(mh, mh));
+            let sxl = _mm256_madd_epi16(xl, _mm256_and_si256(xl, ml));
+            let sxh = _mm256_madd_epi16(xh, _mm256_and_si256(xh, mu));
+            acc[0] = _mm256_add_epi32(acc[0], _mm256_madd_epi16(sx, ones16));
+            acc[1] = _mm256_add_epi32(acc[1], _mm256_hadd_epi32(sxl, sxh));
+            acc[2] = _mm256_add_epi32(acc[2], _mm256_madd_epi16(swx, ones16));
+        }
+        for (k, a) in acc.into_iter().enumerate() {
+            let mut c = [0u32; 4];
+            // SAFETY: a 16-byte store into a [u32; 4].
+            unsafe { _mm_storeu_si128(c.as_mut_ptr().cast::<__m128i>(), lanes(a)) };
+            out[3 + 4 * k..7 + 4 * k].copy_from_slice(&c);
+        }
+        // Σw and Σw² over the subset's weights.
+        let sw = _mm_sad_epu8(ts, _mm_setzero_si128());
+        let sww = _mm_madd_epi16(_mm_maddubs_epi16(ts, ts), _mm_set1_epi16(1));
+        let sww = _mm_add_epi32(sww, _mm_shuffle_epi32::<0b01_00_11_10>(sww));
+        let sww = _mm_add_epi32(sww, _mm_shuffle_epi32::<0b10_11_00_01>(sww));
+        out[0] = (_mm_movemask_epi8(m) as u32).count_ones();
+        out[1] = (_mm_cvtsi128_si32(sw) + _mm_extract_epi16::<4>(sw)) as u32;
+        out[2] = _mm_cvtsi128_si32(sww) as u32;
+    }
+    si
 }
 
 /// Key for [`with_layout`]: `prev`'s mode, partition, rotation and indices, or None for
@@ -2113,6 +2225,27 @@ mod tests {
             }
         }
         assert!(rejected > kept, "rejected {rejected} kept {kept}");
+    }
+
+    /// [`refit_sums_avx2`] gives [`refit_sums`]' integers exactly, for every one-index-set mode
+    /// and partition.
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn refit_sums_avx2_matches_scalar() {
+        if !std::arch::is_x86_feature_detected!("avx2") {
+            return;
+        }
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        for k in 0..20000 {
+            let px: Block = std::array::from_fn(|_| std::array::from_fn(|_| rng(&mut seed) as u8));
+            let mode = [0u8, 1, 2, 3, 6, 7][k % 6];
+            let mi = MODES[mode as usize];
+            let part = (rng(&mut seed) % 64) as u8;
+            let idx: [u8; 16] = std::array::from_fn(|_| (rng(&mut seed) % (1 << mi.ib)) as u8);
+            // SAFETY: AVX2 was detected.
+            let v = unsafe { refit_sums_avx2(mi.ns, part, mi.ib, &idx, &px) };
+            assert_eq!(v, refit_sums(mi.ns, part, mi.ib, &idx, &px), "mode {mode} partition {part}");
+        }
     }
 
     /// [`refit_exceeds`] is a lower bound: never true at the error of a block with those fields,
