@@ -277,6 +277,11 @@ Measured on Kodak images 1-3, single thread, effort 0, unless noted. ISPC fast t
   size per 0.01-0.04 dB at effort 2. Adding it to the estimate stage as well saves 1.2-1.7% at 8x8 for
   0.015-0.03 dB. That is too little, and the PSNR it costs is more than the 0.002 dB margin by which
   effort 0 beats astcenc fast at 6x6. Light RDO (λ 0.05-0.2) wins on both size and PSNR instead.
+- **Restricting weight grids to one orientation to concentrate block modes.** Allowing only grids
+  no wider than tall (or only no taller than wide) roughly halves the modes the encoder can pick.
+  On Kodak 24 at effort 0 that is 1.2% smaller under Zstd for 0.56-0.57 dB at 6x6 and 8x8 (wider-only:
+  2.0% for 0.78-0.84 dB), and at effort 2 0.7-0.8% for 0.41-0.48 dB. Window-1 light RDO at λ 1 saves
+  5.9% at 8x8 for 0.008 dB.
 
 ## ETC2 / EAC
 
