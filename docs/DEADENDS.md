@@ -317,6 +317,10 @@ Measured on Kodak images 1-3, single thread, effort 0, unless noted. ISPC fast t
   3.209 bpt, and λ 0.35 37.657 dB / 3.193 bpt, against 37.664 dB / 3.198 bpt polished at λ 0.3.
 - **A shallower match-finder chain for ASTC window 1.** `--chain-depth` 8 / 4 / 2 against 16 on Kodak 6x6
   effort 0 λ 0.3 w1: the same PSNR and bpt within 0.001, and no time difference beyond noise.
+- **Less smooth-block protection for ASTC PSNR.** `--smooth-scale` 1 / 2 / 3 at lower λ lands on the same
+  PSNR-size curve as the default 4 on Kodak 6x6 effort 0 w1 (1 at λ 0.08: 37.666 dB / 3.203 bpt; 2 at
+  λ 0.15: 37.666 / 3.203; 3 at λ 0.25: 37.662 / 3.189; default at λ 0.3: 37.664 / 3.198), with lower SSIM.
+  `--max-rms-ratio 3` and `--min-rms 1.5` change nothing at λ 0.3.
 
 ## ETC2 / EAC
 

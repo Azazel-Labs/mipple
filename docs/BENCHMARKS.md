@@ -745,7 +745,7 @@ one cloud run with both encoders on the same runner, so the times compare within
 | 6x6 | thorough | effort 4 `-l 0.1` | 38.454 / 38.451 | 0.98709 / 0.98664 | 3.368 / 3.384 | 3.388 / 3.407 | 13.14 / 30.55 | EPYC 9V74 |
 | 8x8 | fast | effort 0 `-l 1.5` | 33.875 / 33.682 | 0.96073 / 0.95448 | 1.708 / 1.742 | 1.723 / 1.770 | 1.30 / 1.73 | EPYC 9V45 |
 | 8x8 | medium | effort 2 `-l 0.8` | 34.412 / 34.404 | 0.96468 / 0.96329 | 1.828 / 1.843 | 1.837 / 1.863 | 3.99 / 6.22 | EPYC 9V45 |
-| 8x8 | thorough | effort 5 `-l 0.5` | 34.636 / 34.635 | 0.96619 / 0.96589 | 1.880 / 1.917 | 1.887 / 1.926 | 22.14 / 32.43 | EPYC 9V74 |
+| 8x8 | thorough | effort 6 `-l 0.5` | 34.665 / 34.635 | 0.96635 / 0.96589 | 1.881 / 1.917 | 1.889 / 1.926 | 27.13 / 32.76 | EPYC 9V74 |
 
 Each cell is mipple / astcenc; rows with a positive `-l` also pass `--max-back 1 --refine-back 1`, and `-l 0`
 rows ran without RDO (these runs predate the default light pass below, so they passed no `-l`). In the same runs, with
@@ -761,10 +761,11 @@ more room on some columns:
   second run (EPYC 9V74, astcenc thorough 32.76 s), effort 6 `-l 0.7` beats thorough by 0.02 dB with SSIM
   0.96613 and files 3.3% / 3.3% smaller after Zstd / Deflate (34.657 dB, 1.854 bpt) in 83% of its time.
 
-The 6x6 fast win is narrow on time (96%), and the 8x8 thorough row on PSNR (+0.001 dB; effort 6 `-l 0.7`
-above has more room). The widest is 4x4 thorough: 42% of the time, files 0.4% smaller, +0.05 dB.
+The 6x6 fast win is narrow on time (96%). The widest is 4x4 thorough: 42% of the time, files 0.4% smaller,
++0.05 dB. In the 8x8 thorough row's run, effort 5 `-l 0.5` led thorough by only 0.001 dB
+(34.636 dB, 22.14 s).
 
-**The default.** Since this commit `encode` runs the light pass for ASTC unless told otherwise: λ 0.03, 0.3
+**The default.** Since bd55f3d `encode` runs the light pass for ASTC unless told otherwise: λ 0.03, 0.3
 and 0.5 at 4x4, 6x6 and 8x8 with `--max-back 1 --refine-back 1` (`-l 0` turns it off; an explicit λ keeps
 the 256-block search). Measured locally on the same 24 images at the default effort 5, against effort 5 with
 no RDO:
@@ -777,8 +778,17 @@ no RDO:
 
 The pass itself adds about 2 / 1.1 / 0.9 s to the corpus (measured at effort 0, where the base encode
 takes 1.6-2.3 s) against 28-70 s for effort 5 single-threaded. Doubling λ (0.06 / 0.5 / 1) costs 0.028 / 0.062 / 0.032 dB for files 1.6% / 5.4% / 5.9% smaller.
-At 6x6 and 8x8 the default beats astcenc thorough in PSNR, SSIM, both sizes and time (the 6x6 and 8x8
-thorough rows and bullets above); at 4x4 it beats thorough in quality and size (its time was not measured beside astcenc's).
+Against astcenc in one cloud run (6ef9866, Xeon 6975P-C, one thread; mipple / astcenc thorough):
+
+| footprint | PSNR dB | SSIM | Zstd-19 bpt | Deflate-9 bpt | time s |
+| --- | --- | --- | --- | --- | --- |
+| 4x4 | 45.736 / 45.472 | 0.99786 / 0.99759 | 7.412 / 7.453 | 7.513 / 7.560 | 35.56 / 26.27 |
+| 6x6 | 38.540 / 38.451 | 0.98704 / 0.98664 | 3.302 / 3.384 | 3.321 / 3.407 | 24.05 / 24.70 |
+| 8x8 | 34.636 / 34.635 | 0.96619 / 0.96589 | 1.880 / 1.917 | 1.887 / 1.926 | 19.85 / 23.45 |
+
+At 6x6 and 8x8 the default beats thorough on all five columns (at 8x8 by only 0.001 dB). At 4x4 it is
+0.26 dB better with smaller files but takes 35% longer; effort 4 (45.657 dB, 0.99783, 7.384 / 7.490 bpt,
+21.28 s) and effort 3 (45.522 dB, 0.99780, 7.373 / 7.483 bpt, 12.62 s) beat thorough on all five.
 
 Scoring astcenc's files exposed a decoder bug, fixed: a 2- or 3-partition block may spell equal CEMs the long
 way (with the extra CEM bits below the weights), and the decoder read those blocks with the short form's
