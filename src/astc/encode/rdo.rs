@@ -17,8 +17,8 @@
 //! real Zstd does not shrink goes back to its base encoding.
 
 use super::{
-    Footprint, Layout, MAX_TEXELS, NO_CCS, Texels, polish_parts, quantize, read_block, refit, round_pos,
-    sym_endpoints, tables,
+    Footprint, Layout, MAX_TEXELS, NO_CCS, Texels, polish_parts, quantize, read_block, refit, round_pos, sym_endpoints,
+    tables,
 };
 use crate::astc::{COLOR_UNQUANT, PartitionFn, Symbolic, color_range, decode_block, decode_symbolic_tw};
 use crate::format::Format;
@@ -131,7 +131,13 @@ fn layout_of(fp: &Footprint, sym: &Symbolic) -> Layout {
 /// each luminance (0), direct (8, 12), base+offset (9, 13) or base+scale (6, 10), as the encoder
 /// writes. `tw` holds its weights infilled to the texels, as its decode left them. Boxed in one of
 /// `spare`'s boxes if it has one.
-fn prev_sym(fp: &Footprint, sym: Symbolic, tw: &[[u8; MAX_TEXELS]; 2], spare: &mut Vec<Box<PrevSym>>) -> Option<Box<PrevSym>> {
+#[allow(clippy::vec_box, reason = "spare recycles the boxes it hands out")]
+fn prev_sym(
+    fp: &Footprint,
+    sym: Symbolic,
+    tw: &[[u8; MAX_TEXELS]; 2],
+    spare: &mut Vec<Box<PrevSym>>,
+) -> Option<Box<PrevSym>> {
     let p = sym.partitions as usize;
     if p > 3
         || sym.cems[..p]
@@ -168,7 +174,13 @@ fn prev_sym(fp: &Footprint, sym: Symbolic, tw: &[[u8; MAX_TEXELS]; 2], spare: &m
 
 /// The texel-independent parts of refitting endpoints to `sym`'s weights (see [`RefitBase`]), given
 /// its weights infilled to the texels, `tw`.
-fn refit_base(fp: &Footprint, lay: &Layout, gi: usize, sym: &Symbolic, tw: &[[u8; MAX_TEXELS]; 2]) -> Option<RefitBase> {
+fn refit_base(
+    fp: &Footprint,
+    lay: &Layout,
+    gi: usize,
+    sym: &Symbolic,
+    tw: &[[u8; MAX_TEXELS]; 2],
+) -> Option<RefitBase> {
     debug_assert_eq!(fp.grids[gi].rev.len(), sym.mode.gx as usize * sym.mode.gy as usize);
     let planes = 1 + sym.mode.dual as usize;
     let mut w = [[0u8; MAX_TEXELS]; 2];
@@ -659,7 +671,11 @@ fn optimize_chunk(
         dsums.push(std::array::from_fn(|c| di.iter().map(|d| d[c] as i32).sum()));
         prevs.push(Prev {
             bytes: best.1,
-            sym: if refit_back > 0 { sym.and_then(|s| prev_sym(fp, s, tw, &mut spare)) } else { None },
+            sym: if refit_back > 0 {
+                sym.and_then(|s| prev_sym(fp, s, tw, &mut spare))
+            } else {
+                None
+            },
         });
         // No later block reweights or refits block `i - refit_back`: its box goes to the next block
         // (a chunk's worth is megabytes of fresh pages, and a box a heap call).

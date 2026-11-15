@@ -803,10 +803,10 @@ Each beats exhaustive on all five columns, in 25% / 20% / 49% of its time. The d
 short of it at 6x6 (38.540 dB) and 8x8 (34.636 dB); at 8x8 efforts 7 and 8 do too (34.702 / 34.721 dB,
 38.45 / 46.56 s), and effort 9 with no RDO (`-l 0`) gives 34.768 dB with files the size of exhaustive's.
 
-At the fast end, a re-run at 523a4ee (EPYC 7763) puts effort 0 at 6x6 at 98% of astcenc fast's time (2.43
-/ 2.47 s), with the same quality and sizes as the table above. At 4x4 the light pass costs more than
-effort 0 and 1 save: by default they take 3.29 / 3.78 s against astcenc fast's 3.05 s, so the 4x4 fast
-row stays at `-l 0`.
+At the fast end, a re-run at cfb4cc1 (EPYC 7763, after the cheaper per-process setup) puts effort 0 at
+6x6 at 97% of astcenc fast's time (2.40 / 2.47 s), with the same quality and sizes as the table above.
+At 4x4 the light pass costs more than effort 0 and 1 save: by default they take 3.26 / 3.73 s against
+astcenc fast's 3.04 s, so the 4x4 fast row stays at `-l 0` (1.94 s).
 
 Scoring astcenc's files exposed a decoder bug, fixed: a 2- or 3-partition block may spell equal CEMs the long
 way (with the extra CEM bits below the weights), and the decoder read those blocks with the short form's

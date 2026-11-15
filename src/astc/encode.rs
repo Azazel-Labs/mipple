@@ -2579,7 +2579,7 @@ pub fn encode_block(fp: &Footprint, px: &[Rgba], srgb: bool, effort: u8) -> [u8;
                     }
                 }
             } else {
-                for &i in ranked.iter() {
+                for &i in &ranked {
                     keep(off_lines(&Moments::of(&t, &pats[i].lab, k as u8), k, t.ch), i);
                 }
             }
@@ -2677,8 +2677,7 @@ pub fn encode_block(fp: &Footprint, px: &[Rgba], srgb: bool, effort: u8) -> [u8;
                 while hits != 0 {
                     let ei = hits.trailing_zeros() as usize;
                     hits &= hits - 1;
-                    let x =
-                        (ord(scores[ei]) as u64) << 32 | (li as u64) << 24 | (gi as u64) << 16 | ei as u64 | flag;
+                    let x = (ord(scores[ei]) as u64) << 32 | (li as u64) << 24 | (gi as u64) << 16 | ei as u64 | flag;
                     if x >= top[short - 1] {
                         continue;
                     }
@@ -2692,20 +2691,19 @@ pub fn encode_block(fp: &Footprint, px: &[Rgba], srgb: bool, effort: u8) -> [u8;
         }
     }
     cands.clear();
-    cands.extend(top.iter().take_while(|&&k| k != empty)
-        .map(|&k| {
-            let (li, gi, ei) = ((k >> 24) as u8 as usize, (k >> 16) as u8 as usize, k as u16 as usize);
-            let v = ei >> 14;
-            let ((span, kind), lay) = (spans[li], &layouts[li]);
-            let (kind, orth) = if v > 0 {
-                (variant_kind(lay.count, v).0, lay.scaled[v - 1].0)
-            } else {
-                (kind, lay.orth)
-            };
-            let e = &fp.grids[gi].est[kind][ei & 0x3fff];
-            let rest = span * e.wnoise + per_texel * e.cnoise + orth;
-            (unord((k >> 32) as u32), rest, li as u16, gi as u16, e.mi, v as u8)
-        }));
+    cands.extend(top.iter().take_while(|&&k| k != empty).map(|&k| {
+        let (li, gi, ei) = ((k >> 24) as u8 as usize, (k >> 16) as u8 as usize, k as u16 as usize);
+        let v = ei >> 14;
+        let ((span, kind), lay) = (spans[li], &layouts[li]);
+        let (kind, orth) = if v > 0 {
+            (variant_kind(lay.count, v).0, lay.scaled[v - 1].0)
+        } else {
+            (kind, lay.orth)
+        };
+        let e = &fp.grids[gi].est[kind][ei & 0x3fff];
+        let rest = span * e.wnoise + per_texel * e.cnoise + orth;
+        (unord((k >> 32) as u32), rest, li as u16, gi as u16, e.mi, v as u8)
+    }));
     let by_score = |a: &Cand, b: &Cand| a.0.total_cmp(&b.0);
     // Measured decimation errors by (layout, grid), and the decimated weights per plane.
     measured.clear();
@@ -2898,7 +2896,9 @@ mod tests {
             let mut out = vec![0u8; vals];
             nearest(u, &mut out);
             for (v, &o) in out.iter().enumerate() {
-                let want = (0..u.len()).min_by_key(|&c| ((u[c] as i32 - v as i32).abs(), c)).unwrap();
+                let want = (0..u.len())
+                    .min_by_key(|&c| ((u[c] as i32 - v as i32).abs(), c))
+                    .unwrap();
                 assert_eq!(o as usize, want, "levels {u:?} value {v}");
             }
         };
