@@ -2004,6 +2004,7 @@ fn refit_sums(ns: u8, partition: u8, ib: u8, idx: &[u8; 16], px: &Block) -> [[u3
 }
 
 /// The subset of each texel of each partition of `ns` subsets (2 or 3), as bytes.
+#[cfg(target_arch = "x86_64")]
 const fn subset_bytes(ns: u8) -> [[u8; 16]; 64] {
     let mut t = [[0u8; 16]; 64];
     let mut p = 0;
@@ -2021,7 +2022,9 @@ const fn subset_bytes(ns: u8) -> [[u8; 16]; 64] {
     }
     t
 }
+#[cfg(target_arch = "x86_64")]
 static SUB2: [[u8; 16]; 64] = subset_bytes(2);
+#[cfg(target_arch = "x86_64")]
 static SUB3: [[u8; 16]; 64] = subset_bytes(3);
 
 /// [`refit_sums`] with AVX2: the same integer sums exactly.
