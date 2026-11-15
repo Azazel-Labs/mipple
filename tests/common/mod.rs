@@ -44,7 +44,20 @@ pub fn reference_decode(format: Format, raw: &[u8]) -> [[u8; 4]; 16] {
             let (r, g) = (eac_r11(&raw[..8]), eac_r11(&raw[8..16]));
             return std::array::from_fn(|i| [r[i], g[i], 0, 255]);
         }
-        Format::Astc4x4 | Format::Astc6x6 | Format::Astc8x8 => {
+        Format::Astc4x4
+        | Format::Astc5x4
+        | Format::Astc5x5
+        | Format::Astc6x5
+        | Format::Astc6x6
+        | Format::Astc8x5
+        | Format::Astc8x6
+        | Format::Astc8x8
+        | Format::Astc10x5
+        | Format::Astc10x6
+        | Format::Astc10x8
+        | Format::Astc10x10
+        | Format::Astc12x10
+        | Format::Astc12x12 => {
             panic!("{format} blocks are not 4x4 texels: use reference_decode_astc")
         }
     }

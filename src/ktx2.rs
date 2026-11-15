@@ -32,7 +32,7 @@ fn color_model(format: Format) -> u8 {
         Format::Bc6h => 133,                                                          // KHR_DF_MODEL_BC6H
         Format::Bc7 => 134,                                                           // KHR_DF_MODEL_BC7
         Format::Etc2Rgb | Format::Etc2Rgba | Format::EacR11 | Format::EacRg11 => 161, // KHR_DF_MODEL_ETC2
-        Format::Astc4x4 | Format::Astc6x6 | Format::Astc8x8 => 162,                   // KHR_DF_MODEL_ASTC
+        crate::format::astc!() => 162,                                                // KHR_DF_MODEL_ASTC
     }
 }
 
@@ -58,7 +58,7 @@ pub fn build_dfd(format: Format, srgb: bool, supercompressed: bool) -> Vec<u8> {
         Format::EacR11 => &[(0, 63, 0)],
         Format::EacRg11 => &[(0, 63, 0), (64, 63, 1)],
         // KHR_DF_CHANNEL_ASTC_DATA; LDR, so not float.
-        Format::Astc4x4 | Format::Astc6x6 | Format::Astc8x8 => &[(0, 127, 0)],
+        crate::format::astc!() => &[(0, 127, 0)],
     };
     let block_size = 24 + 16 * samples.len();
     let mut v = Vec::with_capacity(4 + block_size);

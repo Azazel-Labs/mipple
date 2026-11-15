@@ -556,7 +556,7 @@ fn load_encoded(path: &std::path::Path, astc: AstcDecodeArgs) -> Result<mipple::
         let f = astc::file::read(&bytes)?;
         let Some(format) = astc_format(f.bw, f.bh) else {
             bail!(
-                "{}: ASTC {}x{} blocks; mipple reads 4x4, 6x6 and 8x8",
+                "{}: ASTC {}x{} blocks are not a 2D LDR footprint",
                 path.display(),
                 f.bw,
                 f.bh
@@ -733,7 +733,7 @@ fn encode(a: EncodeArgs) -> Result<()> {
     }
     if is_astc_file && !a.format.is_astc() {
         bail!(
-            "an .astc file holds ASTC blocks, not {}: pick --format astc-4x4, astc-6x6 or astc-8x8, or write KTX2",
+            "an .astc file holds ASTC blocks, not {}: pick an ASTC --format (astc-4x4 ... astc-12x12), or write KTX2",
             a.format
         );
     }

@@ -31,7 +31,7 @@ image ─► mips ─► base encode (parallel) ─► RDO (per 16/64 KiB chunk,
 | `src/bc7/batch.rs` | Batch encoder for entropy-reduced (RDO base) search levels 0-1, 8 opaque blocks at once, one per lane |
 | `src/etc.rs` | ETC2 RGB decoder and encoder (individual, differential, T, H and planar modes), RDO helpers (re-select, selector refit) |
 | `src/eac.rs` | EAC decoder and encoder: the ETC2 RGBA8 alpha half and EAC R11 / RG11 (unsigned), RDO helpers (re-index, refit) |
-| `src/astc/` | ASTC LDR: block layout, integer sequence encoding and unquantization (`mod.rs`), decoder for every 2D footprint (`decode.rs`), whole-surface encoder for 4x4, 6x6 and 8x8 (`encode.rs`), the `.astc` container (`file.rs`) |
+| `src/astc/` | ASTC LDR: block layout, integer sequence encoding and unquantization (`mod.rs`), decoder for every 2D footprint (`decode.rs`), whole-surface encoder for every 2D footprint (`encode.rs`), the `.astc` container (`file.rs`) |
 | `src/format.rs` | `Format` enum (block footprint and size, vkFormat, error weights, 4x4 encode/decode dispatch) and `BlockOpts` |
 | `src/rdo.rs` | The RDO pass and `LzModel` rate estimator |
 | `src/ranker/` | Learned rankers (small MLPs, CC0 Poly Haven training) for the localized RD search: `bc4.rs`, `bc5.rs`, `bc7.rs` |
@@ -100,7 +100,7 @@ and R11/RG11): per table, the base and multiplier that span the block's range, a
 least-squares refits of (base, multiplier) to the chosen entries; 11-bit blocks are scored against the
 8-bit source scaled to 11 bits with two fractional bits. No GPU kernel and no DDS (DXGI has no ETC formats).
 
-**ASTC LDR** (`astc/encode.rs`, 4x4, 6x6 and 8x8): the only formats whose blocks are not 4x4 texels, so they
+**ASTC LDR** (`astc/encode.rs`, every 2D footprint from 4x4 to 12x12): the only formats whose blocks are not 4x4 texels, so they
 bypass the 4x4 `Block` path entirely: `pipeline` hands each mip level to `astc::encode::encode_surface` (one
 block row per rayon task) and decodes with `astc::decode_rgba`, and `Format::encode_block`/`decode_block`,
 `encode_base` and the 4x4 RDO pass panic for ASTC rather than run on the wrong footprint (ASTC has its own
@@ -252,7 +252,7 @@ hybrid 155H: the per-block join waits for the slowest core, and the split loses 
 level; if it is not smaller than the base encoding, the chunk reverts. RDO therefore never increases the
 shipped size, and every block respects the error cap.
 
-**ASTC (`astc/encode/rdo.rs`).** ASTC blocks cover 4x4, 6x6 or 8x8 texels, so the pass reads each block's
+**ASTC (`astc/encode/rdo.rs`).** ASTC blocks cover 4x4 to 12x12 texels, so the pass reads each block's
 texels from the surface instead of 4x4 `Block`s, with the same `J` (SSE over all four channels, `/ 16`, so a λ
 means the same SSE per bit at every footprint), `LzModel`, error cap, 16 KiB chunks (1024 blocks) and Zstd
 check. The base is the plain encode at the requested effort. A block's mode, partitioning and endpoints sit in
@@ -295,7 +295,7 @@ first. Supercompressed files use scheme 2 (Zstandard, one frame per level) and a
 
 | Test | What it proves |
 | --- | --- |
-| `tests/cross_decode.rs` | Every block we encode (all formats; efforts 0, 1 and 2, and effort 1 with entropy reduction, so both BC7 encoders) decodes identically in the independent `texture2ddecoder` crate; our BC7 decoder (including the mode-6 fast path) matches it on 16,000 random blocks across all 8 modes; the ETC2 RGB and RGBA8 decoders match it on 40,000 random blocks covering all five modes, and the EAC decoders match a separate transcription of the spec (`texture2ddecoder`'s EAC R11 departs from it); ASTC 4x4, 6x6 and 8x8 surfaces from the CLI path (efforts 0, 2 and 5, partial edge blocks) decode within 1 of `texture2ddecoder` (its 8-bit rounding differs from the spec's); entropy-reduced mode-6 blocks use only the 64 allowed levels, the right p-bits, and keep opaque blocks at alpha 255 |
+| `tests/cross_decode.rs` | Every block we encode (all formats; efforts 0, 1 and 2, and effort 1 with entropy reduction, so both BC7 encoders) decodes identically in the independent `texture2ddecoder` crate; our BC7 decoder (including the mode-6 fast path) matches it on 16,000 random blocks across all 8 modes; the ETC2 RGB and RGBA8 decoders match it on 40,000 random blocks covering all five modes, and the EAC decoders match a separate transcription of the spec (`texture2ddecoder`'s EAC R11 departs from it); ASTC surfaces at all 14 footprints from the CLI path (efforts 0, 2 and 5, partial edge blocks) decode within 1 of `texture2ddecoder` (its 8-bit rounding differs from the spec's); entropy-reduced mode-6 blocks use only the 64 allowed levels, the right p-bits, and keep opaque blocks at alpha 255 |
 | `tests/ktx2_container.rs` | Files round-trip through our reader; the `ktx2` crate parses header, levels, DFD and writer string; DFD equals the crate's generator; mips are smallest-first and aligned |
 | `tests/alpha.rs` | Alpha as transparency on a foliage cutout: at least 20% smaller, visible texels no worse, no hidden colour in the mips |
 | `tests/quality.rs` | PSNR floors per format; effort 3 never worse than effort 0; RDO never grows real Zstd size, λ = 0 is a no-op, and the per-block error cap holds |

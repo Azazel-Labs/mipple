@@ -7,7 +7,7 @@ milestone in progress; every green push to main is released as the next patch (`
 ## Next up
 
 1. ~~ASTC LDR (4x4, 6x6, 8x8) output, with the same RDO pass.~~ Done (v1.0 below); next for it: a GPU kernel,
-   more footprints, a faster RDO pass.
+   ~~more footprints~~ (all 14 2D footprints done), a faster RDO pass.
 2. BC6H: ~~RDO with a log-space distortion~~ (done: 42% smaller Zstd files at λ 2), signed BC6H, a GPU kernel.
 3. ~~ETC2 / EAC for mobile fallbacks.~~ Done (v1.0 below); next for it: punch-through alpha (ETC2 RGB A1),
    signed EAC, a SIMD batch encoder.
@@ -188,7 +188,9 @@ Open for v0.9.x:
     Deflate size and time at 4x4, 6x6 and 8x8 (BENCHMARKS.md, 8598d56; each pair on one cloud runner).
   - [x] That light pass is the ASTC default (λ 0.03 / 0.3 / 0.5; `-l 0` turns it off): at effort 5, Zstd
     files 0.7-2.8% smaller for 0.005-0.021 dB.
-  - [ ] A GPU kernel, a SIMD batch encoder, other footprints (the decoder already reads every 2D one), HDR.
+  - [x] Every other 2D LDR footprint (5x4, 5x5, 6x5, 8x5, 8x6, 10x5, 10x6, 10x8, 10x10, 12x10, 12x12): CLI,
+    library, KTX2 (vkFormat 159-184), `.astc`, `mipple check`; the default λ interpolates by texel count.
+  - [ ] A GPU kernel, a SIMD batch encoder, HDR.
 - [x] ETC2 / EAC for mobile fallbacks: ETC2 RGB (all five modes), ETC2 RGBA8 and EAC R11 / RG11 (unsigned),
   KTX2 only, with the RDO pass. On Kodak, one thread, effort 0 is 0.37 dB ahead of Compressonator in an
   eighth of its time and effort 1 0.94 dB ahead in half; with RDO, files are about 25% smaller at

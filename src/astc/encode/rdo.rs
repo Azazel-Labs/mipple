@@ -745,7 +745,7 @@ mod tests {
     #[test]
     fn candidates_score_their_decode() {
         for s in [crate::synth::bricks(64), crate::synth::cutout(64)] {
-            for format in [Format::Astc4x4, Format::Astc6x6, Format::Astc8x8] {
+            for format in Format::ALL.into_iter().filter(|f| f.is_astc()) {
                 let (bw, bh) = format.block_dims();
                 let mut data = super::super::encode_surface(&s, bw, bh, true, 0);
                 let p = RdoParams {

@@ -18,7 +18,20 @@ fn channels(format: Format) -> &'static [usize] {
         Format::Etc2Rgba => &[0, 1, 2, 3],
         Format::EacR11 => &[0],
         Format::EacRg11 => &[0, 1],
-        Format::Astc4x4 | Format::Astc6x6 | Format::Astc8x8 => &[0, 1, 2, 3],
+        Format::Astc4x4
+        | Format::Astc5x4
+        | Format::Astc5x5
+        | Format::Astc6x5
+        | Format::Astc6x6
+        | Format::Astc8x5
+        | Format::Astc8x6
+        | Format::Astc8x8
+        | Format::Astc10x5
+        | Format::Astc10x6
+        | Format::Astc10x8
+        | Format::Astc10x10
+        | Format::Astc12x10
+        | Format::Astc12x12 => &[0, 1, 2, 3],
     }
 }
 
@@ -62,7 +75,7 @@ fn encoded_blocks_match_reference_decoder() {
 /// mostly exact.
 #[test]
 fn astc_blocks_match_reference_decoder() {
-    for format in [Format::Astc4x4, Format::Astc6x6, Format::Astc8x8] {
+    for format in Format::ALL.into_iter().filter(|f| f.is_astc()) {
         let (bw, bh) = format.block_dims();
         let (mut texels, mut off_by_one) = (0usize, 0usize);
         for (name, img) in corpus(52) {

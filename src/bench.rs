@@ -118,7 +118,7 @@ pub fn quality(format: Format, source: &Surface, dec: &Surface, normal: bool) ->
         Format::Bc1 | Format::Bc3 | Format::Bc6h | Format::Bc7 | Format::Etc2Rgb | Format::Etc2Rgba => {
             metrics::ssim_luma(source, dec)
         }
-        Format::Astc4x4 | Format::Astc6x6 | Format::Astc8x8 => metrics::ssim_luma(source, dec),
+        crate::format::astc!() => metrics::ssim_luma(source, dec),
         Format::Bc4 | Format::EacR11 => metrics::ssim_channel(source, dec, 0),
         Format::Bc5 | Format::EacRg11 => {
             (metrics::ssim_channel(source, dec, 0) + metrics::ssim_channel(source, dec, 1)) / 2.0

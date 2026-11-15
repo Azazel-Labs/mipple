@@ -5,7 +5,7 @@
 
 A rate-distortion optimized GPU texture encoder in Rust. It writes standard **BC1 / BC3 / BC4 / BC5 / BC7**
 blocks, tuned so Zstd or Deflate shrink them further, plus **BC6H** for HDR and **ETC2 / EAC** and **ASTC**
-(4x4, 6x6, 8x8) for mobile.
+(every 2D footprint, 4x4 to 12x12) for mobile.
 Output goes to **KTX2** with optional Zstd supercompression. GPUs read it directly; nothing new runs at load
 time.
 
@@ -162,8 +162,8 @@ WebGPU and win (BC7 effort 5: 42 vs 902 ms for a 512² mip chain in Chrome). Car
 - ETC2 RGB (individual, differential, T, H and planar modes), ETC2 RGBA8, and EAC R11 / RG11 (unsigned)
   encoders and decoders, KTX2 only, with the same RDO pass; `scripts/compete_etc.py` grades them against
   Compressonator. CPU only.
-- ASTC LDR 4x4, 6x6 and 8x8 (1-3 partitions, dual plane, every weight grid of the footprint) encoders and
-  a decoder for every 2D footprint, to KTX2 or `.astc`, encoded for sRGB or linear decoding;
+- ASTC LDR encoders and decoders for all 14 2D footprints, 4x4 to 12x12 (1-3 partitions, dual plane, every
+  weight grid of the footprint), to KTX2 or `.astc`, encoded for sRGB or linear decoding;
   `scripts/compete_astc.py` grades them against Intel ISPC and Arm's astcenc (on the 24 Kodak images, effort 0
   beats ISPC fast in PSNR and SSIM in less time, and with a light RDO pass some setting beats each astcenc
   preset, fast to exhaustive, in PSNR, SSIM, Zstd and Deflate size and time at once, at all three footprints).

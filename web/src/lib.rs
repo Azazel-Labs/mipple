@@ -501,7 +501,20 @@ fn view(format: Format, s: &Surface, normal: bool) -> Vec<u8> {
             }
             Format::Bc5 | Format::EacRg11 => [r, g, 0, 255],
             Format::Bc3 | Format::Bc7 | Format::Etc2Rgba => [r, g, b, a],
-            Format::Astc4x4 | Format::Astc6x6 | Format::Astc8x8 => [r, g, b, a],
+            Format::Astc4x4
+            | Format::Astc5x4
+            | Format::Astc5x5
+            | Format::Astc6x5
+            | Format::Astc6x6
+            | Format::Astc8x5
+            | Format::Astc8x6
+            | Format::Astc8x8
+            | Format::Astc10x5
+            | Format::Astc10x6
+            | Format::Astc10x8
+            | Format::Astc10x10
+            | Format::Astc12x10
+            | Format::Astc12x12 => [r, g, b, a],
             Format::Bc6h => [r, g, b, 255],
         });
     }
@@ -557,8 +570,19 @@ mod tests {
             "eac-r11",
             "eac-rg11",
             "astc-4x4",
+            "astc-5x4",
+            "astc-5x5",
+            "astc-6x5",
             "astc-6x6",
+            "astc-8x5",
+            "astc-8x6",
             "astc-8x8",
+            "astc-10x5",
+            "astc-10x6",
+            "astc-10x8",
+            "astc-10x10",
+            "astc-12x10",
+            "astc-12x12",
         ] {
             let mut s = Settings::parse(f, "auto").unwrap();
             // Ignored for ASTC, as `options` drops it.

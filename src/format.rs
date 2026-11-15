@@ -110,16 +110,70 @@ pub enum Format {
     /// ASTC LDR with a 4x4 footprint: 8 bpp RGB/RGBA (mobile and Apple GPUs; the BC7 analogue).
     #[cfg_attr(feature = "cli", value(name = "astc-4x4"))]
     Astc4x4,
+    /// ASTC LDR with a 5x4 footprint: 6.4 bpp RGB/RGBA.
+    #[cfg_attr(feature = "cli", value(name = "astc-5x4"))]
+    Astc5x4,
+    /// ASTC LDR with a 5x5 footprint: 5.12 bpp RGB/RGBA.
+    #[cfg_attr(feature = "cli", value(name = "astc-5x5"))]
+    Astc5x5,
+    /// ASTC LDR with a 6x5 footprint: 4.27 bpp RGB/RGBA.
+    #[cfg_attr(feature = "cli", value(name = "astc-6x5"))]
+    Astc6x5,
     /// ASTC LDR with a 6x6 footprint: 3.56 bpp RGB/RGBA.
     #[cfg_attr(feature = "cli", value(name = "astc-6x6"))]
     Astc6x6,
-    /// ASTC LDR with an 8x8 footprint: 2 bpp RGB/RGBA.
+    /// ASTC LDR with a 8x5 footprint: 3.2 bpp RGB/RGBA.
+    #[cfg_attr(feature = "cli", value(name = "astc-8x5"))]
+    Astc8x5,
+    /// ASTC LDR with a 8x6 footprint: 2.67 bpp RGB/RGBA.
+    #[cfg_attr(feature = "cli", value(name = "astc-8x6"))]
+    Astc8x6,
+    /// ASTC LDR with a 8x8 footprint: 2 bpp RGB/RGBA.
     #[cfg_attr(feature = "cli", value(name = "astc-8x8"))]
     Astc8x8,
+    /// ASTC LDR with a 10x5 footprint: 2.56 bpp RGB/RGBA.
+    #[cfg_attr(feature = "cli", value(name = "astc-10x5"))]
+    Astc10x5,
+    /// ASTC LDR with a 10x6 footprint: 2.13 bpp RGB/RGBA.
+    #[cfg_attr(feature = "cli", value(name = "astc-10x6"))]
+    Astc10x6,
+    /// ASTC LDR with a 10x8 footprint: 1.6 bpp RGB/RGBA.
+    #[cfg_attr(feature = "cli", value(name = "astc-10x8"))]
+    Astc10x8,
+    /// ASTC LDR with a 10x10 footprint: 1.28 bpp RGB/RGBA.
+    #[cfg_attr(feature = "cli", value(name = "astc-10x10"))]
+    Astc10x10,
+    /// ASTC LDR with a 12x10 footprint: 1.07 bpp RGB/RGBA.
+    #[cfg_attr(feature = "cli", value(name = "astc-12x10"))]
+    Astc12x10,
+    /// ASTC LDR with a 12x12 footprint: 0.89 bpp RGB/RGBA.
+    #[cfg_attr(feature = "cli", value(name = "astc-12x12"))]
+    Astc12x12,
 }
 
+/// Matches every ASTC [`Format`] (each 2D LDR footprint).
+macro_rules! astc {
+    () => {
+        $crate::format::Format::Astc4x4
+            | $crate::format::Format::Astc5x4
+            | $crate::format::Format::Astc5x5
+            | $crate::format::Format::Astc6x5
+            | $crate::format::Format::Astc6x6
+            | $crate::format::Format::Astc8x5
+            | $crate::format::Format::Astc8x6
+            | $crate::format::Format::Astc8x8
+            | $crate::format::Format::Astc10x5
+            | $crate::format::Format::Astc10x6
+            | $crate::format::Format::Astc10x8
+            | $crate::format::Format::Astc10x10
+            | $crate::format::Format::Astc12x10
+            | $crate::format::Format::Astc12x12
+    };
+}
+pub(crate) use astc;
+
 impl Format {
-    pub const ALL: [Format; 13] = [
+    pub const ALL: [Format; 24] = [
         Format::Bc1,
         Format::Bc3,
         Format::Bc4,
@@ -131,8 +185,19 @@ impl Format {
         Format::EacR11,
         Format::EacRg11,
         Format::Astc4x4,
+        Format::Astc5x4,
+        Format::Astc5x5,
+        Format::Astc6x5,
         Format::Astc6x6,
+        Format::Astc8x5,
+        Format::Astc8x6,
         Format::Astc8x8,
+        Format::Astc10x5,
+        Format::Astc10x6,
+        Format::Astc10x8,
+        Format::Astc10x10,
+        Format::Astc12x10,
+        Format::Astc12x12,
     ];
 
     pub fn name(self) -> &'static str {
@@ -148,8 +213,19 @@ impl Format {
             Format::EacR11 => "eac-r11",
             Format::EacRg11 => "eac-rg11",
             Format::Astc4x4 => "astc-4x4",
+            Format::Astc5x4 => "astc-5x4",
+            Format::Astc5x5 => "astc-5x5",
+            Format::Astc6x5 => "astc-6x5",
             Format::Astc6x6 => "astc-6x6",
+            Format::Astc8x5 => "astc-8x5",
+            Format::Astc8x6 => "astc-8x6",
             Format::Astc8x8 => "astc-8x8",
+            Format::Astc10x5 => "astc-10x5",
+            Format::Astc10x6 => "astc-10x6",
+            Format::Astc10x8 => "astc-10x8",
+            Format::Astc10x10 => "astc-10x10",
+            Format::Astc12x10 => "astc-12x10",
+            Format::Astc12x12 => "astc-12x12",
         }
     }
 
@@ -165,14 +241,25 @@ impl Format {
     /// not 4x4 in general, so it is encoded and decoded a surface at a time: the 4x4 [`Block`]
     /// paths ([`Format::encode_block`], [`Format::decode_block`], the RDO pass) panic for it.
     pub fn is_astc(self) -> bool {
-        matches!(self, Format::Astc4x4 | Format::Astc6x6 | Format::Astc8x8)
+        matches!(self, astc!())
     }
 
     /// Texels across and down one block: 4x4, or the ASTC footprint.
     pub fn block_dims(self) -> (u32, u32) {
         match self {
+            Format::Astc5x4 => (5, 4),
+            Format::Astc5x5 => (5, 5),
+            Format::Astc6x5 => (6, 5),
             Format::Astc6x6 => (6, 6),
+            Format::Astc8x5 => (8, 5),
+            Format::Astc8x6 => (8, 6),
             Format::Astc8x8 => (8, 8),
+            Format::Astc10x5 => (10, 5),
+            Format::Astc10x6 => (10, 6),
+            Format::Astc10x8 => (10, 8),
+            Format::Astc10x10 => (10, 10),
+            Format::Astc12x10 => (12, 10),
+            Format::Astc12x12 => (12, 12),
             _ => (4, 4),
         }
     }
@@ -182,7 +269,7 @@ impl Format {
         match self {
             Format::Bc1 | Format::Bc4 | Format::Etc2Rgb | Format::EacR11 => 8,
             Format::Bc3 | Format::Bc5 | Format::Bc6h | Format::Bc7 | Format::Etc2Rgba | Format::EacRg11 => 16,
-            Format::Astc4x4 | Format::Astc6x6 | Format::Astc8x8 => 16,
+            astc!() => 16,
         }
     }
 
@@ -217,27 +304,49 @@ impl Format {
     /// Vulkan `VkFormat` value, as stored in a KTX2 header.
     pub fn vk_format(self, srgb: bool) -> u32 {
         match (self, srgb) {
-            (Format::Bc1, false) => 131,      // VK_FORMAT_BC1_RGB_UNORM_BLOCK
-            (Format::Bc1, true) => 132,       // VK_FORMAT_BC1_RGB_SRGB_BLOCK
-            (Format::Bc3, false) => 137,      // VK_FORMAT_BC3_UNORM_BLOCK
-            (Format::Bc3, true) => 138,       // VK_FORMAT_BC3_SRGB_BLOCK
-            (Format::Bc4, _) => 139,          // VK_FORMAT_BC4_UNORM_BLOCK
-            (Format::Bc5, _) => 141,          // VK_FORMAT_BC5_UNORM_BLOCK
-            (Format::Bc6h, _) => 143,         // VK_FORMAT_BC6H_UFLOAT_BLOCK
-            (Format::Bc7, false) => 145,      // VK_FORMAT_BC7_UNORM_BLOCK
-            (Format::Bc7, true) => 146,       // VK_FORMAT_BC7_SRGB_BLOCK
-            (Format::Etc2Rgb, false) => 147,  // VK_FORMAT_ETC2_R8G8B8_UNORM_BLOCK
-            (Format::Etc2Rgb, true) => 148,   // VK_FORMAT_ETC2_R8G8B8_SRGB_BLOCK
-            (Format::Etc2Rgba, false) => 151, // VK_FORMAT_ETC2_R8G8B8A8_UNORM_BLOCK
-            (Format::Etc2Rgba, true) => 152,  // VK_FORMAT_ETC2_R8G8B8A8_SRGB_BLOCK
-            (Format::EacR11, _) => 153,       // VK_FORMAT_EAC_R11_UNORM_BLOCK
-            (Format::EacRg11, _) => 155,      // VK_FORMAT_EAC_R11G11_UNORM_BLOCK
-            (Format::Astc4x4, false) => 157,  // VK_FORMAT_ASTC_4x4_UNORM_BLOCK
-            (Format::Astc4x4, true) => 158,   // VK_FORMAT_ASTC_4x4_SRGB_BLOCK
-            (Format::Astc6x6, false) => 165,  // VK_FORMAT_ASTC_6x6_UNORM_BLOCK
-            (Format::Astc6x6, true) => 166,   // VK_FORMAT_ASTC_6x6_SRGB_BLOCK
-            (Format::Astc8x8, false) => 171,  // VK_FORMAT_ASTC_8x8_UNORM_BLOCK
-            (Format::Astc8x8, true) => 172,   // VK_FORMAT_ASTC_8x8_SRGB_BLOCK
+            (Format::Bc1, false) => 131,       // VK_FORMAT_BC1_RGB_UNORM_BLOCK
+            (Format::Bc1, true) => 132,        // VK_FORMAT_BC1_RGB_SRGB_BLOCK
+            (Format::Bc3, false) => 137,       // VK_FORMAT_BC3_UNORM_BLOCK
+            (Format::Bc3, true) => 138,        // VK_FORMAT_BC3_SRGB_BLOCK
+            (Format::Bc4, _) => 139,           // VK_FORMAT_BC4_UNORM_BLOCK
+            (Format::Bc5, _) => 141,           // VK_FORMAT_BC5_UNORM_BLOCK
+            (Format::Bc6h, _) => 143,          // VK_FORMAT_BC6H_UFLOAT_BLOCK
+            (Format::Bc7, false) => 145,       // VK_FORMAT_BC7_UNORM_BLOCK
+            (Format::Bc7, true) => 146,        // VK_FORMAT_BC7_SRGB_BLOCK
+            (Format::Etc2Rgb, false) => 147,   // VK_FORMAT_ETC2_R8G8B8_UNORM_BLOCK
+            (Format::Etc2Rgb, true) => 148,    // VK_FORMAT_ETC2_R8G8B8_SRGB_BLOCK
+            (Format::Etc2Rgba, false) => 151,  // VK_FORMAT_ETC2_R8G8B8A8_UNORM_BLOCK
+            (Format::Etc2Rgba, true) => 152,   // VK_FORMAT_ETC2_R8G8B8A8_SRGB_BLOCK
+            (Format::EacR11, _) => 153,        // VK_FORMAT_EAC_R11_UNORM_BLOCK
+            (Format::EacRg11, _) => 155,       // VK_FORMAT_EAC_R11G11_UNORM_BLOCK
+            (Format::Astc4x4, false) => 157,   // VK_FORMAT_ASTC_4x4_UNORM_BLOCK
+            (Format::Astc4x4, true) => 158,    // VK_FORMAT_ASTC_4x4_SRGB_BLOCK
+            (Format::Astc5x4, false) => 159,   // VK_FORMAT_ASTC_5x4_UNORM_BLOCK
+            (Format::Astc5x4, true) => 160,    // VK_FORMAT_ASTC_5x4_SRGB_BLOCK
+            (Format::Astc5x5, false) => 161,   // VK_FORMAT_ASTC_5x5_UNORM_BLOCK
+            (Format::Astc5x5, true) => 162,    // VK_FORMAT_ASTC_5x5_SRGB_BLOCK
+            (Format::Astc6x5, false) => 163,   // VK_FORMAT_ASTC_6x5_UNORM_BLOCK
+            (Format::Astc6x5, true) => 164,    // VK_FORMAT_ASTC_6x5_SRGB_BLOCK
+            (Format::Astc6x6, false) => 165,   // VK_FORMAT_ASTC_6x6_UNORM_BLOCK
+            (Format::Astc6x6, true) => 166,    // VK_FORMAT_ASTC_6x6_SRGB_BLOCK
+            (Format::Astc8x5, false) => 167,   // VK_FORMAT_ASTC_8x5_UNORM_BLOCK
+            (Format::Astc8x5, true) => 168,    // VK_FORMAT_ASTC_8x5_SRGB_BLOCK
+            (Format::Astc8x6, false) => 169,   // VK_FORMAT_ASTC_8x6_UNORM_BLOCK
+            (Format::Astc8x6, true) => 170,    // VK_FORMAT_ASTC_8x6_SRGB_BLOCK
+            (Format::Astc8x8, false) => 171,   // VK_FORMAT_ASTC_8x8_UNORM_BLOCK
+            (Format::Astc8x8, true) => 172,    // VK_FORMAT_ASTC_8x8_SRGB_BLOCK
+            (Format::Astc10x5, false) => 173,  // VK_FORMAT_ASTC_10x5_UNORM_BLOCK
+            (Format::Astc10x5, true) => 174,   // VK_FORMAT_ASTC_10x5_SRGB_BLOCK
+            (Format::Astc10x6, false) => 175,  // VK_FORMAT_ASTC_10x6_UNORM_BLOCK
+            (Format::Astc10x6, true) => 176,   // VK_FORMAT_ASTC_10x6_SRGB_BLOCK
+            (Format::Astc10x8, false) => 177,  // VK_FORMAT_ASTC_10x8_UNORM_BLOCK
+            (Format::Astc10x8, true) => 178,   // VK_FORMAT_ASTC_10x8_SRGB_BLOCK
+            (Format::Astc10x10, false) => 179, // VK_FORMAT_ASTC_10x10_UNORM_BLOCK
+            (Format::Astc10x10, true) => 180,  // VK_FORMAT_ASTC_10x10_SRGB_BLOCK
+            (Format::Astc12x10, false) => 181, // VK_FORMAT_ASTC_12x10_UNORM_BLOCK
+            (Format::Astc12x10, true) => 182,  // VK_FORMAT_ASTC_12x10_SRGB_BLOCK
+            (Format::Astc12x12, false) => 183, // VK_FORMAT_ASTC_12x12_UNORM_BLOCK
+            (Format::Astc12x12, true) => 184,  // VK_FORMAT_ASTC_12x12_SRGB_BLOCK
         }
     }
 
@@ -261,10 +370,32 @@ impl Format {
             155 => (Format::EacRg11, false),
             157 => (Format::Astc4x4, false),
             158 => (Format::Astc4x4, true),
+            159 => (Format::Astc5x4, false),
+            160 => (Format::Astc5x4, true),
+            161 => (Format::Astc5x5, false),
+            162 => (Format::Astc5x5, true),
+            163 => (Format::Astc6x5, false),
+            164 => (Format::Astc6x5, true),
             165 => (Format::Astc6x6, false),
             166 => (Format::Astc6x6, true),
+            167 => (Format::Astc8x5, false),
+            168 => (Format::Astc8x5, true),
+            169 => (Format::Astc8x6, false),
+            170 => (Format::Astc8x6, true),
             171 => (Format::Astc8x8, false),
             172 => (Format::Astc8x8, true),
+            173 => (Format::Astc10x5, false),
+            174 => (Format::Astc10x5, true),
+            175 => (Format::Astc10x6, false),
+            176 => (Format::Astc10x6, true),
+            177 => (Format::Astc10x8, false),
+            178 => (Format::Astc10x8, true),
+            179 => (Format::Astc10x10, false),
+            180 => (Format::Astc10x10, true),
+            181 => (Format::Astc12x10, false),
+            182 => (Format::Astc12x10, true),
+            183 => (Format::Astc12x12, false),
+            184 => (Format::Astc12x12, true),
             _ => return None,
         })
     }
@@ -285,7 +416,7 @@ impl Format {
             Format::Etc2Rgba => [1, 1, 1, 1],
             Format::EacR11 => [1, 0, 0, 0],
             Format::EacRg11 => [1, 1, 0, 0],
-            Format::Astc4x4 | Format::Astc6x6 | Format::Astc8x8 => [1, 1, 1, 1],
+            astc!() => [1, 1, 1, 1],
         }
     }
 
@@ -297,8 +428,8 @@ impl Format {
             Format::Bc5 | Format::EacRg11 => vec![0, 1],
             Format::Bc3 | Format::Bc7 | Format::Etc2Rgba if has_alpha => vec![0, 1, 2, 3],
             Format::Bc3 | Format::Bc7 | Format::Etc2Rgba => vec![0, 1, 2],
-            Format::Astc4x4 | Format::Astc6x6 | Format::Astc8x8 if has_alpha => vec![0, 1, 2, 3],
-            Format::Astc4x4 | Format::Astc6x6 | Format::Astc8x8 => vec![0, 1, 2],
+            astc!() if has_alpha => vec![0, 1, 2, 3],
+            astc!() => vec![0, 1, 2],
         }
     }
 
@@ -328,7 +459,7 @@ impl Format {
                 out[..8].copy_from_slice(&eac::encode_r11(&bc4::channel(px, 0), effort));
                 out[8..].copy_from_slice(&eac::encode_r11(&bc4::channel(px, 1), effort));
             }
-            Format::Astc4x4 | Format::Astc6x6 | Format::Astc8x8 => panic!("{self}: {NOT_4X4}"),
+            astc!() => panic!("{self}: {NOT_4X4}"),
         }
         out
     }
@@ -350,7 +481,7 @@ impl Format {
             Format::Etc2Rgba => etc::decode_rgba(raw, out),
             Format::EacR11 => eac::decode_r11_block(raw, out),
             Format::EacRg11 => eac::decode_rg11_block(raw, out),
-            Format::Astc4x4 | Format::Astc6x6 | Format::Astc8x8 => panic!("{self}: {NOT_4X4}"),
+            astc!() => panic!("{self}: {NOT_4X4}"),
         }
     }
 }
@@ -367,6 +498,6 @@ impl std::str::FromStr for Format {
         Format::ALL
             .into_iter()
             .find(|f| f.name().eq_ignore_ascii_case(s))
-            .ok_or_else(|| format!("unknown format '{s}' (expected bc1, bc3, bc4, bc5, bc6h, bc7, etc2-rgb, etc2-rgba, eac-r11, eac-rg11, astc-4x4, astc-6x6 or astc-8x8)"))
+            .ok_or_else(|| format!("unknown format '{s}' (expected bc1, bc3, bc4, bc5, bc6h, bc7, etc2-rgb, etc2-rgba, eac-r11, eac-rg11, astc-4x4 ... astc-12x12)"))
     }
 }

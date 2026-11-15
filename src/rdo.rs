@@ -25,7 +25,8 @@ use crate::ranker::bc7::{RankBlock7, RankSrc7};
 use crate::surface::{Block, block_sse};
 use rayon::prelude::*;
 
-/// λ of ASTC's default light RDO pass at 4x4, 6x6 and 8x8 ([`RdoParams::default_for`]).
+/// λ of ASTC's default light RDO pass at 4x4, 6x6 and 8x8 ([`RdoParams::default_for`]); other
+/// footprints interpolate by texel count ([`RdoParams::astc_default_lambda`]).
 /// At effort 5 on Kodak-24 these cost 0.005 / 0.021 / 0.007 dB PSNR for Zstd-19 files 0.7% / 2.8% / 2.3%
 /// smaller than no RDO (λ 0.06 / 0.5 / 1: 0.028 / 0.062 / 0.032 dB for 1.6% / 5.4% / 5.9%).
 const ASTC_DEFAULT_LAMBDA: [f32; 3] = [0.03, 0.3, 0.5];
@@ -154,9 +155,21 @@ impl RdoParams {
     /// The λ of ASTC's default light RDO pass ([`RdoParams::default_for`]); 0 for other formats.
     pub fn astc_default_lambda(format: Format) -> f32 {
         match format {
-            Format::Astc4x4 => ASTC_DEFAULT_LAMBDA[0],
-            Format::Astc6x6 => ASTC_DEFAULT_LAMBDA[1],
-            Format::Astc8x8 => ASTC_DEFAULT_LAMBDA[2],
+            crate::format::astc!() => {
+                // Piecewise linear in the texel count between the tuned footprints; 8x8's beyond.
+                let (bw, bh) = format.block_dims();
+                let n = (bw * bh) as f32;
+                let [l4, l6, l8] = ASTC_DEFAULT_LAMBDA;
+                if n <= 16.0 {
+                    l4
+                } else if n <= 36.0 {
+                    l4 + (l6 - l4) * (n - 16.0) / 20.0
+                } else if n <= 64.0 {
+                    l6 + (l8 - l6) * (n - 36.0) / 28.0
+                } else {
+                    l8
+                }
+            }
             _ => 0.0,
         }
     }
@@ -201,7 +214,7 @@ impl RdoParams {
     /// it searches 128 deep plus the localized search's picks instead.
     pub fn window_for(&self, format: Format) -> usize {
         self.window.unwrap_or(match format {
-            Format::Bc6h | Format::Bc7 | Format::Astc4x4 | Format::Astc6x6 | Format::Astc8x8 => 16 * 1024,
+            Format::Bc6h | Format::Bc7 | crate::format::astc!() => 16 * 1024,
             Format::Bc1 | Format::Bc3 | Format::Etc2Rgb | Format::Etc2Rgba => 8 * 1024,
             Format::Bc5 | Format::EacRg11 => 3072,
             Format::Bc4 | Format::EacR11 => 2048,
@@ -269,7 +282,7 @@ impl RdoParams {
             Format::Bc1 | Format::Bc3 | Format::Bc4 => 256,
             Format::Etc2Rgba | Format::EacR11 | Format::EacRg11 => 256,
             Format::Bc5 | Format::Bc6h | Format::Etc2Rgb => 0,
-            Format::Astc4x4 | Format::Astc6x6 | Format::Astc8x8 => 0,
+            crate::format::astc!() => 0,
         })
     }
 
@@ -1106,7 +1119,7 @@ fn candidates(
         // RDO for it.
         Format::Bc6h => {}
         // `optimize_with_alt` refuses ASTC: its blocks are not 4x4.
-        Format::Astc4x4 | Format::Astc6x6 | Format::Astc8x8 => unreachable!("{format} has no RDO"),
+        crate::format::astc!() => unreachable!("{format} has no RDO"),
         Format::Etc2Rgb | Format::Etc2Rgba | Format::EacR11 | Format::EacRg11 => {
             // Per 8-byte half, with base's other half: ETC2 color takes prev's colors with the
             // selectors re-chosen and prev's selectors with base's mode refit; EAC takes prev's
@@ -2196,7 +2209,7 @@ fn optimize_chunk(
         Format::Bc5 => w[2..] == [0, 0],
         Format::Bc3 | Format::Bc6h | Format::Bc7 => false,
         Format::Etc2Rgb | Format::Etc2Rgba | Format::EacR11 | Format::EacRg11 => false,
-        Format::Astc4x4 | Format::Astc6x6 | Format::Astc8x8 => false,
+        crate::format::astc!() => false,
     } && far_back > max_back;
     let mut far = FarEndpoints::new(format, if far_on { blocks.len() } else { 0 }, w);
     // Localized search (BC5's two channels): beyond the nearest `max_back` blocks, shape
@@ -2735,7 +2748,7 @@ fn optimize_chunk(
                 Format::Etc2Rgba => &[(0, 2), (2, 8), (8, 12), (12, 16)],
                 Format::EacR11 => &[(0, 2), (2, 8)],
                 Format::EacRg11 => &[(0, 2), (2, 8), (8, 10), (10, 16)],
-                Format::Astc4x4 | Format::Astc6x6 | Format::Astc8x8 => &[(0, 16)],
+                crate::format::astc!() => &[(0, 16)],
             };
             let cur = best.1;
             // Each candidate changes one field, so for BC5 it keeps one half of `cur`.
