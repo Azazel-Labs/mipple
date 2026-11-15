@@ -161,6 +161,11 @@ CPU times come from paired runs on the same core.
   shortlist ranked too poorly to cut the pricing. Most of the gain is the endpoints plus a partial
   index run from the same source, so a cheap retry should start there, and only if SSIM is the
   target.
+- **Prefetching the rate model's hash buckets.** `cost_until` stalls most on loading each
+  position's 64-byte hash bucket (11.5% of its samples on that load). Prefetching every
+  position's bucket before the parse (71363be) was byte-identical but 1.002× / 0.999× at λ 1 / 10
+  in a cloud A/B: the out-of-order core already overlaps those loads, and calls that stop early
+  pay for prefetches they never use.
 
 ## Field split (`--prep`)
 

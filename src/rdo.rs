@@ -547,16 +547,6 @@ impl LzModel {
             k
         };
         let rep_of = |reps: &[usize; 3], off: usize| reps.iter().position(|&r| r == off);
-        // The parse visits most positions and each loads its hash bucket (the table is larger
-        // than L1): request them all up front so their misses overlap.
-        #[cfg(target_arch = "x86_64")]
-        for w in cand.windows(3) {
-            let b = &self.head[hash3(w[0], w[1], w[2])];
-            // SAFETY: a prefetch of a valid reference has no effect beyond the cache.
-            unsafe {
-                std::arch::x86_64::_mm_prefetch::<{ std::arch::x86_64::_MM_HINT_T0 }>(std::ptr::from_ref(b).cast())
-            };
-        }
         let mut bits = 0.0;
         let mut reps = self.state.reps;
         let mut tail = false;
