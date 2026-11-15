@@ -2010,7 +2010,11 @@ const fn subset_bytes(ns: u8) -> [[u8; 16]; 64] {
     while p < 64 {
         let mut i = 0;
         while i < 16 {
-            t[p][i] = if ns == 2 { (PART2[p] >> i & 1) as u8 } else { (PART3[p] >> (2 * i) & 3) as u8 };
+            t[p][i] = if ns == 2 {
+                (PART2[p] >> i & 1) as u8
+            } else {
+                (PART3[p] >> (2 * i) & 3) as u8
+            };
             i += 1;
         }
         p += 1;
@@ -2053,7 +2057,9 @@ fn refit_sums_avx2(ns: u8, partition: u8, ib: u8, idx: &[u8; 16], px: &Block) ->
     let x = [_mm256_shuffle_epi8(px8(0), planar), _mm256_shuffle_epi8(px8(8), planar)];
     // A per-texel byte vector spread to the planar layout of `x[h]`.
     let rep = [
-        _mm256_setr_epi8(0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 4, 5, 6, 7, 4, 5, 6, 7, 4, 5, 6, 7, 4, 5, 6, 7),
+        _mm256_setr_epi8(
+            0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 4, 5, 6, 7, 4, 5, 6, 7, 4, 5, 6, 7, 4, 5, 6, 7,
+        ),
         _mm256_setr_epi8(
             8, 9, 10, 11, 8, 9, 10, 11, 8, 9, 10, 11, 8, 9, 10, 11, 12, 13, 14, 15, 12, 13, 14, 15, 12, 13, 14, 15, 12,
             13, 14, 15,
@@ -2244,7 +2250,11 @@ mod tests {
             let idx: [u8; 16] = std::array::from_fn(|_| (rng(&mut seed) % (1 << mi.ib)) as u8);
             // SAFETY: AVX2 was detected.
             let v = unsafe { refit_sums_avx2(mi.ns, part, mi.ib, &idx, &px) };
-            assert_eq!(v, refit_sums(mi.ns, part, mi.ib, &idx, &px), "mode {mode} partition {part}");
+            assert_eq!(
+                v,
+                refit_sums(mi.ns, part, mi.ib, &idx, &px),
+                "mode {mode} partition {part}"
+            );
         }
     }
 

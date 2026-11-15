@@ -563,56 +563,89 @@ fn hash52(mut p: u32) -> u32 {
 /// The partition (0..count) of texel (`x`, `y`) for partition pattern `seed` (10 bits), in a block
 /// of `texels` texels.
 pub fn partition_of(seed: u32, x: u32, y: u32, count: u32, texels: u32) -> u8 {
-    if count <= 1 {
-        return 0;
-    }
-    let (x, y, z) = if texels < 31 { (x << 1, y << 1, 0) } else { (x, y, 0) };
-    let seed = seed + (count - 1) * 1024;
-    let r = hash52(seed);
-    let mut s = [0u32; 12];
-    for (i, v) in s.iter_mut().take(8).enumerate() {
-        *v = (r >> (4 * i)) & 15;
-    }
-    s[8] = (r >> 18) & 15;
-    s[9] = (r >> 22) & 15;
-    s[10] = (r >> 26) & 15;
-    s[11] = r.rotate_left(2) & 15;
-    for v in &mut s {
-        *v *= *v;
-    }
-    let (sh1, sh2) = if seed & 1 != 0 {
-        (if seed & 2 != 0 { 4 } else { 5 }, if count == 3 { 6 } else { 5 })
-    } else {
-        (if count == 3 { 6 } else { 5 }, if seed & 2 != 0 { 4 } else { 5 })
-    };
-    let sh3 = if seed & 0x10 != 0 { sh1 } else { sh2 };
-    for (i, v) in s.iter_mut().enumerate() {
-        *v >>= if i >= 8 {
-            sh3
-        } else if i % 2 == 0 {
-            sh1
-        } else {
-            sh2
+    PartitionFn::new(seed, count, texels).at(x, y)
+}
+
+/// The texel-independent part of [`partition_of`] for one pattern, to place many texels.
+#[derive(Clone, Copy)]
+pub struct PartitionFn {
+    s: [u32; 12],
+    r: u32,
+    count: u32,
+    small: bool,
+}
+
+impl PartitionFn {
+    pub fn new(seed: u32, count: u32, texels: u32) -> Self {
+        let mut f = PartitionFn {
+            s: [0; 12],
+            r: 0,
+            count,
+            small: texels < 31,
         };
+        if count <= 1 {
+            return f;
+        }
+        let seed = seed + (count - 1) * 1024;
+        let r = hash52(seed);
+        let s = &mut f.s;
+        for (i, v) in s.iter_mut().take(8).enumerate() {
+            *v = (r >> (4 * i)) & 15;
+        }
+        s[8] = (r >> 18) & 15;
+        s[9] = (r >> 22) & 15;
+        s[10] = (r >> 26) & 15;
+        s[11] = r.rotate_left(2) & 15;
+        for v in s.iter_mut() {
+            *v *= *v;
+        }
+        let (sh1, sh2) = if seed & 1 != 0 {
+            (if seed & 2 != 0 { 4 } else { 5 }, if count == 3 { 6 } else { 5 })
+        } else {
+            (if count == 3 { 6 } else { 5 }, if seed & 2 != 0 { 4 } else { 5 })
+        };
+        let sh3 = if seed & 0x10 != 0 { sh1 } else { sh2 };
+        for (i, v) in s.iter_mut().enumerate() {
+            *v >>= if i >= 8 {
+                sh3
+            } else if i % 2 == 0 {
+                sh1
+            } else {
+                sh2
+            };
+        }
+        f.r = r;
+        f
     }
-    let a = (s[0] * x + s[1] * y + s[10] * z + (r >> 14)) & 0x3f;
-    let b = (s[2] * x + s[3] * y + s[11] * z + (r >> 10)) & 0x3f;
-    let mut c = (s[4] * x + s[5] * y + s[8] * z + (r >> 6)) & 0x3f;
-    let mut d = (s[6] * x + s[7] * y + s[9] * z + (r >> 2)) & 0x3f;
-    if count < 4 {
-        d = 0;
-    }
-    if count < 3 {
-        c = 0;
-    }
-    if a >= b && a >= c && a >= d {
-        0
-    } else if b >= c && b >= d {
-        1
-    } else if c >= d {
-        2
-    } else {
-        3
+
+    /// The partition of texel (`x`, `y`).
+    #[inline]
+    pub fn at(&self, x: u32, y: u32) -> u8 {
+        if self.count <= 1 {
+            return 0;
+        }
+        let (s, r, count) = (&self.s, self.r, self.count);
+        let (x, y) = if self.small { (x << 1, y << 1) } else { (x, y) };
+        // z is 0 for 2D blocks, so s[8..12]'s z terms drop out.
+        let a = (s[0] * x + s[1] * y + (r >> 14)) & 0x3f;
+        let b = (s[2] * x + s[3] * y + (r >> 10)) & 0x3f;
+        let mut c = (s[4] * x + s[5] * y + (r >> 6)) & 0x3f;
+        let mut d = (s[6] * x + s[7] * y + (r >> 2)) & 0x3f;
+        if count < 4 {
+            d = 0;
+        }
+        if count < 3 {
+            c = 0;
+        }
+        if a >= b && a >= c && a >= d {
+            0
+        } else if b >= c && b >= d {
+            1
+        } else if c >= d {
+            2
+        } else {
+            3
+        }
     }
 }
 

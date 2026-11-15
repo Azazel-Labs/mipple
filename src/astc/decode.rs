@@ -1,6 +1,6 @@
 //! Decoding ASTC LDR blocks to RGBA8.
 
-use super::{COLOR_UNQUANT, Symbolic, WEIGHT_UNQUANT, cem_is_hdr, cem_values, partition_of};
+use super::{COLOR_UNQUANT, PartitionFn, Symbolic, WEIGHT_UNQUANT, cem_is_hdr, cem_values};
 use crate::surface::{Rgba, Surface};
 
 /// The LDR profile's error color.
@@ -166,9 +166,12 @@ pub fn decode_block(raw: &[u8; 16], bw: u32, bh: u32, srgb: bool, out: &mut [Rgb
             out[..n].fill(ERROR);
             return;
         }
-        let vals: Vec<i32> = sym.colors[at..at + k].iter().map(|&q| unq[q as usize] as i32).collect();
+        let mut vals = [0i32; 8];
+        for (v, &q) in vals.iter_mut().zip(&sym.colors[at..at + k]) {
+            *v = unq[q as usize] as i32;
+        }
         at += k;
-        *ep = endpoints(cem, &vals).expect("LDR mode");
+        *ep = endpoints(cem, &vals[..k]).expect("LDR mode");
     }
     let wu = &WEIGHT_UNQUANT[sym.mode.quant as usize];
     let mut w = [0u8; 64];
@@ -177,6 +180,7 @@ pub fn decode_block(raw: &[u8; 16], bw: u32, bh: u32, srgb: bool, out: &mut [Rgb
     }
     let planes = 1 + sym.mode.dual as usize;
     let (gx, gy) = (sym.mode.gx as u32, sym.mode.gy as u32);
+    let pf = PartitionFn::new(sym.seed as u32, sym.partitions as u32, bw * bh);
     for t in 0..bh {
         for s in 0..bw {
             let w0 = infill(&w, gx, gy, planes, 0, bw, bh, s, t);
@@ -184,7 +188,7 @@ pub fn decode_block(raw: &[u8; 16], bw: u32, bh: u32, srgb: bool, out: &mut [Rgb
             if sym.mode.dual {
                 ws[sym.ccs as usize] = infill(&w, gx, gy, planes, 1, bw, bh, s, t);
             }
-            let part = partition_of(sym.seed as u32, s, t, sym.partitions as u32, bw * bh) as usize;
+            let part = pf.at(s, t) as usize;
             let (e0, e1) = eps[part];
             out[(t * bw + s) as usize] = lerp(e0, e1, ws, srgb);
         }

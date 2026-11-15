@@ -20,7 +20,7 @@ use super::{
     Footprint, Layout, MAX_TEXELS, NO_CCS, Texels, infill, polish_parts, quantize, read_block, refit, round_pos,
     sym_endpoints, tables,
 };
-use crate::astc::{COLOR_UNQUANT, Symbolic, WEIGHT_UNQUANT, color_range, decode_block, partition_of};
+use crate::astc::{COLOR_UNQUANT, PartitionFn, Symbolic, WEIGHT_UNQUANT, color_range, decode_block};
 use crate::format::Format;
 use crate::rdo::{LzModel, LzState, RdoParams, RdoStats, VERIFY_QUICK, bit_budget};
 use crate::surface::{Rgba, Surface};
@@ -119,14 +119,9 @@ fn layout_of(fp: &Footprint, sym: &Symbolic) -> Layout {
         orth: 0.0,
         scaled: [(f32::MAX, 0); 3],
     };
+    let pf = PartitionFn::new(sym.seed as u32, sym.partitions as u32, n as u32);
     for i in 0..n {
-        let l = partition_of(
-            sym.seed as u32,
-            i as u32 % fp.bw,
-            i as u32 / fp.bw,
-            sym.partitions as u32,
-            n as u32,
-        );
+        let l = pf.at(i as u32 % fp.bw, i as u32 / fp.bw);
         lay.labels[i] = l;
         lay.lab16[i] = l as i16;
     }
@@ -610,7 +605,11 @@ fn optimize_chunk(
             stats.changed += 1;
         }
         data[i * 16..i * 16 + 16].copy_from_slice(&best.1);
-        decode_block(&best.1, bw, bh, srgb, &mut decs[i * n..i * n + n]);
+        if best.1 == base {
+            decs[i * n..i * n + n].copy_from_slice(&dec[..n]);
+        } else {
+            decode_block(&best.1, bw, bh, srgb, &mut decs[i * n..i * n + n]);
+        }
         dsums.push(std::array::from_fn(|c| {
             decs[i * n..i * n + n].iter().map(|d| d[c] as i32).sum()
         }));
@@ -647,12 +646,12 @@ pub fn optimize(format: Format, s: &Surface, srgb: bool, data: &mut [u8], p: &Rd
         };
     }
     let (bw, bh) = format.block_dims();
-    let fp = Footprint::new(bw, bh);
+    let fp = Footprint::get(bw, bh);
     let nx = s.width.div_ceil(bw) as usize;
     let chunk = (p.chunk_bytes_for(format) / 16).max(1);
     data.par_chunks_mut(chunk * 16)
         .enumerate()
-        .map(|(k, d)| optimize_chunk(format, &fp, s, nx, k * chunk, d, srgb, p))
+        .map(|(k, d)| optimize_chunk(format, fp, s, nx, k * chunk, d, srgb, p))
         .reduce(RdoStats::default, RdoStats::merge)
 }
 

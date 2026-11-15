@@ -314,6 +314,14 @@ fn spectrum(fp: &Footprint, v: &[f32]) -> Spectrum {
 }
 
 impl Footprint {
+    /// The footprint's tables, built on first use and kept for the process (building them takes
+    /// milliseconds, which every surface and mip level would otherwise pay).
+    pub fn get(bw: u32, bh: u32) -> &'static Footprint {
+        static CACHE: [std::sync::OnceLock<Footprint>; 81] = [const { std::sync::OnceLock::new() }; 81];
+        assert!((4..=12).contains(&bw) && (4..=12).contains(&bh), "footprint {bw}x{bh}");
+        CACHE[((bh - 4) * 9 + bw - 4) as usize].get_or_init(|| Footprint::new(bw, bh))
+    }
+
     pub fn new(bw: u32, bh: u32) -> Self {
         assert!((4..=12).contains(&bw) && (4..=12).contains(&bh), "footprint {bw}x{bh}");
         let n = (bw * bh) as usize;
@@ -469,9 +477,8 @@ impl Footprint {
             let mut seen = std::collections::HashSet::new();
             let mut out = Vec::new();
             for seed in 0..1024u32 {
-                let labels: Vec<u8> = (0..n as u32)
-                    .map(|i| super::partition_of(seed, i % bw, i / bw, count, n as u32))
-                    .collect();
+                let pf = super::PartitionFn::new(seed, count, n as u32);
+                let labels: Vec<u8> = (0..n as u32).map(|i| pf.at(i % bw, i / bw)).collect();
                 // Relabel in order of first appearance, so patterns that only permute labels match.
                 let mut map = [u8::MAX; 4];
                 let mut next = 0;
@@ -2788,7 +2795,7 @@ fn read_block(s: &Surface, bw: u32, bh: u32, bx: u32, by: u32, out: &mut [Rgba])
 /// Encodes a surface as ASTC `bw` × `bh` blocks, in parallel, raster order.
 pub fn encode_surface(s: &Surface, bw: u32, bh: u32, srgb: bool, effort: u8) -> Vec<u8> {
     use rayon::prelude::*;
-    let fp = Footprint::new(bw, bh);
+    let fp = Footprint::get(bw, bh);
     let (nx, ny) = (s.width.div_ceil(bw), s.height.div_ceil(bh));
     (0..ny)
         .into_par_iter()
