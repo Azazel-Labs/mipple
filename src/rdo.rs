@@ -42,7 +42,8 @@ pub struct RdoParams {
     pub span_back: Option<usize>,
     /// After the search, try replacing one field (endpoints or indices, per BC4 half for BC5)
     /// of the chosen block with that field of each of this many previous blocks. `None` picks a
-    /// per-format default ([`RdoParams::refine_back_for`]); 0 disables it.
+    /// per-format default ([`RdoParams::refine_back_for`]); 0 disables it. For ASTC, how far back
+    /// the reweight and refit candidates look instead (default 256).
     pub refine_back: Option<usize>,
     /// Beyond `max_back`, try the endpoints of earlier blocks up to this far back (capped by the
     /// window), re-indexed: each distinct pair once, at its nearest position, and only when a

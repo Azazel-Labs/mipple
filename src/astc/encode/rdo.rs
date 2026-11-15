@@ -480,6 +480,8 @@ fn optimize_chunk(
     let (bw, bh) = (fp.bw, fp.bh);
     let window = p.window_for(format);
     let max_back = p.max_back_for(format).min(window / 16);
+    // `--refine-back` sets the reweight and refit reach for ASTC.
+    let refit_back = p.refine_back.unwrap_or(REFIT_BACK);
     let mut model = LzModel::new(window, p.chain_depth);
     model.set_literals(data);
     let lambda = p.lambda as f64;
@@ -553,7 +555,7 @@ fn optimize_chunk(
         }
         heads.clear();
         tails.clear();
-        for d in 1..=REFIT_BACK.min(i) {
+        for d in 1..=refit_back.min(i) {
             let j = i - d;
             let Some(ps) = &prevs[j].sym else { continue };
             let PrevSym {

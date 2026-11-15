@@ -116,7 +116,8 @@ struct RdoArgs {
     span_back: Option<usize>,
     /// Previous blocks whose single fields are tried in the chosen block after the search
     /// (0 disables) [default: 256 for BC1/BC3/BC4, ETC2 RGBA and EAC, 128 for BC7, 0 for BC5
-    /// and ETC2 RGB].
+    /// and ETC2 RGB]. For ASTC, how far back earlier heads are re-weighted and earlier weights
+    /// refitted [default: 256].
     #[arg(long)]
     refine_back: Option<usize>,
     /// Beyond --max-back, earlier blocks whose endpoints are tried re-indexed, each distinct pair
