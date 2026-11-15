@@ -17,10 +17,10 @@
 //! real Zstd does not shrink goes back to its base encoding.
 
 use super::{
-    Footprint, Layout, MAX_TEXELS, NO_CCS, Texels, infill, polish_parts, quantize, read_block, refit, round_pos,
+    Footprint, Layout, MAX_TEXELS, NO_CCS, Texels, polish_parts, quantize, read_block, refit, round_pos,
     sym_endpoints, tables,
 };
-use crate::astc::{COLOR_UNQUANT, PartitionFn, Symbolic, WEIGHT_UNQUANT, color_range, decode_block, decode_symbolic};
+use crate::astc::{COLOR_UNQUANT, PartitionFn, Symbolic, color_range, decode_block, decode_symbolic_tw};
 use crate::format::Format;
 use crate::rdo::{LzModel, LzState, RdoParams, RdoStats, VERIFY_QUICK, bit_budget};
 use crate::surface::{Rgba, Surface};
@@ -129,8 +129,9 @@ fn layout_of(fp: &Footprint, sym: &Symbolic) -> Layout {
 
 /// `sym`'s fields, labels and grid, if the candidates can build on them: up to three partitions,
 /// each luminance (0), direct (8, 12), base+offset (9, 13) or base+scale (6, 10), as the encoder
-/// writes. Boxed in one of `spare`'s boxes if it has one.
-fn prev_sym(fp: &Footprint, sym: Symbolic, spare: &mut Vec<Box<PrevSym>>) -> Option<Box<PrevSym>> {
+/// writes. `tw` holds its weights infilled to the texels, as its decode left them. Boxed in one of
+/// `spare`'s boxes if it has one.
+fn prev_sym(fp: &Footprint, sym: Symbolic, tw: &[[u8; MAX_TEXELS]; 2], spare: &mut Vec<Box<PrevSym>>) -> Option<Box<PrevSym>> {
     let p = sym.partitions as usize;
     if p > 3
         || sym.cems[..p]
@@ -144,7 +145,7 @@ fn prev_sym(fp: &Footprint, sym: Symbolic, spare: &mut Vec<Box<PrevSym>>) -> Opt
         .iter()
         .position(|g| g.gx == sym.mode.gx && g.gy == sym.mode.gy)?;
     let lay = layout_of(fp, &sym);
-    let refit = refit_base(fp, &lay, gi, &sym);
+    let refit = refit_base(fp, &lay, gi, &sym, tw);
     let mut eps = [([0i32; 4], [0i32; 4]); 3];
     for (q, e) in eps.iter_mut().enumerate().take(p) {
         *e = sym_endpoints(&sym, q);
@@ -165,20 +166,13 @@ fn prev_sym(fp: &Footprint, sym: Symbolic, spare: &mut Vec<Box<PrevSym>>) -> Opt
     })
 }
 
-/// The texel-independent parts of refitting endpoints to `sym`'s weights (see [`RefitBase`]).
-fn refit_base(fp: &Footprint, lay: &Layout, gi: usize, sym: &Symbolic) -> Option<RefitBase> {
-    let grid = &fp.grids[gi];
-    let wu = &WEIGHT_UNQUANT[sym.mode.quant as usize];
+/// The texel-independent parts of refitting endpoints to `sym`'s weights (see [`RefitBase`]), given
+/// its weights infilled to the texels, `tw`.
+fn refit_base(fp: &Footprint, lay: &Layout, gi: usize, sym: &Symbolic, tw: &[[u8; MAX_TEXELS]; 2]) -> Option<RefitBase> {
+    debug_assert_eq!(fp.grids[gi].rev.len(), sym.mode.gx as usize * sym.mode.gy as usize);
     let planes = 1 + sym.mode.dual as usize;
-    let kk = grid.rev.len() * planes;
-    let mut g = [0u8; 64];
-    for j in 0..kk {
-        g[j] = wu[sym.weights[j] as usize];
-    }
     let mut w = [[0u8; MAX_TEXELS]; 2];
-    for (pl, wp) in w.iter_mut().enumerate().take(planes) {
-        infill(grid, &g, planes, pl, wp);
-    }
+    w[..planes].copy_from_slice(&tw[..planes]);
     // Refitted endpoints are written direct: RGB (CEM 8) for RGB heads, RGBA (CEM 12) for the rest.
     let p = sym.partitions as usize;
     let cem = if sym.cems[..p].iter().all(|c| matches!(c, 0 | 6 | 8 | 9)) {
@@ -511,6 +505,9 @@ fn optimize_chunk(
     let mut dsums: Vec<[i32; 4]> = Vec::with_capacity(count);
     let mut px = vec![[0u8; 4]; n];
     let mut dec = [[0u8; 4]; MAX_TEXELS];
+    // The base's and the chosen block's weights infilled to the texels, from their decodes.
+    let mut dec_tw = [[0u8; MAX_TEXELS]; 2];
+    let mut best_tw = [[0u8; MAX_TEXELS]; 2];
     let mut seen = crate::rdo::BlockSet::default();
     let mut heads = crate::rdo::BlockSet::default();
     let mut tails = crate::rdo::BlockSet::default();
@@ -525,7 +522,7 @@ fn optimize_chunk(
         // Read once: the decode and (if the block stays) the fields later blocks build on.
         let base_sym = Symbolic::read(u128::from_le_bytes(base), bw, bh);
         match &base_sym {
-            Some(sym) => decode_symbolic(sym, bw, bh, srgb, &mut dec[..n]),
+            Some(sym) => decode_symbolic_tw(sym, bw, bh, srgb, &mut dec[..n], &mut dec_tw),
             None => decode_block(&base, bw, bh, srgb, &mut dec[..n]),
         }
         let base_err = sse(&px, &dec[..n]);
@@ -631,21 +628,21 @@ fn optimize_chunk(
         data[i * 16..i * 16 + 16].copy_from_slice(&best.1);
         // Block `i - max_back`'s slot: no later block copies it whole.
         let di = &mut decs[i % slots * n..][..n];
-        let sym = if best.1 == base {
+        let (sym, tw) = if best.1 == base {
             di.copy_from_slice(&dec[..n]);
-            base_sym
+            (base_sym, &dec_tw)
         } else {
             let sym = Symbolic::read(u128::from_le_bytes(best.1), bw, bh);
             match &sym {
-                Some(sym) => decode_symbolic(sym, bw, bh, srgb, di),
+                Some(sym) => decode_symbolic_tw(sym, bw, bh, srgb, di, &mut best_tw),
                 None => decode_block(&best.1, bw, bh, srgb, di),
             }
-            sym
+            (sym, &best_tw)
         };
         dsums.push(std::array::from_fn(|c| di.iter().map(|d| d[c] as i32).sum()));
         prevs.push(Prev {
             bytes: best.1,
-            sym: if refit_back > 0 { sym.and_then(|s| prev_sym(fp, s, &mut spare)) } else { None },
+            sym: if refit_back > 0 { sym.and_then(|s| prev_sym(fp, s, tw, &mut spare)) } else { None },
         });
         // No later block reweights or refits block `i - refit_back`: its box goes to the next block
         // (a chunk's worth is megabytes of fresh pages, and a box a heap call).

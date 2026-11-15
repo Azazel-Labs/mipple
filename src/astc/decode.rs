@@ -198,6 +198,12 @@ pub fn decode_block(raw: &[u8; 16], bw: u32, bh: u32, srgb: bool, out: &mut [Rgb
 
 /// [`decode_block`] for a block already read into fields (not void-extent).
 pub fn decode_symbolic(sym: &Symbolic, bw: u32, bh: u32, srgb: bool, out: &mut [Rgba]) {
+    decode_symbolic_tw(sym, bw, bh, srgb, out, &mut [[0; 144]; 2]);
+}
+
+/// [`decode_symbolic`], also leaving each plane's weights infilled to the texels (0..=64) in `tw`
+/// (planes past the mode's untouched; none if a partition's mode is HDR).
+pub fn decode_symbolic_tw(sym: &Symbolic, bw: u32, bh: u32, srgb: bool, out: &mut [Rgba], tw: &mut [[u8; 144]; 2]) {
     let n = (bw * bh) as usize;
     let p = sym.partitions as usize;
     let mut eps = [([0i32; 4], [0i32; 4]); 4];
@@ -224,7 +230,6 @@ pub fn decode_symbolic(sym: &Symbolic, bw: u32, bh: u32, srgb: bool, out: &mut [
     }
     let planes = 1 + sym.mode.dual as usize;
     let (gx, gy) = (sym.mode.gx as u32, sym.mode.gy as u32);
-    let mut tw = [[0u8; 144]; 2];
     for (pl, twp) in tw.iter_mut().enumerate().take(planes) {
         infill_all(&w, gx, gy, planes, pl, bw, bh, twp);
     }

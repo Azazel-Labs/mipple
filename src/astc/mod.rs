@@ -13,7 +13,7 @@ pub mod encode;
 pub mod file;
 mod lanes;
 
-pub use decode::{decode_block, decode_rgba, decode_symbolic};
+pub use decode::{decode_block, decode_rgba, decode_symbolic, decode_symbolic_tw};
 
 /// The ISE ranges by index: levels, then the (trits, quints, bits) layout of each.
 pub const RANGES: [u16; 21] = [
