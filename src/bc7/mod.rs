@@ -1889,21 +1889,41 @@ pub fn refit_exceeds(mode: u8, partition: u8, idx: &[u8; 16], px: &Block, w: &[u
     let mi = MODES[mode as usize];
     debug_assert_eq!(mi.ib2, 0);
     let wt = weights(mi.ib);
-    // Per subset: n, Σt, Σt², then per channel Σx, Σx², Σtx.
-    let mut sum = [[0f64; 15]; 3];
-    for (i, p) in px.iter().enumerate() {
-        let s = &mut sum[subset_of(mi.ns, partition, i)];
-        let t = f64::from(wt[idx[i] as usize]) / 64.0;
-        s[0] += 1.0;
+    // Per subset: n, Σw, Σw², then per channel Σx, Σx², Σwx, with w = 64 t: integers, exact (and
+    // equal to the f64 sums over t, which are exact too: multiples of 1/4096 far below 2^53).
+    let mut si = [[0u32; 15]; 3];
+    let add = |s: &mut [u32; 15], i: usize| {
+        let t = wt[idx[i] as usize];
+        let p = px[i];
+        s[0] += 1;
         s[1] += t;
         s[2] += t * t;
         for c in 0..4 {
-            let x = f64::from(p[c]);
+            let x = u32::from(p[c]);
             s[3 + c] += x;
             s[7 + c] += x * x;
             s[11 + c] += t * x;
         }
+    };
+    if mi.ns == 1 {
+        for i in 0..16 {
+            add(&mut si[0], i);
+        }
+    } else {
+        for i in 0..16 {
+            add(&mut si[subset_of(mi.ns, partition, i)], i);
+        }
     }
+    let sum: [[f64; 15]; 3] = si.map(|s| {
+        std::array::from_fn(|k| {
+            let v = f64::from(s[k]);
+            match k {
+                1 | 11..=14 => v / 64.0,
+                2 => v / 4096.0,
+                _ => v,
+            }
+        })
+    });
     let mut lb = 0f64;
     for s in &sum[..mi.ns as usize] {
         let [n, st, stt] = [s[0], s[1], s[2]];
