@@ -254,16 +254,21 @@ struct Pattern {
     lab: Box<[i16; MAX_TEXELS]>,
 }
 
+/// One partition count's distinct patterns, with no empty partition.
+struct Parts {
+    pats: Vec<Pattern>,
+    /// The patterns' texel masks, packed: per pattern, `nw` words for partition 0, then (three
+    /// partitions) `nw` for partition 1.
+    masks: Vec<u64>,
+}
+
 /// The weight grids and partition patterns of one footprint, built once per surface.
 pub struct Footprint {
     pub bw: u32,
     pub bh: u32,
     grids: Vec<Grid>,
-    /// Distinct two- and three-partition patterns with no empty partition.
-    patterns: [Vec<Pattern>; 2],
-    /// The patterns' texel masks, packed: per pattern, `nw` words for partition 0, then (three
-    /// partitions) `nw` for partition 1.
-    pmasks: [Vec<u64>; 2],
+    /// Distinct two- and three-partition patterns, built on first use: [`Footprint::parts`].
+    parts: [std::sync::OnceLock<Parts>; 2],
     /// Mask words per texel mask.
     nw: usize,
     /// Orthonormal DCT-II bases across and down: `dct_x[x * pad(bw) + f]` (transposed, padded),
@@ -326,12 +331,13 @@ impl Footprint {
         assert!((4..=12).contains(&bw) && (4..=12).contains(&bh), "footprint {bw}x{bh}");
         let n = (bw * bh) as usize;
         let mut grids = Vec::new();
+        // Every valid block mode, in field order, decoded once for all the grids.
+        let all: Vec<BlockMode> = (0..2048).filter_map(block_mode).collect();
         for gy in 2..=bh {
             for gx in 2..=bw {
                 let mut modes: Vec<(BlockMode, [[u8; 5]; 3])> = Vec::new();
                 let mut dual: Vec<(BlockMode, [u8; 2])> = Vec::new();
-                for m in 0..2048 {
-                    let Some(bm) = block_mode(m) else { continue };
+                for &bm in &all {
                     if bm.gx as u32 != gx || bm.gy as u32 != gy {
                         continue;
                     }
@@ -472,57 +478,12 @@ impl Footprint {
                 });
             }
         }
-        let patterns = std::array::from_fn(|pi| {
-            let count = pi as u32 + 2;
-            let mut seen = std::collections::HashSet::new();
-            let mut out = Vec::new();
-            for seed in 0..1024u32 {
-                let pf = super::PartitionFn::new(seed, count, n as u32);
-                let labels: Vec<u8> = (0..n as u32).map(|i| pf.at(i % bw, i / bw)).collect();
-                // Relabel in order of first appearance, so patterns that only permute labels match.
-                let mut map = [u8::MAX; 4];
-                let mut next = 0;
-                let canon: Vec<u8> = labels
-                    .iter()
-                    .map(|&l| {
-                        if map[l as usize] == u8::MAX {
-                            map[l as usize] = next;
-                            next += 1;
-                        }
-                        map[l as usize]
-                    })
-                    .collect();
-                if next as u32 != count || !seen.insert(canon) {
-                    continue;
-                }
-                let mut lab = Box::new([-1i16; MAX_TEXELS]);
-                for (o, &l) in lab.iter_mut().zip(&labels) {
-                    *o = l as i16;
-                }
-                out.push(Pattern { seed: seed as u16, lab });
-            }
-            out
-        });
-        let nw = n.div_ceil(64);
-        let pmasks = std::array::from_fn(|pi| {
-            let pats: &Vec<Pattern> = &patterns[pi];
-            let mut m = vec![0u64; pats.len() * nw * (pi + 1)];
-            for (j, pat) in pats.iter().enumerate() {
-                for (i, &l) in pat.lab[..n].iter().enumerate() {
-                    if (l as usize) <= pi {
-                        m[(j * (pi + 1) + l as usize) * nw + i / 64] |= 1 << (i % 64);
-                    }
-                }
-            }
-            m
-        });
         Footprint {
             bw,
             bh,
             grids,
-            patterns,
-            pmasks,
-            nw,
+            parts: [const { std::sync::OnceLock::new() }; 2],
+            nw: n.div_ceil(64),
             dct_x: {
                 let b = dct_basis(bw);
                 let (w, sw) = (bw as usize, pad(bw as usize));
@@ -532,6 +493,52 @@ impl Footprint {
             },
             dct_y: dct_basis(bh),
         }
+    }
+
+    /// The distinct `pi + 2`-partition patterns and their masks, built on first use (the faster
+    /// efforts never try three partitions).
+    fn parts(&self, pi: usize) -> &Parts {
+        self.parts[pi].get_or_init(|| {
+            let (bw, n, nw) = (self.bw, self.texels(), self.nw);
+            let count = pi as u32 + 2;
+            // Canonical labels packed two bits a texel: no allocation per seed.
+            let mut seen = std::collections::HashSet::with_capacity(1024);
+            let mut pats = Vec::new();
+            let mut labels = [0u8; MAX_TEXELS];
+            for seed in 0..1024u32 {
+                let pf = super::PartitionFn::new(seed, count, n as u32);
+                // Relabel in order of first appearance, so patterns that only permute labels match.
+                let mut map = [u8::MAX; 4];
+                let mut next = 0;
+                let mut canon = [0u64; MAX_TEXELS.div_ceil(32)];
+                for i in 0..n {
+                    let l = pf.at(i as u32 % bw, i as u32 / bw);
+                    labels[i] = l;
+                    if map[l as usize] == u8::MAX {
+                        map[l as usize] = next;
+                        next += 1;
+                    }
+                    canon[i / 32] |= (map[l as usize] as u64) << (2 * (i % 32));
+                }
+                if next as u32 != count || !seen.insert(canon) {
+                    continue;
+                }
+                let mut lab = Box::new([-1i16; MAX_TEXELS]);
+                for (o, &l) in lab.iter_mut().zip(&labels[..n]) {
+                    *o = l as i16;
+                }
+                pats.push(Pattern { seed: seed as u16, lab });
+            }
+            let mut masks = vec![0u64; pats.len() * nw * (pi + 1)];
+            for (j, pat) in pats.iter().enumerate() {
+                for (i, &l) in pat.lab[..n].iter().enumerate() {
+                    if (l as usize) <= pi {
+                        masks[(j * (pi + 1) + l as usize) * nw + i / 64] |= 1 << (i % 64);
+                    }
+                }
+            }
+            Parts { pats, masks }
+        })
     }
 
     fn texels(&self) -> usize {
@@ -565,6 +572,42 @@ fn neighbors<const N: usize>(u: &[u8]) -> [[u8; N]; 2] {
     nb
 }
 
+/// For each value `v` in `out`'s range, the code whose level in `u` is nearest `v`, the lowest
+/// such code on a tie: `(0..u.len()).min_by_key(|&c| ((u[c] - v).abs(), c))`, by a sweep.
+fn nearest(u: &[u8], out: &mut [u8]) {
+    assert!(u.iter().all(|&l| (l as usize) < out.len()));
+    // The lowest code at each level.
+    let mut code = [u16::MAX; 256];
+    for (c, &l) in u.iter().enumerate().rev() {
+        code[l as usize] = c as u16;
+    }
+    // The nearest level at or below each value, then at or above.
+    let mut below = [i32::MIN / 2; 256];
+    let mut last = i32::MIN / 2;
+    for v in 0..out.len() {
+        if code[v] != u16::MAX {
+            last = v as i32;
+        }
+        below[v] = last;
+    }
+    let mut next = i32::MAX / 2;
+    for v in (0..out.len()).rev() {
+        if code[v] != u16::MAX {
+            next = v as i32;
+        }
+        let (lo, hi) = (below[v], next);
+        let (dl, dh) = (v as i32 - lo, hi - v as i32);
+        let pick = |l: i32| code[l as usize];
+        out[v] = if dl < dh {
+            pick(lo)
+        } else if dh < dl {
+            pick(hi)
+        } else {
+            pick(lo).min(pick(hi))
+        } as u8;
+    }
+}
+
 fn tables() -> &'static Tables {
     static T: std::sync::OnceLock<Box<Tables>> = std::sync::OnceLock::new();
     T.get_or_init(|| {
@@ -578,9 +621,7 @@ fn tables() -> &'static Tables {
         for q in 0..WEIGHT_RANGES {
             let n = RANGES[q] as usize;
             let u = &WEIGHT_UNQUANT[q][..n];
-            for v in 0..=64i32 {
-                t.wq[q][v as usize] = (0..n).min_by_key(|&c| ((u[c] as i32 - v).abs(), c)).unwrap() as u8;
-            }
+            nearest(u, &mut t.wq[q]);
             for c in 0..n {
                 t.winv[q][c] = (0..n)
                     .find(|&d| u[d] as i32 == 64 - u[c] as i32)
@@ -591,9 +632,7 @@ fn tables() -> &'static Tables {
         for q in 0..21 {
             let n = RANGES[q] as usize;
             let u = &COLOR_UNQUANT[q][..n];
-            for v in 0..=255i32 {
-                t.cq[q][v as usize] = (0..n).min_by_key(|&c| ((u[c] as i32 - v).abs(), c)).unwrap() as u8;
-            }
+            nearest(u, &mut t.cq[q]);
             t.cnb[q] = neighbors(u);
         }
         t
@@ -1553,7 +1592,7 @@ impl QuadSums {
     }
 }
 
-/// [`off_lines`] for RGB texels split by `masks` (as in [`Footprint::pmasks`], `nw` words per
+/// [`off_lines`] for RGB texels split by `masks` (as in [`Parts::masks`], `nw` words per
 /// partition) into `count` partitions, whose moments all together are `total`: the last
 /// partition's are what the others leave. Each partition's line is found by `LINE_STEPS` power
 /// steps from the block's dominant `axis`: on 8 Kodak images, 3 rank as well as 8 (and 1 nearly
@@ -2101,9 +2140,9 @@ fn rank_patterns_popcnt(fp: &Footprint, k: usize, km: &[[u64; 3]; 3], n: u32, wa
 #[inline(always)]
 fn rank_patterns_generic(fp: &Footprint, k: usize, km: &[[u64; 3]; 3], n: u32, want: usize) -> Vec<usize> {
     match fp.nw {
-        1 => rank_scan::<1>(&fp.pmasks[k - 2], k, km, n, want),
-        2 => rank_scan::<2>(&fp.pmasks[k - 2], k, km, n, want),
-        _ => rank_scan::<3>(&fp.pmasks[k - 2], k, km, n, want),
+        1 => rank_scan::<1>(&fp.parts(k - 2).masks, k, km, n, want),
+        2 => rank_scan::<2>(&fp.parts(k - 2).masks, k, km, n, want),
+        _ => rank_scan::<3>(&fp.parts(k - 2).masks, k, km, n, want),
     }
 }
 
@@ -2503,8 +2542,12 @@ pub fn encode_block(fp: &Footprint, px: &[Rgba], srgb: bool, effort: u8) -> [u8;
     let mut quad: Option<QuadSums> = None;
     for (pi, &want) in es.patterns.iter().enumerate() {
         let k = pi + 2;
-        let pats = &fp.patterns[pi];
-        if want == 0 || pats.is_empty() || off_line < es.line[pi] {
+        if want == 0 || off_line < es.line[pi] {
+            continue;
+        }
+        let parts = fp.parts(pi);
+        let pats = &parts.pats;
+        if pats.is_empty() {
             continue;
         }
         let km = kmeans(&t, k, &axis1, &mean1);
@@ -2528,7 +2571,7 @@ pub fn encode_block(fp: &Footprint, px: &[Rgba], srgb: bool, effort: u8) -> [u8;
                 for chunk in ranked.chunks(RR_LANES) {
                     let masks = std::array::from_fn(|l| {
                         let i = chunk[l.min(chunk.len() - 1)];
-                        &fp.pmasks[pi][i * stride..(i + 1) * stride]
+                        &parts.masks[i * stride..(i + 1) * stride]
                     });
                     let o = off_lines_rgb(&t, q, masks, nw, k, &ms1[0], &axis1);
                     for (&i, o) in chunk.iter().zip(o) {
@@ -2848,6 +2891,26 @@ pub fn encode_surface(s: &Surface, bw: u32, bh: u32, srgb: bool, effort: u8) -> 
 mod tests {
     use super::super::decode::decode_block;
     use super::*;
+
+    #[test]
+    fn nearest_matches_brute_force() {
+        let check = |u: &[u8], vals: usize| {
+            let mut out = vec![0u8; vals];
+            nearest(u, &mut out);
+            for (v, &o) in out.iter().enumerate() {
+                let want = (0..u.len()).min_by_key(|&c| ((u[c] as i32 - v as i32).abs(), c)).unwrap();
+                assert_eq!(o as usize, want, "levels {u:?} value {v}");
+            }
+        };
+        for q in 0..WEIGHT_RANGES {
+            check(&WEIGHT_UNQUANT[q][..RANGES[q] as usize], 65);
+        }
+        for q in 0..21 {
+            check(&COLOR_UNQUANT[q][..RANGES[q] as usize], 256);
+        }
+        // Repeated levels and gaps: the lowest code wins a tie.
+        check(&[9, 3, 9, 3, 200, 0], 256);
+    }
 
     fn rng(seed: &mut u64) -> u64 {
         *seed ^= *seed << 13;
