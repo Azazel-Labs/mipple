@@ -75,9 +75,9 @@ pub struct RdoParams {
     pub chain_depth: usize,
     /// After optimizing a chunk, compress it with real Zstd at this level and revert the
     /// chunk to its base encoding if RDO did not make it smaller. `None` skips the check, and
-    /// BC7 skips it for chunks the rate model says shrank to [`VERIFY_SKIP7`] or less, and every
-    /// format for chunks Zstd level 1 shrinks to [`VERIFY_QUICK`] or less. ASTC checks at no more
-    /// than level 15 (see `astc::encode::rdo`).
+    /// BC7 skips it for chunks the rate model says shrank to [`VERIFY_SKIP7`] or less, and the
+    /// other formats for chunks Zstd level 1 shrinks to [`VERIFY_QUICK`] or less. ASTC checks only
+    /// chunks level 1 says grew, at no more than level 15 (see `astc::encode::rdo`).
     pub verify_zstd_level: Option<i32>,
     /// BC7: refit endpoints with the entropy-reduced quantization (set when the base encode
     /// used [`crate::format::BlockOpts::reduce_entropy`]).

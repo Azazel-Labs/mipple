@@ -22,7 +22,7 @@ use super::{
 };
 use crate::astc::{COLOR_UNQUANT, PartitionFn, Symbolic, color_range, decode_block, decode_symbolic_tw};
 use crate::format::Format;
-use crate::rdo::{LzModel, LzState, RdoParams, RdoStats, VERIFY_QUICK, bit_budget};
+use crate::rdo::{LzModel, LzState, RdoParams, RdoStats, bit_budget};
 use crate::surface::{Rgba, Surface};
 use rayon::prelude::*;
 
@@ -676,12 +676,8 @@ fn optimize_chunk(
     if let (Some(level), Some(original)) = (p.verify_zstd_level, original) {
         let level = level.min(VERIFY_MAX_LEVEL);
         let size = crate::rdo::zstd_size;
-        // Level 1 alone decides a chunk it shrinks a lot, or a fair amount and by about what the
-        // rate model estimated (the model misjudges chunks long matches at level 19 favour).
-        let r1 = size(data, 1) as f64 / size(&original, 1) as f64;
-        let est = stats.est_bits_after / stats.est_bits_before;
-        let quick = level > 1 && (r1 <= VERIFY_QUICK || (r1 <= VERIFY_SURE && (est - r1).abs() <= VERIFY_AGREE));
-        if !quick && size(data, level) >= size(&original, level) {
+        // Only a chunk Zstd level 1 says RDO grew gets the check at `level` (see [`VERIFY_MAX_LEVEL`]).
+        if size(data, 1) > size(&original, 1) && (level == 1 || size(data, level) >= size(&original, level)) {
             data.copy_from_slice(&original);
             stats.changed = 0;
             stats.est_bits_after = stats.est_bits_before;
@@ -691,17 +687,16 @@ fn optimize_chunk(
     stats
 }
 
-/// A chunk Zstd level 1 shrinks to this or less, within [`VERIFY_AGREE`] of the rate model's
-/// estimate, skips the full check: none of the 12,015 such chunks (of 14,480) over 24 Kodak, 16 Poly
-/// Haven and 6 synthetic images (footprints 4x4, 6x6 and 8x8, λ 0.1 to 4, window 1 and full) grew at
-/// level 19. At 0.999 one did, by 0.09%.
-const VERIFY_SURE: f64 = 0.998;
-const VERIFY_AGREE: f64 = 0.03;
-
 /// The check runs at most at this level, a fraction of level 19's time. It keeps or reverts the same
 /// chunks as level 19 for all 24 Kodak images (6x6, λ 0.25, window 1) and for 146 of 150 encodes of
 /// 16 Poly Haven, 6 synthetic and 8 Kodak images (4x4 to 8x8, λ 0.5 to 4); the other four end up
 /// within 41 bytes of level 19's Zstd-19 size (three larger, one smaller), at the same PSNR.
+///
+/// Only chunks Zstd level 1 says RDO grew get this check. Over 14,480 chunks of 24 Kodak, 16 Poly
+/// Haven and 6 synthetic images (footprints 4x4, 6x6 and 8x8; λ 0.3, 1 and 2 at window 1, λ 0.5 and
+/// 2 at the full window) that is 186 chunks, and the result comes to 330 bytes over a perfect level-19
+/// check across all of them. Checking every chunk level 1 did not shrink by about the rate model's
+/// estimate (1,461 chunks) came to 766, and no check at all to 491, with one chunk 8.2% larger.
 const VERIFY_MAX_LEVEL: i32 = 15;
 
 /// Runs RDO in place over one level's ASTC blocks (`data`, raster order, as

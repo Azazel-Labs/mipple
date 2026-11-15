@@ -291,10 +291,19 @@ Measured on Kodak images 1-3, single thread, effort 0, unless noted. ISPC fast t
   each finished block's 16 bytes back into symbols for the next block. Keeping the winning
   candidate's symbols instead is byte-identical but no faster (Kodak 6x6 λ 0.3 w1 3.05 s against
   3.03 s, within noise).
-- **A lower Zstd level for the full keep-or-revert check.** Only about 6% of 16 KiB chunks get past the
-  level-1 quick rule. On those (220 chunks over 20 images, 4x4 to 8x8, λ 0.3 to 2), level 12 disagrees
-  with level 15 on 30 keep-or-revert decisions and level 9 on 60, which would cost 1.8 KB and 4.8 KB
-  at level 19. The few chunks that reach the check are the close calls, so the full level stays.
+- **A lower Zstd level for the full keep-or-revert check.** Measured when the check still ran on
+  every chunk Zstd level 1 did not shrink by about the rate model's estimate: 1,461 of 14,480 chunks
+  of 24 Kodak, 16 Poly Haven and 6 synthetic images (4x4, 6x6 and 8x8; λ 0.3, 1 and 2 at window 1, λ
+  0.5 and 2 at the full window). Level 12 disagrees with level 15 on 106 of those keep-or-revert
+  decisions and level 9 on 235. Against a perfect level-19 check that costs 2.8 KB and 15.5 KB at
+  level 19, where level 15 costs 0.8 KB. Levels 11 and up take 460 to 600 µs per chunk, levels 9 and
+  10 only 60 to 70 µs. Level 9 on Kodak 6x6 λ 0.3 w1: 2.95 s against 3.01 s, but worse on both
+  quality and size (37.663 dB and 3.200 bpt against 37.664 dB and 3.198 bpt). Checking only the
+  chunks level 1 says RDO grew does better: 186 checks, and 330 bytes over a perfect check.
+- **Dropping refit_to at window 1.** Only reweighting the previous block's head, without refitting
+  endpoints to its weights: Kodak 6x6 λ 0.3 w1 3.02 s against 3.03 s, 3.201 bpt against 3.198.
+- **Counting partition texels in registers and caching the starting error in polish_parts.**
+  Byte-identical, 3.00 s against 3.01 s on Kodak 6x6 λ 0.3 w1, within noise.
 
 ## ETC2 / EAC
 
