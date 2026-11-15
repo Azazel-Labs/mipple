@@ -2458,12 +2458,22 @@ pub fn encode_block(fp: &Footprint, px: &[Rgba], srgb: bool, effort: u8) -> [u8;
     let cem = if alpha { 12u8 } else { 8 };
     let ce = alpha as usize;
     let es = effort_settings(effort, n);
+    let mut scratch = SCRATCH.take().unwrap_or_default();
+    let Scratch {
+        layouts,
+        short_top,
+        spans,
+        cands,
+        measured,
+        decimated,
+        finals,
+    } = &mut *scratch;
+    layouts.clear();
     // One partition's moments and principal axis, shared by the one-partition layouts and k-means.
     let lab1: [i16; MAX_TEXELS] = std::array::from_fn(|i| if i < n { 0 } else { -1 });
     let ms1 = Moments::of(&t, &lab1, 1);
     let (mean1, cov) = ms1[0].mean_cov();
     let axis1 = dominant(&cov);
-    let mut layouts = Vec::with_capacity(1 + es.dual + es.patterns.iter().sum::<usize>());
     layouts.push(Layout::new(&t, 1, 0, &lab1, NO_CCS, &ms1, Some(axis1)));
     // The texels' mean squared distance from their line, per channel.
     let off_line = layouts[0].orth / (n * t.ch) as f32;
@@ -2551,10 +2561,12 @@ pub fn encode_block(fp: &Footprint, px: &[Rgba], srgb: bool, effort: u8) -> [u8;
     };
     let unord = |b: u32| f32::from_bits(b ^ (!((b as i32 >> 31) as u32) | 0x8000_0000));
     let empty = (ord(f32::MAX) as u64) << 32 | u32::MAX as u64;
-    let mut top = vec![empty; short];
+    let top = short_top;
+    top.clear();
+    top.resize(short, empty);
     assert!(layouts.len() < 256 && fp.grids.len() < 256);
     // Each layout's span (below) and estimate kind.
-    let mut spans = Vec::with_capacity(layouts.len());
+    spans.clear();
     let per_texel = n as f32 * t.ch as f32;
     let mut v = [0f32; MAX_TEXELS];
     for (li, lay) in layouts.iter().enumerate() {
@@ -2626,7 +2638,7 @@ pub fn encode_block(fp: &Footprint, px: &[Rgba], srgb: bool, effort: u8) -> [u8;
                         continue;
                     }
                     // The last drops out.
-                    for k in &mut top {
+                    for k in top.iter_mut() {
                         let lo = x.min(*k);
                         x = x.max(*k);
                         *k = lo;
@@ -2636,9 +2648,8 @@ pub fn encode_block(fp: &Footprint, px: &[Rgba], srgb: bool, effort: u8) -> [u8;
             }
         }
     }
-    let mut cands: Vec<(f32, f32, u16, u16, u16, u8)> = top
-        .iter()
-        .take_while(|&&k| k != empty)
+    cands.clear();
+    cands.extend(top.iter().take_while(|&&k| k != empty)
         .map(|&k| {
             let (li, gi, ei) = ((k >> 24) as u8 as usize, (k >> 16) as u8 as usize, k as u16 as usize);
             let v = ei >> 14;
@@ -2651,14 +2662,12 @@ pub fn encode_block(fp: &Footprint, px: &[Rgba], srgb: bool, effort: u8) -> [u8;
             let e = &fp.grids[gi].est[kind][ei & 0x3fff];
             let rest = span * e.wnoise + per_texel * e.cnoise + orth;
             (unord((k >> 32) as u32), rest, li as u16, gi as u16, e.mi, v as u8)
-        })
-        .collect();
-    type Cand = (f32, f32, u16, u16, u16, u8);
+        }));
     let by_score = |a: &Cand, b: &Cand| a.0.total_cmp(&b.0);
     // Measured decimation errors by (layout, grid), and the decimated weights per plane.
-    let mut measured: Vec<(u16, u16, f32)> = Vec::with_capacity(short);
-    let mut decimated: Vec<[[f32; 64]; 2]> = Vec::with_capacity(short);
-    for c in &mut cands {
+    measured.clear();
+    decimated.clear();
+    for c in cands.iter_mut() {
         let (li, gi) = (c.2, c.3);
         let derr = match measured.iter().find(|m| m.0 == li && m.1 == gi) {
             Some(m) => m.2,
@@ -2685,13 +2694,14 @@ pub fn encode_block(fp: &Footprint, px: &[Rgba], srgb: bool, effort: u8) -> [u8;
     cands.sort_unstable_by(by_score);
     // The `es.top` closest candidates' encodings, closest first.
     let topk = es.top.max(1);
-    let mut top: Vec<(u32, Symbolic, (usize, usize))> = Vec::with_capacity(topk + 1);
+    let top = finals;
+    top.clear();
     let mut codes = [0u8; 64];
     // Base+offset and base+scale endpoints for the same weights are tried on each candidate's last
     // refinement only: on Kodak at effort 2, against every refinement, 12% / 3% / 3% less time at
     // 4x4 / 6x6 / 8x8 for 0.014 dB at 4x4 and none above. On the winner alone, 4x4 loses 0.039
     // dB, and 8x8 at effort 5 1.6% in BD-rate (`mipple check`).
-    for &(_, _, li, gi, mi, v) in &cands {
+    for &(_, _, li, gi, mi, v) in cands.iter() {
         let lay = &layouts[li as usize];
         let grid = &fp.grids[gi as usize];
         let (ce, scale) = match v {
@@ -2765,7 +2775,7 @@ pub fn encode_block(fp: &Footprint, px: &[Rgba], srgb: bool, effort: u8) -> [u8;
     }
     // Polish reorders the candidates' errors, so each finalist is polished and the best kept.
     let mut best: Option<(u32, Symbolic)> = None;
-    for (err, mut sym, (li, gi)) in top {
+    for (err, mut sym, (li, gi)) in top.drain(..) {
         let err = if es.polish > 0 {
             polish(&t, &layouts[li], &fp.grids[gi], &mut sym, es.polish)
         } else {
@@ -2775,10 +2785,32 @@ pub fn encode_block(fp: &Footprint, px: &[Rgba], srgb: bool, effort: u8) -> [u8;
             best = Some((err, sym));
         }
     }
+    SCRATCH.set(Some(scratch));
     match best.and_then(|(_, s)| s.write()) {
         Some(v) => v.to_le_bytes(),
         None => void_extent(ERROR),
     }
+}
+
+/// A shortlist candidate: its calibrated score, its score's parts other than decimation, layout,
+/// grid, estimate (mode) index and endpoint variant.
+type Cand = (f32, f32, u16, u16, u16, u8);
+
+/// The lists [`encode_block`] builds, kept per thread so each block reuses the last one's memory
+/// instead of allocating its own (a few kilobytes of layouts and lists per block).
+#[derive(Default)]
+struct Scratch {
+    layouts: Vec<Layout>,
+    short_top: Vec<u64>,
+    spans: Vec<(f32, usize)>,
+    cands: Vec<Cand>,
+    measured: Vec<(u16, u16, f32)>,
+    decimated: Vec<[[f32; 64]; 2]>,
+    finals: Vec<(u32, Symbolic, (usize, usize))>,
+}
+
+thread_local! {
+    static SCRATCH: std::cell::Cell<Option<Box<Scratch>>> = const { std::cell::Cell::new(None) };
 }
 
 /// Reads the `bw` × `bh` block at block (`bx`, `by`), repeating edge texels past the image.
