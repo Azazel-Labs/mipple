@@ -790,6 +790,24 @@ At 6x6 and 8x8 the default beats thorough on all five columns (at 8x8 by only 0.
 0.26 dB better with smaller files but takes 35% longer; effort 4 (45.657 dB, 0.99783, 7.384 / 7.490 bpt,
 21.28 s) and effort 3 (45.522 dB, 0.99780, 7.373 / 7.483 bpt, 12.62 s) beat thorough on all five.
 
+Against astcenc's slowest preset, `-exhaustive`, at 523a4ee (default light RDO; each row is one cloud run,
+both encoders on the same runner; mipple / astcenc exhaustive):
+
+| footprint | mipple setting | PSNR dB | SSIM | Zstd-19 bpt | Deflate-9 bpt | time s | runner |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 4x4 | effort 5 (the default) | 45.736 / 45.636 | 0.99786 / 0.99765 | 7.412 / 7.489 | 7.513 / 7.588 | 48.27 / 192.66 | EPYC 7763 |
+| 6x6 | effort 6 | 38.570 / 38.549 | 0.98708 / 0.98684 | 3.304 / 3.397 | 3.323 / 3.417 | 40.10 / 197.08 | EPYC 7763 |
+| 8x8 | effort 9 | 34.761 / 34.740 | 0.96680 / 0.96646 | 1.887 / 1.925 | 1.894 / 1.933 | 98.93 / 202.53 | EPYC 9V74 |
+
+Each beats exhaustive on all five columns, in 25% / 20% / 49% of its time. The default effort 5 falls
+short of it at 6x6 (38.540 dB) and 8x8 (34.636 dB); at 8x8 efforts 7 and 8 do too (34.702 / 34.721 dB,
+38.45 / 46.56 s), and effort 9 with no RDO (`-l 0`) gives 34.768 dB with files the size of exhaustive's.
+
+At the fast end, a re-run at 523a4ee (EPYC 7763) puts effort 0 at 6x6 at 98% of astcenc fast's time (2.43
+/ 2.47 s), with the same quality and sizes as the table above. At 4x4 the light pass costs more than
+effort 0 and 1 save: by default they take 3.29 / 3.78 s against astcenc fast's 3.05 s, so the 4x4 fast
+row stays at `-l 0`.
+
 Scoring astcenc's files exposed a decoder bug, fixed: a 2- or 3-partition block may spell equal CEMs the long
 way (with the extra CEM bits below the weights), and the decoder read those blocks with the short form's
 endpoint range. mipple's own files never use the long form, so earlier mipple scores are unchanged.

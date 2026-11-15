@@ -321,6 +321,15 @@ Measured on Kodak images 1-3, single thread, effort 0, unless noted. ISPC fast t
   PSNR-size curve as the default 4 on Kodak 6x6 effort 0 w1 (1 at λ 0.08: 37.666 dB / 3.203 bpt; 2 at
   λ 0.15: 37.666 / 3.203; 3 at λ 0.25: 37.662 / 3.189; default at λ 0.3: 37.664 / 3.198), with lower SSIM.
   `--max-rms-ratio 3` and `--min-rms 1.5` change nothing at λ 0.3.
+- **Skipping polish tries whose inputs haven't changed.** A weight's try reads only its texels' infill
+  sums and their partitions' endpoints, so a dirty flag per weight and endpoint code (set when a step
+  touches those) skips tries that would fail again. Byte-identical (390/390), but polish's samples fell
+  only 6.5% at 6x6 effort 0 λ 0.3 w1 and not measurably at 4x4 effort 5 (16.3% of the time either way):
+  steps keep landing until the last pass, so few tries repeat a failure.
+- **Removing the memmoves and the per-block QuadSums memset from the 4x4 rerank.** The keep-best insert
+  and the shortlist insert by hand instead of `copy_within`, and the re-rank table kept in scratch and
+  filled only for the texel groups used. Byte-identical; 19.92 s against 19.35 s CPU on Kodak 1-8 4x4
+  effort 5 (6 interleaved rounds, one pinned core), within noise.
 
 ## ETC2 / EAC
 
