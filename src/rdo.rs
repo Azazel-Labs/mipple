@@ -1710,9 +1710,12 @@ struct Far7Pre {
     hit: Vec<u8>,
 }
 
-/// Multiply-rotate hashing for `u64` keys.
+/// Multiply-rotate hashing for `u64` and `u128` keys.
 #[derive(Default)]
-struct KeyHasher(u64);
+pub(crate) struct KeyHasher(u64);
+
+/// A set of 16-byte blocks hashed with [`KeyHasher`] instead of SipHash.
+pub(crate) type BlockSet = std::collections::HashSet<u128, std::hash::BuildHasherDefault<KeyHasher>>;
 
 impl std::hash::Hasher for KeyHasher {
     fn finish(&self) -> u64 {
@@ -1725,6 +1728,10 @@ impl std::hash::Hasher for KeyHasher {
     }
     fn write_u64(&mut self, x: u64) {
         self.0 = (self.0 ^ x).wrapping_mul(0x9E37_79B9_7F4A_7C15).rotate_left(29);
+    }
+    fn write_u128(&mut self, x: u128) {
+        self.write_u64(x as u64);
+        self.write_u64((x >> 64) as u64);
     }
 }
 

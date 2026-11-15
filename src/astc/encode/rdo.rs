@@ -25,7 +25,6 @@ use crate::format::Format;
 use crate::rdo::{LzModel, LzState, RdoParams, RdoStats, VERIFY_QUICK, bit_budget};
 use crate::surface::{Rgba, Surface};
 use rayon::prelude::*;
-use std::collections::HashSet;
 
 /// How far back the reweight and refit candidates look (whole copies look `max_back` far). On Kodak,
 /// 256 is 4.8-6.6% smaller at equal PSNR than 32 for 2.4x the pass's time, and 512 another 0.3-0.7%
@@ -495,9 +494,9 @@ fn optimize_chunk(
     let mut dsums: Vec<[i32; 4]> = Vec::with_capacity(count);
     let mut px = vec![[0u8; 4]; n];
     let mut dec = [[0u8; 4]; MAX_TEXELS];
-    let mut seen: HashSet<u128> = HashSet::new();
-    let mut heads: HashSet<u128> = HashSet::new();
-    let mut tails: HashSet<u128> = HashSet::new();
+    let mut seen = crate::rdo::BlockSet::default();
+    let mut heads = crate::rdo::BlockSet::default();
+    let mut tails = crate::rdo::BlockSet::default();
     for i in 0..count {
         let bi = first + i;
         read_block(s, bw, bh, (bi % nx) as u32, (bi / nx) as u32, &mut px);
