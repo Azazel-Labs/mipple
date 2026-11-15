@@ -642,14 +642,29 @@ impl Mode6Lo {
 pub struct Mode6Hi {
     wt: [u32; 16],
     p1: u64,
+    /// Σw and Σw² over the weights, and per channel Σx, Σx², Σwx over the texels: with them,
+    /// any endpoints' error along the weights' line is a few multiplies.
+    sw: i64,
+    sww: i64,
+    sums: [[i64; 3]; 4],
 }
 
 impl Mode6Hi {
-    pub fn new(raw: &[u8; 16]) -> Self {
+    pub fn new(raw: &[u8; 16], src: &Block) -> Self {
         let hi = u64::from_le_bytes(raw[8..].try_into().unwrap());
+        let wt = mode6_indices(hi).map(|k| W4[k as usize]);
+        let sums = std::array::from_fn(|c| {
+            src.iter().zip(&wt).fold([0i64; 3], |[sx, sxx, swx], (p, &t)| {
+                let x = i64::from(p[c]);
+                [sx + x, sxx + x * x, swx + i64::from(t) * x]
+            })
+        });
         Self {
-            wt: mode6_indices(hi).map(|k| W4[k as usize]),
+            wt,
             p1: hi & 1,
+            sw: wt.iter().map(|&t| i64::from(t)).sum(),
+            sww: wt.iter().map(|&t| i64::from(t * t)).sum(),
+            sums,
         }
     }
 
@@ -659,6 +674,9 @@ impl Mode6Hi {
     /// [`block_sse`]: crate::surface::block_sse
     pub fn err(&self, lo: u64, src: &Block, w: &[u32; 4], bound: u64) -> u64 {
         let ep = mode6_endpoints(lo, self.p1);
+        if self.exceeds(&ep, w, bound) {
+            return bound.saturating_add(1);
+        }
         let mut e = 0u64;
         for q in 0..4 {
             for i in q * 4..q * 4 + 4 {
@@ -670,6 +688,25 @@ impl Mode6Hi {
             }
         }
         e
+    }
+
+    /// Whether the endpoints `ep` with these weights are certain to exceed `bound`. Per channel,
+    /// the decoded values are those of the line `L = e0 + (e1 − e0)·w/64` rounded, each within 1/2
+    /// of it, so their distance to the texels is at least the line's less `√16 / 2` = 2.
+    fn exceeds(&self, ep: &[[u32; 4]; 2], w: &[u32; 4], bound: u64) -> bool {
+        let mut lb = 0f64;
+        for c in 0..4 {
+            let u = i64::from(ep[0][c]);
+            let v = i64::from(ep[1][c]) - u;
+            let [sx, sxx, swx] = self.sums[c];
+            // 4096·Σ(L − x)² = Σ(64(u − x) + v·w)² = 4096·Σ(u − x)² + 128·v·Σw(u − x) + v²·Σw².
+            let q = 4096 * (16 * u * u - 2 * u * sx + sxx) + 128 * v * (u * self.sw - swx) + v * v * self.sww;
+            let d = (q as f64).sqrt() / 64.0 - 2.0;
+            if d > 0.0 {
+                lb += f64::from(w[c]) * d * d;
+            }
+        }
+        lb * 0.999 > bound as f64
     }
 }
 
