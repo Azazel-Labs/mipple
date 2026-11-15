@@ -25,6 +25,11 @@ use crate::ranker::bc7::{RankBlock7, RankSrc7};
 use crate::surface::{Block, block_sse};
 use rayon::prelude::*;
 
+/// λ of ASTC's default light RDO pass at 4x4, 6x6 and 8x8 ([`RdoParams::default_for`]).
+/// At effort 5 on Kodak-24 these cost 0.005 / 0.021 / 0.007 dB PSNR for Zstd-19 files 0.7% / 2.8% / 2.3%
+/// smaller than no RDO (λ 0.06 / 0.5 / 1: 0.028 / 0.062 / 0.032 dB for 1.6% / 5.4% / 5.9%).
+const ASTC_DEFAULT_LAMBDA: [f32; 3] = [0.03, 0.3, 0.5];
+
 /// RDO tuning knobs.
 #[derive(Clone, Copy, Debug)]
 pub struct RdoParams {
@@ -143,6 +148,36 @@ impl RdoParams {
         Self {
             lambda,
             ..Self::default()
+        }
+    }
+
+    /// The λ of ASTC's default light RDO pass ([`RdoParams::default_for`]); 0 for other formats.
+    pub fn astc_default_lambda(format: Format) -> f32 {
+        match format {
+            Format::Astc4x4 => ASTC_DEFAULT_LAMBDA[0],
+            Format::Astc6x6 => ASTC_DEFAULT_LAMBDA[1],
+            Format::Astc8x8 => ASTC_DEFAULT_LAMBDA[2],
+            _ => 0.0,
+        }
+    }
+
+    /// Default settings for `format`: RDO off, except for ASTC, which gets a light pass that
+    /// looks one block back (`max_back` and `refine_back` 1) at [`RdoParams::astc_default_lambda`].
+    pub fn default_for(format: Format) -> Self {
+        Self::default().light_astc(format)
+    }
+
+    /// For ASTC formats, the default λ, and `max_back` and `refine_back` 1 where unset.
+    /// Other formats are returned unchanged.
+    pub fn light_astc(self, format: Format) -> Self {
+        if !format.is_astc() {
+            return self;
+        }
+        Self {
+            lambda: Self::astc_default_lambda(format),
+            max_back: self.max_back.or(Some(1)),
+            refine_back: self.refine_back.or(Some(1)),
+            ..self
         }
     }
 

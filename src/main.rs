@@ -199,9 +199,11 @@ struct EncodeArgs {
     /// Encoder effort, 0 (fastest) to 9 (best); 5 is balanced.
     #[arg(short, long, default_value_t = mipple::format::DEFAULT_EFFORT, value_parser = clap::value_parser!(u8).range(0..=9))]
     effort: u8,
-    /// RDO lambda; 0 disables RDO. Try 0.5 – 4.
-    #[arg(short, long, default_value_t = 0.0)]
-    lambda: f32,
+    /// RDO lambda; 0 disables RDO. Try 0.5 – 4. Default 0, except for ASTC, which gets a light
+    /// pass looking one block back (`--max-back 1 --refine-back 1` unless given) at 0.03 (4x4),
+    /// 0.3 (6x6) or 0.5 (8x8). An explicit λ for ASTC searches 256 blocks back unless limited.
+    #[arg(short, long)]
+    lambda: Option<f32>,
     /// Treat the input as linear data (default for BC4/BC5; for BC6H, 8-bit input as linear 0-1
     /// instead of sRGB).
     #[arg(long, conflicts_with = "srgb")]
@@ -648,7 +650,7 @@ fn encode_bc6h(a: &EncodeArgs) -> Result<()> {
     let mut opts = EncodeOptions::new(Format::Bc6h);
     opts.effort = a.effort;
     opts.mips = !a.no_mips;
-    opts.rdo = a.rdo.params(a.lambda);
+    opts.rdo = a.rdo.params(a.lambda.unwrap_or(0.0));
     opts.rdo.verify_zstd_level = (a.zstd > 0).then_some(a.zstd);
     rayon::broadcast(|_| ());
     let t = Instant::now();
@@ -658,7 +660,7 @@ fn encode_bc6h(a: &EncodeArgs) -> Result<()> {
     let zstd = (a.zstd > 0).then_some(a.zstd);
     let sc_params = format!(
         "--format bc6h --effort {} --lambda {} --zstd {}",
-        a.effort, a.lambda, a.zstd
+        a.effort, opts.rdo.lambda, a.zstd
     );
     let bytes = if is_dds {
         dds::write(&tex)?
@@ -759,7 +761,10 @@ fn encode(a: EncodeArgs) -> Result<()> {
     } else {
         mipple::GpuMode::Auto
     };
-    opts.rdo = a.rdo.params(a.lambda);
+    opts.rdo = match a.lambda {
+        Some(lambda) => a.rdo.params(lambda),
+        None => a.rdo.params(0.0).light_astc(a.format),
+    };
     opts.rdo.verify_zstd_level = (a.zstd > 0).then_some(a.zstd);
 
     // Start rayon's worker threads before timing, as a long-running host application would.
@@ -774,7 +779,7 @@ fn encode(a: EncodeArgs) -> Result<()> {
             "--format {} --effort {} --lambda {} --window {} --zstd {}",
             a.format,
             a.effort,
-            a.lambda,
+            opts.rdo.lambda,
             opts.rdo.window_for(a.format),
             a.zstd
         )
@@ -783,7 +788,7 @@ fn encode(a: EncodeArgs) -> Result<()> {
             "--format {} --effort {} --lambda {} --entropy {} --window {} --zstd {}",
             a.format,
             a.effort,
-            a.lambda,
+            opts.rdo.lambda,
             format!("{:?}", a.entropy).to_lowercase(),
             opts.rdo.window_for(a.format),
             a.zstd
@@ -849,7 +854,7 @@ fn encode(a: EncodeArgs) -> Result<()> {
         let r = &report.rdo;
         println!(
             "  RDO λ={}: {:.1}% of blocks changed, model estimate {:.0} -> {:.0} bits",
-            a.lambda,
+            opts.rdo.lambda,
             100.0 * r.changed as f64 / r.blocks.max(1) as f64,
             r.est_bits_before,
             r.est_bits_after

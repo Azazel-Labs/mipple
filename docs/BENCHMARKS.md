@@ -737,9 +737,9 @@ one cloud run with both encoders on the same runner, so the times compare within
 
 | footprint | astcenc preset | mipple setting | PSNR dB | SSIM | Zstd-19 bpt | Deflate-9 bpt | time s | runner |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 4x4 | fast | effort 1 | 44.784 / 44.580 | 0.99753 / 0.99722 | 7.196 / 7.216 | 7.348 / 7.362 | 1.75 / 2.27 | Xeon 6975P-C |
+| 4x4 | fast | effort 1 `-l 0` | 44.784 / 44.580 | 0.99753 / 0.99722 | 7.196 / 7.216 | 7.348 / 7.362 | 1.75 / 2.27 | Xeon 6975P-C |
 | 4x4 | medium | effort 2 `-l 0.03` | 45.414 / 45.223 | 0.99777 / 0.99750 | 7.346 / 7.363 | 7.462 / 7.483 | 8.43 / 10.08 | Xeon 6975P-C |
-| 4x4 | thorough | effort 3 | 45.526 / 45.472 | 0.99781 / 0.99759 | 7.426 / 7.453 | 7.542 / 7.560 | 15.31 / 36.19 | EPYC 7763 |
+| 4x4 | thorough | effort 3 `-l 0` | 45.526 / 45.472 | 0.99781 / 0.99759 | 7.426 / 7.453 | 7.542 / 7.560 | 15.31 / 36.19 | EPYC 7763 |
 | 6x6 | fast | effort 0 `-l 0.3` | 37.664 / 37.657 | 0.98517 / 0.98337 | 3.198 / 3.205 | 3.240 / 3.262 | 2.37 / 2.47 | EPYC 7763 |
 | 6x6 | medium | effort 2 `-l 0.35` | 38.297 / 38.218 | 0.98654 / 0.98561 | 3.265 / 3.298 | 3.287 / 3.340 | 7.92 / 8.58 | EPYC 7763 |
 | 6x6 | thorough | effort 4 `-l 0.1` | 38.454 / 38.451 | 0.98709 / 0.98664 | 3.368 / 3.384 | 3.388 / 3.407 | 13.14 / 30.55 | EPYC 9V74 |
@@ -747,7 +747,8 @@ one cloud run with both encoders on the same runner, so the times compare within
 | 8x8 | medium | effort 2 `-l 0.8` | 34.412 / 34.404 | 0.96468 / 0.96329 | 1.828 / 1.843 | 1.837 / 1.863 | 3.99 / 6.22 | EPYC 9V45 |
 | 8x8 | thorough | effort 5 `-l 0.5` | 34.636 / 34.635 | 0.96619 / 0.96589 | 1.880 / 1.917 | 1.887 / 1.926 | 22.14 / 32.43 | EPYC 9V74 |
 
-Each cell is mipple / astcenc; `-l` rows also pass `--max-back 1 --refine-back 1`. In the same runs, with
+Each cell is mipple / astcenc; rows with a positive `-l` also pass `--max-back 1 --refine-back 1`, and `-l 0`
+rows ran without RDO (these runs predate the default light pass below, so they passed no `-l`). In the same runs, with
 more room on some columns:
 
 - **4x4:** effort 2 `-l 0.06` beats medium by 0.17 dB with files 1.2% smaller (7.277 bpt, 8.46 s), and
@@ -762,6 +763,22 @@ more room on some columns:
 
 The 6x6 fast win is narrow on time (96%), and the 8x8 thorough row on PSNR (+0.001 dB; effort 6 `-l 0.7`
 above has more room). The widest is 4x4 thorough: 42% of the time, files 0.4% smaller, +0.05 dB.
+
+**The default.** Since this commit `encode` runs the light pass for ASTC unless told otherwise: λ 0.03, 0.3
+and 0.5 at 4x4, 6x6 and 8x8 with `--max-back 1 --refine-back 1` (`-l 0` turns it off; an explicit λ keeps
+the 256-block search). Measured locally on the same 24 images at the default effort 5, against effort 5 with
+no RDO:
+
+| footprint | λ | PSNR dB | SSIM | Zstd-19 bpt | Deflate-9 bpt |
+| --- | --- | --- | --- | --- | --- |
+| 4x4 | 0.03 | 45.736 / 45.741 | 0.99786 / 0.99786 | 7.412 / 7.463 (−0.7%) | 7.513 / 7.570 (−0.8%) |
+| 6x6 | 0.3 | 38.540 / 38.561 | 0.98704 / 0.98722 | 3.302 / 3.398 (−2.8%) | 3.321 / 3.420 (−2.9%) |
+| 8x8 | 0.5 | 34.636 / 34.643 | 0.96619 / 0.96635 | 1.880 / 1.925 (−2.3%) | 1.887 / 1.933 (−2.4%) |
+
+The pass itself adds about 2 / 1.1 / 0.9 s to the corpus (measured at effort 0, where the base encode
+takes 1.6-2.3 s) against 28-70 s for effort 5 single-threaded. Doubling λ (0.06 / 0.5 / 1) costs 0.028 / 0.062 / 0.032 dB for files 1.6% / 5.4% / 5.9% smaller.
+At 6x6 and 8x8 the default beats astcenc thorough in PSNR, SSIM, both sizes and time (the 6x6 and 8x8
+thorough rows and bullets above); at 4x4 it beats thorough in quality and size (its time was not measured beside astcenc's).
 
 Scoring astcenc's files exposed a decoder bug, fixed: a 2- or 3-partition block may spell equal CEMs the long
 way (with the extra CEM bits below the weights), and the decoder read those blocks with the short form's

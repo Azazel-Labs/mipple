@@ -37,7 +37,9 @@ pub struct EncodeOptions {
     /// An alpha-test cutoff (0-1) whose coverage every mip keeps (cutouts drawn with alpha test or
     /// alpha to coverage); `None` averages alpha plainly.
     pub alpha_cutoff: Option<f32>,
-    /// RDO settings (`lambda == 0` disables RDO). BC6H RDO runs in [`encode_hdr`].
+    /// RDO settings (`lambda == 0` disables RDO). [`EncodeOptions::new`] leaves RDO off, except
+    /// for ASTC, which gets a light pass ([`RdoParams::default_for`]). BC6H RDO runs in
+    /// [`encode_hdr`].
     pub rdo: RdoParams,
     /// Where base encoding runs: [`GpuMode::Auto`] (default) uses the GPU where its encoder is the
     /// faster one ([`crate::gpu::Gpu::preferred`]). Formats without a GPU encoder, builds without
@@ -69,7 +71,7 @@ impl EncodeOptions {
             mips: true,
             alpha: AlphaMode::Auto,
             alpha_cutoff: None,
-            rdo: RdoParams::default(),
+            rdo: RdoParams::default_for(format),
             gpu: GpuMode::Auto,
         }
     }

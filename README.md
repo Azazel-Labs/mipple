@@ -123,7 +123,7 @@ Open the folder and accept the recommended extensions (rust-analyzer, CodeLLDB, 
 
 | Command | What it does |
 | --- | --- |
-| `encode IN -o OUT.ktx2\|OUT.dds\|OUT.astc [-f bc7] [-e 0-9] [-l λ] [--entropy off\|on\|auto] [--normal] [--no-mips] [--alpha auto\|transparency\|data] [--alpha-cutoff C] [--zstd N]` | Encode with mips, optional RDO; KTX2 (Zstd level N, 0 = raw), DDS or `.astc` (one level) by extension (ETC2/EAC: KTX2 only; ASTC: KTX2 or `.astc`) |
+| `encode IN -o OUT.ktx2\|OUT.dds\|OUT.astc [-f bc7] [-e 0-9] [-l λ] [--entropy off\|on\|auto] [--normal] [--no-mips] [--alpha auto\|transparency\|data] [--alpha-cutoff C] [--zstd N]` | Encode with mips, optional RDO (ASTC: a light pass by default, `-l 0` for none); KTX2 (Zstd level N, 0 = raw), DDS or `.astc` (one level) by extension (ETC2/EAC: KTX2 only; ASTC: KTX2 or `.astc`) |
 | `decode IN.ktx2\|IN.dds\|IN.astc -o OUT.png [--level N] [--normal] [--astc-linear]` | Decode one mip level (a `.astc` file records no sRGB flag: it decodes as sRGB unless `--astc-linear`) |
 | `info IN.ktx2\|IN.astc` | Header, per-level offsets and sizes, key/value data |
 | `compare A B [--normal]` | PSNR (RGB, per channel, luma), SSIM, normal angular error |
@@ -167,6 +167,8 @@ WebGPU and win (BC7 effort 5: 42 vs 902 ms for a 512² mip chain in Chrome). Car
   `scripts/compete_astc.py` grades them against Intel ISPC and Arm's astcenc (on the 24 Kodak images, effort 0
   beats ISPC fast in PSNR and SSIM in less time, and with a light RDO pass some setting beats each astcenc
   preset, fast to thorough, in PSNR, SSIM, Zstd and Deflate size and time at once, at all three footprints).
+  `encode` runs that light pass by default for ASTC (λ 0.03 / 0.3 / 0.5 at 4x4 / 6x6 / 8x8; `-l 0` turns it
+  off): at effort 5 it costs 0.005-0.021 dB PSNR for Zstd files 0.7-2.8% smaller.
   CPU only; its RDO pass reads the surface itself (blocks are not 4x4).
 - An RDO pass shared by all formats, with an LZ rate model, smooth-block protection, a per-block error cap,
   and a real-Zstd check that reverts any chunk RDO didn't shrink.

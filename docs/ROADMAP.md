@@ -186,6 +186,8 @@ Open for v0.9.x:
   - [x] Smaller files too: with a light RDO pass one block back (`-l <λ> --max-back 1 --refine-back 1`),
     some setting beats each astcenc preset (fast / medium / thorough) at once on PSNR, SSIM, Zstd and
     Deflate size and time at 4x4, 6x6 and 8x8 (BENCHMARKS.md, 8598d56; each pair on one cloud runner).
+  - [x] That light pass is the ASTC default (λ 0.03 / 0.3 / 0.5; `-l 0` turns it off): at effort 5, Zstd
+    files 0.7-2.8% smaller for 0.005-0.021 dB.
   - [ ] A GPU kernel, a SIMD batch encoder, other footprints (the decoder already reads every 2D one), HDR.
 - [x] ETC2 / EAC for mobile fallbacks: ETC2 RGB (all five modes), ETC2 RGBA8 and EAC R11 / RG11 (unsigned),
   KTX2 only, with the RDO pass. On Kodak, one thread, effort 0 is 0.37 dB ahead of Compressonator in an

@@ -53,7 +53,8 @@ def main():
     ap.add_argument("--astcenc-presets", default="fast,medium,thorough")
     ap.add_argument("--footprints", default="4x4,6x6,8x8")
     ap.add_argument("--efforts", default="0,2",
-                    help='comma-separated efforts, each optionally "EFFORT:EXTRA ARGS" (e.g. "0:-l 2 --max-back 1")')
+                    help='comma-separated efforts, each optionally "EFFORT:EXTRA ARGS" (e.g. "0:-l 2 --max-back 1"); '
+                         'a bare effort gets mipple\'s default light RDO pass, "0:-l 0" turns RDO off')
     ap.add_argument("--runs", type=int, default=3, help="best of N timings per image")
     ap.add_argument("--threads", type=int, default=1)
     ap.add_argument("--limit", type=int, default=0, help="first N images only")
