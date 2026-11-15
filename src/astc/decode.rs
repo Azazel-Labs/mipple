@@ -190,10 +190,15 @@ pub fn decode_block(raw: &[u8; 16], bw: u32, bh: u32, srgb: bool, out: &mut [Rgb
         out[..n].fill(px);
         return;
     }
-    let Some(sym) = Symbolic::read(v, bw, bh) else {
-        out[..n].fill(ERROR);
-        return;
-    };
+    match Symbolic::read(v, bw, bh) {
+        Some(sym) => decode_symbolic(&sym, bw, bh, srgb, out),
+        None => out[..n].fill(ERROR),
+    }
+}
+
+/// [`decode_block`] for a block already read into fields (not void-extent).
+pub fn decode_symbolic(sym: &Symbolic, bw: u32, bh: u32, srgb: bool, out: &mut [Rgba]) {
+    let n = (bw * bh) as usize;
     let p = sym.partitions as usize;
     let mut eps = [([0i32; 4], [0i32; 4]); 4];
     let mut at = 0;

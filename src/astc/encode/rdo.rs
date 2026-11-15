@@ -20,7 +20,7 @@ use super::{
     Footprint, Layout, MAX_TEXELS, NO_CCS, Texels, infill, polish_parts, quantize, read_block, refit, round_pos,
     sym_endpoints, tables,
 };
-use crate::astc::{COLOR_UNQUANT, PartitionFn, Symbolic, WEIGHT_UNQUANT, color_range, decode_block};
+use crate::astc::{COLOR_UNQUANT, PartitionFn, Symbolic, WEIGHT_UNQUANT, color_range, decode_block, decode_symbolic};
 use crate::format::Format;
 use crate::rdo::{LzModel, LzState, RdoParams, RdoStats, VERIFY_QUICK, bit_budget};
 use crate::surface::{Rgba, Surface};
@@ -127,11 +127,10 @@ fn layout_of(fp: &Footprint, sym: &Symbolic) -> Layout {
     lay
 }
 
-/// `bytes`' fields, labels and grid, if the candidates can build on them: up to three partitions,
+/// `sym`'s fields, labels and grid, if the candidates can build on them: up to three partitions,
 /// each luminance (0), direct (8, 12), base+offset (9, 13) or base+scale (6, 10), as the encoder
 /// writes.
-fn prev_sym(fp: &Footprint, bytes: [u8; 16]) -> Option<Box<PrevSym>> {
-    let sym = Symbolic::read(u128::from_le_bytes(bytes), fp.bw, fp.bh)?;
+fn prev_sym(fp: &Footprint, sym: Symbolic) -> Option<Box<PrevSym>> {
     let p = sym.partitions as usize;
     if p > 3
         || sym.cems[..p]
@@ -514,7 +513,12 @@ fn optimize_chunk(
         let smooth = smooth_factor(&px, p);
         let score = |err: u64, bits: f32| smooth * err as f64 / 16.0 + lambda * bits as f64;
         let base: [u8; 16] = data[i * 16..i * 16 + 16].try_into().unwrap();
-        decode_block(&base, bw, bh, srgb, &mut dec[..n]);
+        // Read once: the decode and (if the block stays) the fields later blocks build on.
+        let base_sym = Symbolic::read(u128::from_le_bytes(base), bw, bh);
+        match &base_sym {
+            Some(sym) => decode_symbolic(sym, bw, bh, srgb, &mut dec[..n]),
+            None => decode_block(&base, bw, bh, srgb, &mut dec[..n]),
+        }
         let base_err = sse(&px, &dec[..n]);
         let (base_bits, base_rep) = model.cost(&base);
         let min_bits = lambda * model.min_cost(16) as f64;
@@ -618,15 +622,21 @@ fn optimize_chunk(
         data[i * 16..i * 16 + 16].copy_from_slice(&best.1);
         // Block `i - max_back`'s slot: no later block copies it whole.
         let di = &mut decs[i % slots * n..][..n];
-        if best.1 == base {
+        let sym = if best.1 == base {
             di.copy_from_slice(&dec[..n]);
+            base_sym
         } else {
-            decode_block(&best.1, bw, bh, srgb, di);
-        }
+            let sym = Symbolic::read(u128::from_le_bytes(best.1), bw, bh);
+            match &sym {
+                Some(sym) => decode_symbolic(sym, bw, bh, srgb, di),
+                None => decode_block(&best.1, bw, bh, srgb, di),
+            }
+            sym
+        };
         dsums.push(std::array::from_fn(|c| di.iter().map(|d| d[c] as i32).sum()));
         prevs.push(Prev {
             bytes: best.1,
-            sym: if refit_back > 0 { prev_sym(fp, best.1) } else { None },
+            sym: if refit_back > 0 { sym.and_then(|s| prev_sym(fp, s)) } else { None },
         });
         // No later block reweights or refits block `i - refit_back`: free its fields, so the next
         // block's reuse the memory (a chunk's worth is megabytes of fresh pages).

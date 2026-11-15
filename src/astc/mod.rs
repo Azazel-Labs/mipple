@@ -13,7 +13,7 @@ pub mod encode;
 pub mod file;
 mod lanes;
 
-pub use decode::{decode_block, decode_rgba};
+pub use decode::{decode_block, decode_rgba, decode_symbolic};
 
 /// The ISE ranges by index: levels, then the (trits, quints, bits) layout of each.
 pub const RANGES: [u16; 21] = [
@@ -167,20 +167,24 @@ const QUINTS: ([[u8; 3]; 128], [u8; 125]) = quint_tables();
 
 /// Reads bits from a 128-bit block, as zeros past `end`.
 struct Reader {
+    /// The block with the bits from `end` on cleared.
     v: u128,
     pos: u32,
-    end: u32,
 }
 
 impl Reader {
+    fn new(v: u128, pos: u32, end: u32) -> Self {
+        let v = if end >= 128 { v } else { v & ((1u128 << end) - 1) };
+        Reader { v, pos }
+    }
+
+    /// The next `n` (at most 31) bits.
     fn take(&mut self, n: u32) -> u32 {
-        let mut out = 0;
-        for i in 0..n {
-            let p = self.pos + i;
-            if p < self.end {
-                out |= (((self.v >> p) & 1) as u32) << i;
-            }
-        }
+        let out = if self.pos >= 128 {
+            0
+        } else {
+            (self.v >> self.pos) as u32 & ((1u32 << n) - 1)
+        };
         self.pos += n;
         out
     }
@@ -191,11 +195,7 @@ pub fn ise_decode(v: u128, start: u32, q: usize, out: &mut [u8]) {
     let n = out.len();
     let (kind, bits) = LAYOUT[q];
     let bits = bits as u32;
-    let mut r = Reader {
-        v,
-        pos: start,
-        end: start + ise_bits(n, q) as u32,
-    };
+    let mut r = Reader::new(v, start, start + ise_bits(n, q) as u32);
     match kind {
         0 => {
             for o in out.iter_mut() {
