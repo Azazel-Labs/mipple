@@ -282,6 +282,11 @@ Measured on Kodak images 1-3, single thread, effort 0, unless noted. ISPC fast t
   On Kodak 24 at effort 0 that is 1.2% smaller under Zstd for 0.56-0.57 dB at 6x6 and 8x8 (wider-only:
   2.0% for 0.78-0.84 dB), and at effort 2 0.7-0.8% for 0.41-0.48 dB. Window-1 light RDO at λ 1 saves
   5.9% at 8x8 for 0.008 dB.
+- **Skipping polish tries that would fail again.** A weight or endpoint-code step depends only on the
+  block's current state, so a step that failed can be skipped until a weight or endpoint it reads
+  changes. Tracking that (a bit per weight and per code, cleared on each accepted step) keeps the
+  output byte-identical but makes the effort-0 encode about 3% slower on Kodak 6x6. The idle-count
+  exit already ends the second pass soon after the last accepted step, so little is skipped.
 
 ## ETC2 / EAC
 
