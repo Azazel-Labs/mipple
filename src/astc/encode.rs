@@ -1617,8 +1617,9 @@ fn lines_rgb(
 ) -> [f32; RR_LANES] {
     const L: usize = RR_LANES;
     let k: [f32; L] = std::array::from_fn(|l| 1.0 / n[l] as f32);
-    let s = s.map(|a| a.map(|x| x as f32));
-    let ss = ss.map(|a| a.map(|x| x as f32));
+    // Built index by index: `map` on these arrays copies them through memcpy.
+    let s: [[f32; L]; 3] = std::array::from_fn(|c| std::array::from_fn(|l| s[c][l] as f32));
+    let ss: [[f32; L]; 6] = std::array::from_fn(|j| std::array::from_fn(|l| ss[j][l] as f32));
     const PAIRS: [(usize, usize); 6] = [(0, 0), (0, 1), (0, 2), (1, 1), (1, 2), (2, 2)];
     // The centered products, as rows 00 01 02 11 12 22 of the symmetric covariance.
     let c: [[f32; L]; 6] = std::array::from_fn(|j| {
@@ -1632,7 +1633,7 @@ fn lines_rgb(
     };
     let tr: [f32; L] = std::array::from_fn(|l| c[0][l] + c[3][l] + c[5][l]);
     // Power steps scaled by the trace, from the block's dominant axis.
-    let a = c.map(|r| std::array::from_fn(|l| r[l] / tr[l]));
+    let a: [[f32; L]; 6] = std::array::from_fn(|j| std::array::from_fn(|l| c[j][l] / tr[l]));
     let mut v = [axis[0], axis[1], axis[2]].map(|x| [x; L]);
     for _ in 0..LINE_STEPS {
         v = mul(&a, &v);
@@ -2509,9 +2510,18 @@ pub fn encode_block(fp: &Footprint, px: &[Rgba], srgb: bool, effort: u8) -> [u8;
         let km = kmeans(&t, k, &axis1, &mean1);
         let mut ranked = rank_patterns(fp, k, &km, n as u32, want.max(es.rerank));
         if es.rerank > want {
-            // Each pattern's score, place in `ranked` and index: only the best `want` are kept,
-            // in order (ties to the earlier place).
-            let mut by: Vec<(f32, usize, usize)> = Vec::with_capacity(ranked.len());
+            // The best `want` patterns by score, in order, ties to the earlier place in `ranked`:
+            // each pattern's (score, index), kept sorted as they come (in place order, so a later
+            // equal score sorts after).
+            let mut by: Vec<(f32, usize)> = Vec::with_capacity(want + 1);
+            let mut keep = |o: f32, i: usize| {
+                if by.len() == want && o.total_cmp(&by[want - 1].0).is_ge() {
+                    return;
+                }
+                let at = by.partition_point(|e| e.0.total_cmp(&o).is_le());
+                by.insert(at, (o, i));
+                by.truncate(want);
+            };
             if t.ch == 3 {
                 let q = quad.get_or_insert_with(|| QuadSums::new(&t));
                 let (nw, stride) = (fp.nw, fp.nw * (pi + 1));
@@ -2521,24 +2531,16 @@ pub fn encode_block(fp: &Footprint, px: &[Rgba], srgb: bool, effort: u8) -> [u8;
                         &fp.pmasks[pi][i * stride..(i + 1) * stride]
                     });
                     let o = off_lines_rgb(&t, q, masks, nw, k, &ms1[0], &axis1);
-                    let r = by.len();
-                    by.extend(chunk.iter().zip(o).enumerate().map(|(j, (&i, o))| (o, r + j, i)));
+                    for (&i, o) in chunk.iter().zip(o) {
+                        keep(o, i);
+                    }
                 }
             } else {
-                by.extend(
-                    ranked
-                        .iter()
-                        .enumerate()
-                        .map(|(r, &i)| (off_lines(&Moments::of(&t, &pats[i].lab, k as u8), k, t.ch), r, i)),
-                );
+                for &i in ranked.iter() {
+                    keep(off_lines(&Moments::of(&t, &pats[i].lab, k as u8), k, t.ch), i);
+                }
             }
-            let cmp = |a: &(f32, usize, usize), b: &(f32, usize, usize)| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1));
-            if want < by.len() {
-                by.select_nth_unstable_by(want, cmp);
-                by.truncate(want);
-            }
-            by.sort_unstable_by(cmp);
-            ranked = by.into_iter().map(|e| e.2).collect();
+            ranked = by.into_iter().map(|e| e.1).collect();
         }
         for &i in ranked.iter().take(want) {
             let ms = Moments::of(&t, &pats[i].lab, k as u8);
@@ -2632,17 +2634,15 @@ pub fn encode_block(fp: &Footprint, px: &[Rgba], srgb: bool, effort: u8) -> [u8;
                 while hits != 0 {
                     let ei = hits.trailing_zeros() as usize;
                     hits &= hits - 1;
-                    let mut x =
+                    let x =
                         (ord(scores[ei]) as u64) << 32 | (li as u64) << 24 | (gi as u64) << 16 | ei as u64 | flag;
                     if x >= top[short - 1] {
                         continue;
                     }
-                    // The last drops out.
-                    for k in top.iter_mut() {
-                        let lo = x.min(*k);
-                        x = x.max(*k);
-                        *k = lo;
-                    }
+                    // In order (keys are unique but for the `empty` ones); the last drops out.
+                    let at = top.partition_point(|&k| k < x);
+                    top.copy_within(at..short - 1, at + 1);
+                    top[at] = x;
                     thr = (top[short - 1] >> 32) as u32;
                 }
             }
