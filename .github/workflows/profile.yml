@@ -86,7 +86,7 @@ jobs:
               if [ -n "$ANNOTATE" ]; then
                 IFS='|' read -ra pats <<< "$ANNOTATE"
                 for pat in "${pats[@]}"; do
-                  sym=$(perf report -i "perf-$img.data" --no-children --sort symbol --stdio 2>/dev/null                     | grep -F -- "$pat" | head -1 | sed 's/^.*\[\.\] //; s/ *$//')
+                  sym=$(perf report -i "perf-$img.data" --no-children --sort symbol --stdio 2>/dev/null                     | grep -F -- "$pat" | head -1 | sed 's/^.*\[\.\] //; s/  .*$//')
                   [ -z "$sym" ] && continue
                   echo
                   echo "### $img: hottest instructions of \`$sym\` (percent of the symbol, source line)"
