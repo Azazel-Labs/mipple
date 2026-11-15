@@ -129,8 +129,8 @@ fn layout_of(fp: &Footprint, sym: &Symbolic) -> Layout {
 
 /// `sym`'s fields, labels and grid, if the candidates can build on them: up to three partitions,
 /// each luminance (0), direct (8, 12), base+offset (9, 13) or base+scale (6, 10), as the encoder
-/// writes.
-fn prev_sym(fp: &Footprint, sym: Symbolic) -> Option<Box<PrevSym>> {
+/// writes. Boxed in one of `spare`'s boxes if it has one.
+fn prev_sym(fp: &Footprint, sym: Symbolic, spare: &mut Vec<Box<PrevSym>>) -> Option<Box<PrevSym>> {
     let p = sym.partitions as usize;
     if p > 3
         || sym.cems[..p]
@@ -149,13 +149,20 @@ fn prev_sym(fp: &Footprint, sym: Symbolic) -> Option<Box<PrevSym>> {
     for (q, e) in eps.iter_mut().enumerate().take(p) {
         *e = sym_endpoints(&sym, q);
     }
-    Some(Box::new(PrevSym {
+    let v = PrevSym {
         sym,
         lay,
         gi,
         eps,
         refit,
-    }))
+    };
+    Some(match spare.pop() {
+        Some(mut b) => {
+            *b = v;
+            b
+        }
+        None => Box::new(v),
+    })
 }
 
 /// The texel-independent parts of refitting endpoints to `sym`'s weights (see [`RefitBase`]).
@@ -495,6 +502,8 @@ fn optimize_chunk(
         ..Default::default()
     };
     let mut prevs: Vec<Prev> = Vec::with_capacity(count);
+    // Boxes of blocks past `refit_back`, for the next blocks' fields.
+    let mut spare: Vec<Box<PrevSym>> = Vec::new();
     // The chosen blocks' decodes, for whole copies up to `max_back` back: a ring of that many.
     let slots = max_back.clamp(1, count);
     let mut decs: Vec<Rgba> = vec![[0; 4]; slots * n];
@@ -636,12 +645,14 @@ fn optimize_chunk(
         dsums.push(std::array::from_fn(|c| di.iter().map(|d| d[c] as i32).sum()));
         prevs.push(Prev {
             bytes: best.1,
-            sym: if refit_back > 0 { sym.and_then(|s| prev_sym(fp, s)) } else { None },
+            sym: if refit_back > 0 { sym.and_then(|s| prev_sym(fp, s, &mut spare)) } else { None },
         });
-        // No later block reweights or refits block `i - refit_back`: free its fields, so the next
-        // block's reuse the memory (a chunk's worth is megabytes of fresh pages).
-        if let Some(old) = i.checked_sub(refit_back) {
-            prevs[old].sym = None;
+        // No later block reweights or refits block `i - refit_back`: its box goes to the next block
+        // (a chunk's worth is megabytes of fresh pages, and a box a heap call).
+        if let Some(old) = i.checked_sub(refit_back)
+            && let Some(b) = prevs[old].sym.take()
+        {
+            spare.push(b);
         }
         model.push(&best.1, best.3);
     }
