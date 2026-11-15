@@ -52,7 +52,8 @@ def main():
                     default=ROOT / "third_party" / "dl" / "astcenc" / "x64" / "bin" / "astcenc-avx2.exe")
     ap.add_argument("--astcenc-presets", default="fast,medium,thorough")
     ap.add_argument("--footprints", default="4x4,6x6,8x8")
-    ap.add_argument("--efforts", default="0,2")
+    ap.add_argument("--efforts", default="0,2",
+                    help='comma-separated efforts, each optionally "EFFORT:EXTRA ARGS" (e.g. "0:-l 2 --max-back 1")')
     ap.add_argument("--runs", type=int, default=3, help="best of N timings per image")
     ap.add_argument("--threads", type=int, default=1)
     ap.add_argument("--limit", type=int, default=0, help="first N images only")
@@ -99,11 +100,16 @@ def main():
         for label, exe in builds:
             if exe is None or not exe.exists():
                 continue
-            for e in a.efforts.split(","):
-                encoders.append((f"{fp} {label} effort {e}",
-                                 lambda s, d, fp=fp, e=e, exe=exe: [str(exe), "encode", str(s), "-o", str(d), "-f",
-                                                                    f"astc-{fp}", "-e", e, "--no-mips", "--linear"],
-                                 lambda out: float(re.search(r"time: base ([0-9.]+)s", out).group(1))))
+            for spec in a.efforts.split(","):
+                # "EFFORT" or "EFFORT:EXTRA ARGS" (e.g. "0:-l 2 --max-back 1"); timed as base plus RDO.
+                e, _, extra = spec.partition(":")
+                name = f"{fp} {label} effort {e}" + (f" {extra}" if extra else "")
+                encoders.append((name,
+                                 lambda s, d, fp=fp, e=e, extra=extra, exe=exe: [
+                                     str(exe), "encode", str(s), "-o", str(d), "-f", f"astc-{fp}", "-e", e,
+                                     "--no-mips", "--linear", *extra.split()],
+                                 lambda out: sum(map(float, re.search(r"time: base ([0-9.]+)s, rdo ([0-9.]+)s",
+                                                                      out).groups()))))
         totals = {name: [0.0] * 6 for name, _, _ in encoders}  # secs, psnr, ssim, zstd, deflate bytes, texels
         for img in imgs:
             for name, encode, secs_of in encoders:
