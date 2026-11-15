@@ -2053,10 +2053,15 @@ fn subset_ends<V: SimdF32>(t: &Texels<V>, m: &[V; 16], n: V, sum: &[V; 3], ws: &
     (hi, lo)
 }
 
+/// [`encode8`]'s result: each lane's mode-6 words, other-mode overrides, and (with `gate`) busy lanes.
+type Encoded8<V> = ([<V as SimdF32>::Int; 4], [Option<[u8; 16]>; LANES], [bool; LANES]);
+
 /// Encodes eight opaque blocks; returns the four 32-bit words of each lane's mode-6 block and,
-/// for lanes where another mode won, that block instead.
+/// for lanes where another mode won, that block instead. With `gate`, stops after mode 6 and also
+/// returns which lanes would go on to the multi-subset search (their words are then mode 6's), so
+/// the caller can batch those lanes together.
 #[inline(always)]
-fn encode8<V: SimdF32>(t: &Texels<V>, cfg: Cfg) -> ([V::Int; 4], [Option<[u8; 16]>; LANES]) {
+fn encode8<V: SimdF32>(t: &Texels<V>, cfg: Cfg, gate: bool) -> Encoded8<V> {
     // The line fit is exact integer arithmetic (every value an integer below 2^24 in f32, see
     // `crate::exact`), so it does not depend on rounding, summation order or fused
     // multiply-adds: the GPU kernel (`src/gpu/bc7.wgsl`) computes the same endpoints.
@@ -2124,6 +2129,9 @@ fn encode8<V: SimdF32>(t: &Texels<V>, cfg: Cfg) -> ([V::Int; 4], [Option<[u8; 16
         // Lanes worth a second subset: some error left and some spread (as the batch encoder).
         let busy =
             V::splat(cfg.busy_err).simd_lt(err) & V::splat(16.0 * 16.0 * 4.0).simd_lt(rr.simd_max(gg).simd_max(bb));
+        if gate {
+            return (pack(&ends, &idx), over, V::mask_to_bools(busy));
+        }
         if V::mask_any(busy) && cfg.polish_modes {
             if cfg.uber > 0 {
                 uber6(t, &mut ends, &mut idx, &mut err, busy, cfg.uber);
@@ -2339,7 +2347,7 @@ fn encode8<V: SimdF32>(t: &Texels<V>, cfg: Cfg) -> ([V::Int; 4], [Option<[u8; 16
             }
         }
     }
-    (pack(&ends, &idx), over)
+    (pack(&ends, &idx), over, [false; LANES])
 }
 
 /// Writes eight packed blocks (`words`, lanes in `order`) to `out` (16 bytes per block),
@@ -2369,6 +2377,11 @@ fn encode_span<V: SimdF32>(s: &Surface, first: usize, out: &mut [u8], cfg: Cfg, 
     const IDENTITY: [usize; LANES] = [0, 1, 2, 3, 4, 5, 6, 7];
     let bw = s.blocks_x() as usize;
     let (w, h) = (s.width as usize, s.height as usize);
+    // With a mode-6 gate, the few blocks that go on to the multi-subset search are queued (offset
+    // in `out`, texels) and searched eight at a time, instead of every batch with one such block
+    // paying for all eight lanes.
+    let compact = cfg.two != 0 && cfg.busy_err > 0.0;
+    let mut queue: Vec<(usize, [[f32; 16]; 3])> = Vec::new();
     let mut k = first;
     for o in out.chunks_mut(LANES * 16) {
         let n = o.len() / 16;
@@ -2423,8 +2436,19 @@ fn encode_span<V: SimdF32>(s: &Surface, first: usize, out: &mut [u8], cfg: Cfg, 
             }
             (IDENTITY, op)
         };
-        let (words, over) = encode8(&t, cfg);
+        let (words, over, busy) = encode8(&t, cfg, compact);
         store::<V>(&words, &order, o);
+        if busy.iter().any(|&b| b) {
+            let ta = t.map(|c| c.map(V::to_array));
+            for (l, &blk) in order.iter().enumerate() {
+                if busy[l] && blk < n && opaque[blk] {
+                    queue.push((
+                        k - first + blk,
+                        std::array::from_fn(|c| std::array::from_fn(|j| ta[c][j][l])),
+                    ));
+                }
+            }
+        }
         for (l, ov) in over.iter().enumerate() {
             if let Some(b) = ov {
                 let blk = order[l];
@@ -2445,6 +2469,21 @@ fn encode_span<V: SimdF32>(s: &Surface, first: usize, out: &mut [u8], cfg: Cfg, 
             }
         }
         k += n;
+    }
+    for batch in queue.chunks(LANES) {
+        // A short last batch repeats its last block: equal lanes leave the batch-wide polish gates as
+        // they are.
+        let lane = |l: usize| &batch[l.min(batch.len() - 1)];
+        let t: Texels<V> =
+            std::array::from_fn(|c| std::array::from_fn(|j| V::from_array(std::array::from_fn(|l| lane(l).1[c][j]))));
+        let (words, over, _) = encode8(&t, cfg, false);
+        let order: [usize; LANES] = std::array::from_fn(|l| if l < batch.len() { batch[l].0 } else { usize::MAX });
+        store::<V>(&words, &order, out);
+        for (l, ov) in over.iter().enumerate().take(batch.len()) {
+            if let Some(b) = ov {
+                out[16 * batch[l].0..16 * batch[l].0 + 16].copy_from_slice(b);
+            }
+        }
     }
 }
 
