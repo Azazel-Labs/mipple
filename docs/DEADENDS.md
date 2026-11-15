@@ -287,6 +287,14 @@ Measured on Kodak images 1-3, single thread, effort 0, unless noted. ISPC fast t
   changes. Tracking that (a bit per weight and per code, cleared on each accepted step) keeps the
   output byte-identical but makes the effort-0 encode about 3% slower on Kodak 6x6. The idle-count
   exit already ends the second pass soon after the last accepted step, so little is skipped.
+- **Carrying the chosen candidate's symbols instead of reading its bytes back.** The RDO pass reads
+  each finished block's 16 bytes back into symbols for the next block. Keeping the winning
+  candidate's symbols instead is byte-identical but no faster (Kodak 6x6 λ 0.3 w1 3.05 s against
+  3.03 s, within noise).
+- **A lower Zstd level for the full keep-or-revert check.** Only about 6% of 16 KiB chunks get past the
+  level-1 quick rule. On those (220 chunks over 20 images, 4x4 to 8x8, λ 0.3 to 2), level 12 disagrees
+  with level 15 on 30 keep-or-revert decisions and level 9 on 60, which would cost 1.8 KB and 4.8 KB
+  at level 19. The few chunks that reach the check are the close calls, so the full level stays.
 
 ## ETC2 / EAC
 
