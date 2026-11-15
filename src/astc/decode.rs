@@ -228,6 +228,30 @@ pub fn decode_symbolic(sym: &Symbolic, bw: u32, bh: u32, srgb: bool, out: &mut [
     for (pl, twp) in tw.iter_mut().enumerate().take(planes) {
         infill_all(&w, gx, gy, planes, pl, bw, bh, twp);
     }
+    // Each partition's channels as [`lerp1`] reads them, (c0, c1, shift): a texel at weight `w`
+    // decodes to (c0 * (64 - w) + c1 * w + 32) >> shift.
+    let mut lin = [[(0u32, 0u32, 0u32); 4]; 4];
+    for (l, (e0, e1)) in lin.iter_mut().zip(&eps).take(p) {
+        for c in 0..4 {
+            l[c] = if srgb && c < 3 {
+                ((e0[c] << 8 | 0x80) as u32, (e1[c] << 8 | 0x80) as u32, 14)
+            } else {
+                (e0[c] as u32, e1[c] as u32, 6)
+            };
+        }
+    }
+    let texel = |l: &[(u32, u32, u32); 4], ws: [u32; 4]| -> Rgba {
+        std::array::from_fn(|c| {
+            let (c0, c1, sh) = l[c];
+            ((c0 * (64 - ws[c]) + c1 * ws[c] + 32) >> sh) as u8
+        })
+    };
+    if p == 1 && !sym.mode.dual {
+        for (o, &w) in out[..n].iter_mut().zip(&tw[0][..n]) {
+            *o = texel(&lin[0], [w as u32; 4]);
+        }
+        return;
+    }
     let pf = PartitionFn::new(sym.seed as u32, sym.partitions as u32, bw * bh);
     for t in 0..bh {
         for s in 0..bw {
@@ -236,9 +260,7 @@ pub fn decode_symbolic(sym: &Symbolic, bw: u32, bh: u32, srgb: bool, out: &mut [
             if sym.mode.dual {
                 ws[sym.ccs as usize] = tw[1][i] as u32;
             }
-            let part = pf.at(s, t) as usize;
-            let (e0, e1) = eps[part];
-            out[i] = lerp(e0, e1, ws, srgb);
+            out[i] = texel(&lin[pf.at(s, t) as usize], ws);
         }
     }
 }
