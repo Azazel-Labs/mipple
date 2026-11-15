@@ -311,6 +311,12 @@ Measured on Kodak images 1-3, single thread, effort 0, unless noted. ISPC fast t
   whole-crate x86-64-v3 build bounds what runtime AVX2 dispatch could gain. It writes the same bytes and
   is 2-3% faster on one pinned P-core (Kodak 6x6 effort 0 λ 0.3 w1 3.28 s against 3.36 s, effort 2
   9.12 s against 9.38 s, best of 3). Too little for multiversioning the whole encoder.
+- **Reweighting without polishing the weights.** Taking the previous head's projected, quantized
+  weights as they are (no coordinate-descent pass) is 6-8% faster on Kodak 6x6 effort 0 λ 0.3 w1 (one
+  pinned core, interleaved, 2.98-3.03 s against 3.17-3.28 s), but worse on rate-distortion: 37.663 dB /
+  3.209 bpt, and λ 0.35 37.657 dB / 3.193 bpt, against 37.664 dB / 3.198 bpt polished at λ 0.3.
+- **A shallower match-finder chain for ASTC window 1.** `--chain-depth` 8 / 4 / 2 against 16 on Kodak 6x6
+  effort 0 λ 0.3 w1: the same PSNR and bpt within 0.001, and no time difference beyond noise.
 
 ## ETC2 / EAC
 

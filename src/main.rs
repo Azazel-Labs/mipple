@@ -157,6 +157,9 @@ struct RdoArgs {
     /// --smooth-std (0 uses the block alone).
     #[arg(long, default_value_t = 16.0)]
     smooth_window_std: f32,
+    /// Hash-chain depth of the rate model's match finder.
+    #[arg(long, default_value_t = 16, value_parser = clap::value_parser!(u8).range(1..=16))]
+    chain_depth: u8,
     /// Reject candidates whose RMS error exceeds this multiple of the base encoding's.
     #[arg(long, default_value_t = 10.0)]
     max_rms_ratio: f32,
@@ -184,6 +187,7 @@ impl RdoArgs {
             smooth_window_std: self.smooth_window_std,
             max_rms_ratio: self.max_rms_ratio,
             min_rms: self.min_rms,
+            chain_depth: self.chain_depth as usize,
             ..RdoParams::default()
         }
     }

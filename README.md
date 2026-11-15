@@ -134,7 +134,7 @@ Open the folder and accept the recommended extensions (rust-analyzer, CodeLLDB, 
 | `gpu` | The GPU adapter, what it supports, and which formats it base-encodes |
 
 RDO knobs (on `encode`, `bench` and `check`): `--window`, `--max-back`, `--span-back`, `--chunk-bytes`, `--defer`, `--smooth-scale`, `--smooth-std`, `--smooth-window-std`,
-`--max-rms-ratio`, `--min-rms`.
+`--max-rms-ratio`, `--min-rms`, `--chain-depth` (1-16, default 16).
 
 **Alpha.** For BC7 colour textures alpha is transparency by default (`--alpha data` turns it off). The colour left under
 alpha-0 texels is replaced by a push-pull bleed of the visible colour around it, and mips average RGB weighted by alpha,
