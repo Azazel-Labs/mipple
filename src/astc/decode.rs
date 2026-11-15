@@ -108,6 +108,45 @@ pub fn infill(w: &[u8], gx: u32, gy: u32, planes: usize, plane: usize, bw: u32, 
     (at(js, jt) * w00 + at(js + 1, jt) * w01 + at(js, jt + 1) * w10 + at(js + 1, jt + 1) * w11 + 8) >> 4
 }
 
+/// One axis of [`infill`]: each texel coordinate's grid point and fraction (sixteenths), for `b`
+/// texels over `g` grid points. The last texel lands on the last grid point with fraction 0, so the
+/// point past it is read only with weight 0.
+fn infill_axis(b: u32, g: u32) -> [(u32, u32); 12] {
+    let d = (1024 + b / 2) / (b - 1);
+    std::array::from_fn(|s| {
+        let gs = (d * s as u32 * (g - 1) + 32) >> 6;
+        (gs >> 4, gs & 15)
+    })
+}
+
+/// [`infill`] of every texel of plane `plane` into `out`, the per-axis parts worked out once.
+/// `w` is zero past the grid (see [`infill_axis`]).
+#[expect(clippy::too_many_arguments, reason = "infill's inputs")]
+fn infill_all(w: &[u8; 96], gx: u32, gy: u32, planes: usize, plane: usize, bw: u32, bh: u32, out: &mut [u8]) {
+    if gx == bw && gy == bh {
+        for (i, o) in out[..(bw * bh) as usize].iter_mut().enumerate() {
+            *o = w[i * planes + plane];
+        }
+        return;
+    }
+    let (ax, ay) = (infill_axis(bw, gx), infill_axis(bh, gy));
+    for t in 0..bh as usize {
+        let (jt, ft) = ay[t];
+        for s in 0..bw as usize {
+            let (js, fs) = ax[s];
+            let at = |x: u32, y: u32| w[(y * gx + x) as usize * planes + plane] as u32;
+            let w11 = (fs * ft + 8) >> 4;
+            let v = (at(js, jt) * (16 + w11 - fs - ft)
+                + at(js + 1, jt) * (fs - w11)
+                + at(js, jt + 1) * (ft - w11)
+                + at(js + 1, jt + 1) * w11
+                + 8)
+                >> 4;
+            out[t * bw as usize + s] = v as u8;
+        }
+    }
+}
+
 /// The texel value of endpoints `e0`, `e1` at weight `w` (0..=64), as UNORM8: the spec's 16-bit
 /// interpolation, then rounded to eight bits (linear) or truncated (sRGB RGB, before conversion).
 #[inline]
@@ -174,23 +213,27 @@ pub fn decode_block(raw: &[u8; 16], bw: u32, bh: u32, srgb: bool, out: &mut [Rgb
         *ep = endpoints(cem, &vals[..k]).expect("LDR mode");
     }
     let wu = &WEIGHT_UNQUANT[sym.mode.quant as usize];
-    let mut w = [0u8; 64];
+    let mut w = [0u8; 96];
     for i in 0..sym.mode.weights() {
         w[i] = wu[sym.weights[i] as usize];
     }
     let planes = 1 + sym.mode.dual as usize;
     let (gx, gy) = (sym.mode.gx as u32, sym.mode.gy as u32);
+    let mut tw = [[0u8; 144]; 2];
+    for (pl, twp) in tw.iter_mut().enumerate().take(planes) {
+        infill_all(&w, gx, gy, planes, pl, bw, bh, twp);
+    }
     let pf = PartitionFn::new(sym.seed as u32, sym.partitions as u32, bw * bh);
     for t in 0..bh {
         for s in 0..bw {
-            let w0 = infill(&w, gx, gy, planes, 0, bw, bh, s, t);
-            let mut ws = [w0; 4];
+            let i = (t * bw + s) as usize;
+            let mut ws = [tw[0][i] as u32; 4];
             if sym.mode.dual {
-                ws[sym.ccs as usize] = infill(&w, gx, gy, planes, 1, bw, bh, s, t);
+                ws[sym.ccs as usize] = tw[1][i] as u32;
             }
             let part = pf.at(s, t) as usize;
             let (e0, e1) = eps[part];
-            out[(t * bw + s) as usize] = lerp(e0, e1, ws, srgb);
+            out[i] = lerp(e0, e1, ws, srgb);
         }
     }
 }
@@ -304,6 +347,57 @@ mod tests {
         assert_eq!(infill(&w, 5, 5, 1, 0, 8, 8, 7, 0), 8);
         assert_eq!(infill(&w, 5, 5, 1, 0, 8, 8, 0, 7), 40);
         assert_eq!(infill(&w, 5, 5, 1, 0, 8, 8, 7, 7), 48);
+    }
+
+    /// The hoisted infill matches the spec's per-texel one for every footprint, grid and plane.
+    #[test]
+    fn infill_all_matches_infill() {
+        let mut x = 1u32;
+        for (bw, bh) in [
+            (4, 4),
+            (5, 4),
+            (5, 5),
+            (6, 5),
+            (6, 6),
+            (8, 5),
+            (8, 6),
+            (8, 8),
+            (10, 5),
+            (10, 6),
+            (10, 8),
+            (10, 10),
+            (12, 10),
+            (12, 12),
+        ] {
+            for gx in 2..=bw {
+                for gy in 2..=bh {
+                    for planes in 1..=2usize {
+                        if (gx * gy) as usize * planes > 64 {
+                            continue;
+                        }
+                        let mut w = [0u8; 96];
+                        for v in &mut w[..(gx * gy) as usize * planes] {
+                            x = x.wrapping_mul(1_103_515_245).wrapping_add(12345);
+                            *v = ((x >> 16) % 65) as u8;
+                        }
+                        for pl in 0..planes {
+                            let mut out = [0u8; 144];
+                            infill_all(&w, gx, gy, planes, pl, bw, bh, &mut out);
+                            for t in 0..bh {
+                                for s in 0..bw {
+                                    let want = infill(&w, gx, gy, planes, pl, bw, bh, s, t);
+                                    assert_eq!(
+                                        out[(t * bw + s) as usize] as u32,
+                                        want,
+                                        "{bw}x{bh} {gx}x{gy} {planes} {s},{t}"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]
