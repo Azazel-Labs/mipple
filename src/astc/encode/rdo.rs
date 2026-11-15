@@ -275,6 +275,22 @@ fn reweight(
         let len2: i32 = (0..4).filter(|&c| c != ccs).map(|c| (e1[c] - e0[c]).pow(2)).sum();
         inv[p] = if len2 > 0 { 64.0 / len2 as f32 } else { 0.0 };
     }
+    // Each partition's first endpoint and span, the span zero in the second plane's channel (so
+    // it adds nothing to the dot product) and a mask zeroing that channel's distance term.
+    let mut e0f = [[0f32; 4]; 3];
+    let mut df = [[0f32; 4]; 3];
+    let mut e0i = [[0i32; 4]; 3];
+    let mut di = [[0i32; 4]; 3];
+    for p in 0..count {
+        let (e0, e1) = eps[p];
+        for c in 0..4 {
+            e0f[p][c] = e0[c] as f32;
+            df[p][c] = (e1[c] - e0[c]) as f32;
+            e0i[p][c] = e0[c];
+            di[p][c] = if c == ccs { 0 } else { e1[c] - e0[c] };
+        }
+    }
+    let mask: [f32; 4] = std::array::from_fn(|c| if c == ccs { 0.0 } else { 1.0 });
     let mut lb = 0f32;
     let mut u = [0f32; MAX_TEXELS];
     let mut u2 = [0f32; MAX_TEXELS];
@@ -282,14 +298,15 @@ fn reweight(
         let p = lay.labels[i] as usize;
         let (e0, e1) = eps[p];
         let x = t.px[i].map(i32::from);
-        let dot: i32 = (0..4)
-            .filter(|&c| c != ccs)
-            .map(|c| (x[c] - e0[c]) * (e1[c] - e0[c]))
-            .sum();
+        let mut dot = 0i32;
+        for c in 0..4 {
+            dot += (x[c] - e0i[p][c]) * di[p][c];
+        }
         u[i] = (dot as f32 * inv[p]).clamp(0.0, 64.0);
         let mut d2 = 0f32;
-        for c in (0..4).filter(|&c| c != ccs) {
-            d2 += (x[c] as f32 - e0[c] as f32 - u[i] * (1.0 / 64.0) * (e1[c] - e0[c]) as f32).powi(2);
+        for c in 0..4 {
+            let r = t.f[i][c] - e0f[p][c] - u[i] * (1.0 / 64.0) * df[p][c];
+            d2 += r * r * mask[c];
         }
         lb += (d2.sqrt() - slack).max(0.0).powi(2);
         if ccs < NO_CCS {
