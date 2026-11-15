@@ -188,7 +188,7 @@ fn refit_base(fp: &Footprint, lay: &Layout, gi: usize, sym: &Symbolic) -> Option
     let mut sums = [[[0i32; 3]; 2]; 3];
     for i in 0..fp.texels() {
         let s = &mut sums[lay.labels[i] as usize];
-        for (pl, wp) in w.iter().enumerate() {
+        for (pl, wp) in w.iter().enumerate().take(planes) {
             let wi = wp[i] as i32;
             s[pl][0] += 1;
             s[pl][1] += wi;
@@ -448,12 +448,21 @@ fn sse(a: &[Rgba], b: &[Rgba]) -> u64 {
 /// [`crate::rdo`]'s distortion weight for smooth blocks, over this footprint's texels.
 fn smooth_factor(px: &[Rgba], p: &RdoParams) -> f64 {
     let n = px.len() as f32;
-    let mut max_std = 0f32;
-    for c in 0..4 {
-        let mean = px.iter().map(|t| t[c] as f32).sum::<f32>() / n;
-        let var = px.iter().map(|t| (t[c] as f32 - mean).powi(2)).sum::<f32>() / n;
-        max_std = max_std.max(var.sqrt());
+    // The four channels side by side, each summed in texel order as one at a time would.
+    let mut sum = [0f32; 4];
+    for t in px {
+        for c in 0..4 {
+            sum[c] += t[c] as f32;
+        }
     }
+    let mean = sum.map(|s| s / n);
+    let mut var = [0f32; 4];
+    for t in px {
+        for c in 0..4 {
+            var[c] += (t[c] as f32 - mean[c]).powi(2);
+        }
+    }
+    let max_std = var.iter().fold(0f32, |m, &v| m.max((v / n).sqrt()));
     let k2 = p.smooth_std * p.smooth_std;
     (1.0 + (p.smooth_scale - 1.0) * k2 / (k2 + max_std * max_std)) as f64
 }
@@ -476,7 +485,7 @@ fn optimize_chunk(
     let max_back = p.max_back_for(format).min(window / 16);
     // `--refine-back` sets the reweight and refit reach for ASTC.
     let refit_back = p.refine_back.unwrap_or(REFIT_BACK);
-    let mut model = LzModel::new(window, p.chain_depth);
+    let mut model = LzModel::take_cached(window, p.chain_depth);
     model.set_literals(data);
     let lambda = p.lambda as f64;
     let ratio2 = (p.max_rms_ratio as f64).powi(2);
@@ -626,6 +635,7 @@ fn optimize_chunk(
         }
         model.push(&best.1, best.3);
     }
+    model.give_back();
     // Safety net: the rate model is an estimate. If real Zstd says RDO did not help this chunk,
     // keep the base encoding.
     if let (Some(level), Some(original)) = (p.verify_zstd_level, original) {

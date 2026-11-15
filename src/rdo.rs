@@ -286,6 +286,11 @@ impl RdoStats {
 
 const HASH_BITS: u32 = 13;
 
+thread_local! {
+    /// [`LzModel::give_back`]'s model.
+    static MODEL_CACHE: std::cell::RefCell<Option<LzModel>> = const { std::cell::RefCell::new(None) };
+}
+
 /// The most hash-chain entries a match search looks at ([`LzModel::new`]'s `depth`).
 const RING: usize = 16;
 
@@ -386,6 +391,38 @@ impl LzModel {
         };
         m.refresh_rem();
         m
+    }
+
+    /// [`new`](Self::new), reusing this thread's last model given back with
+    /// [`give_back`](Self::give_back) if there is one: its half-megabyte of hash buckets and its
+    /// history are refilled instead of allocated (fresh pages per 16 KiB chunk add up).
+    pub fn take_cached(window: usize, depth: usize) -> Self {
+        let Some(mut m) = MODEL_CACHE.with_borrow_mut(Option::take) else {
+            return Self::new(window, depth);
+        };
+        assert!(depth <= RING, "chain depth {depth} over {RING}");
+        m.hist.clear();
+        m.head.fill(Bucket([-1; RING]));
+        m.prev.clear();
+        m.counts = [0; 256];
+        m.max_count = 0;
+        m.total = 0;
+        m.lit.fill((256f32).log2());
+        if m.off_log2.len() != window.max(16) + 1 {
+            m.off_log2 = (0..=window.max(16)).map(|o| (o as f32).log2()).collect();
+        }
+        m.state = LzState::default();
+        m.window = window;
+        m.depth = depth;
+        m.frozen = false;
+        m.hint = 0;
+        m.refresh_rem();
+        m
+    }
+
+    /// Keeps this model for the thread's next [`take_cached`](Self::take_cached).
+    pub fn give_back(self) {
+        MODEL_CACHE.with_borrow_mut(|c| *c = Some(self));
     }
 
     /// Fixes the literal statistics to those of `sample` (order-0, add-one smoothed) instead of
@@ -3105,6 +3142,44 @@ mod tests {
                 zstd::bulk::compress(d, level).unwrap().len(),
                 "{len} {level}"
             );
+        }
+    }
+
+    /// A model taken back from the thread's cache prices blocks as a new one does, whatever the
+    /// last user left in it.
+    #[test]
+    fn cached_lz_model_matches_a_new_one() {
+        let mut seed = 3u32;
+        let blocks: Vec<[u8; 16]> = (0..600)
+            .map(|i| {
+                std::array::from_fn(|k| {
+                    seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                    if k < 8 { (i / 5 + k) as u8 } else { (seed >> 28) as u8 }
+                })
+            })
+            .collect();
+        let mut dirty = LzModel::take_cached(4096, 8);
+        dirty.set_literals(&blocks[0]);
+        dirty.hint = 48;
+        for b in &blocks[..300] {
+            let (_, st) = dirty.cost(b);
+            dirty.push(b, st);
+        }
+        dirty.give_back();
+        for frozen in [false, true] {
+            let mut a = LzModel::take_cached(16384, 16);
+            let mut b = LzModel::new(16384, 16);
+            if frozen {
+                a.set_literals(blocks.as_flattened());
+                b.set_literals(blocks.as_flattened());
+            }
+            for blk in &blocks {
+                let (ca, sa) = a.cost(blk);
+                assert_eq!((ca.to_bits(), sa), (b.cost(blk).0.to_bits(), b.cost(blk).1));
+                a.push(blk, sa);
+                b.push(blk, sa);
+            }
+            a.give_back();
         }
     }
 
