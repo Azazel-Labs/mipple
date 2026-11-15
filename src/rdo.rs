@@ -2846,7 +2846,7 @@ fn optimize_chunk(
     if let (Some(level), Some(original), false) = (p.verify_zstd_level, original, sure) {
         let size = |bs: &[[u8; 16]], level: i32| {
             let flat: Vec<u8> = bs.iter().flat_map(|b| b[..n].iter().copied()).collect();
-            zstd::bulk::compress(&flat, level).map_or(usize::MAX, |v| v.len())
+            zstd_size(&flat, level)
         };
         // A fast first look: a chunk clearly smaller at Zstd level 1 is smaller at any level.
         let quick = level > 1 && size(blocks, 1) as f64 <= VERIFY_QUICK * size(&original, 1) as f64;
@@ -2867,6 +2867,29 @@ fn optimize_chunk(
 /// of BC7 RDO's CPU time at λ 1; this skips 43% of chunks at λ 1 and all from about λ 10. BC1,
 /// BC4 and BC5 keep it: their estimates miss by up to 0.7, and a few chunks do fail.
 const VERIFY_SKIP7: f64 = 0.6;
+
+/// The size of `data` compressed by Zstd at `level` (`usize::MAX` on failure), as
+/// `zstd::bulk::compress` would make it, with a context kept per thread: a fresh one per call
+/// allocates and clears its tables each time, which cost the RDO checks more page faults than
+/// compressing took.
+pub(crate) fn zstd_size(data: &[u8], level: i32) -> usize {
+    thread_local! {
+        static ZSTD: std::cell::RefCell<Option<(zstd::bulk::Compressor<'static>, Vec<u8>)>> =
+            const { std::cell::RefCell::new(None) };
+    }
+    ZSTD.with_borrow_mut(|z| {
+        if z.is_none() {
+            *z = zstd::bulk::Compressor::new(level).ok().map(|c| (c, Vec::new()));
+        }
+        let Some((c, buf)) = z else { return usize::MAX };
+        if c.set_compression_level(level).is_err() {
+            return usize::MAX;
+        }
+        buf.clear();
+        buf.reserve(zstd::compress_bound(data.len()));
+        c.compress_to_buffer(data, buf).unwrap_or(usize::MAX)
+    })
+}
 /// Chunks at most this fraction of the base's size under Zstd level 1 skip the check at the
 /// requested level. On Kodak-24 (λ 0.25 to 3) the level-19 ratio exceeded the level-1 ratio by at
 /// most 0.065, so such a chunk is still at most 0.97 of the base's size. A level-19 compression costs
@@ -3057,6 +3080,26 @@ pub fn optimize_with_alt(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The kept context gives what a fresh one does, across levels and sizes in any order.
+    #[test]
+    fn zstd_size_matches_a_fresh_context() {
+        let mut seed = 7u32;
+        let data: Vec<u8> = (0..40_000)
+            .map(|i| {
+                seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                if i % 3 == 0 { (seed >> 24) as u8 } else { (i / 7) as u8 }
+            })
+            .collect();
+        for &(len, level) in &[(16384, 19), (16384, 1), (40_000, 19), (100, 3), (16384, 19), (0, 1)] {
+            let d = &data[..len];
+            assert_eq!(
+                zstd_size(d, level),
+                zstd::bulk::compress(d, level).unwrap().len(),
+                "{len} {level}"
+            );
+        }
+    }
 
     /// Throwaway profile of one RDO chunk (BC7, λ = 1, entropy-reduced base) over a Kodak image:
     /// time and counts per stage of the candidate loop. Mirrors `optimize_chunk` with timers.

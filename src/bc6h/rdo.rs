@@ -279,7 +279,7 @@ fn optimize_chunk(s: &HdrSurface, nx: usize, first: usize, data: &mut [u8], p: &
     // Safety net: the rate model is an estimate. If real Zstd says RDO did not help this chunk,
     // keep the base encoding.
     if let (Some(level), Some(original)) = (p.verify_zstd_level, original) {
-        let size = |b: &[u8], level: i32| zstd::bulk::compress(b, level).map_or(usize::MAX, |v| v.len());
+        let size = crate::rdo::zstd_size;
         let quick = level > 1 && size(data, 1) as f64 <= VERIFY_QUICK * size(&original, 1) as f64;
         if !quick && size(data, level) >= size(&original, level) {
             data.copy_from_slice(&original);
