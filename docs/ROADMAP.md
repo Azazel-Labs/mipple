@@ -183,8 +183,9 @@ Open for v0.9.x:
     ISPC fast's PSNR the files are 17.7% / 16.6% / 29.8% smaller after Zstd. Cached refit sums and exact
     bounds on re-weights and whole copies made the pass 1.2-1.9× faster, output unchanged (BENCHMARKS.md).
   - [x] Effort 0 faster than ISPC fast at 6x6 and 8x8; close the PSNR gap to astcenc medium / thorough.
-  - [ ] Smaller Zstd files at equal effort: at 6x6 / 8x8, effort 2's are 2.7% / 4.1% larger than astcenc
-    medium's (for 0.11 / 0.03 dB more), effort 0's 2.6% / 7.9% larger than astcenc fast's.
+  - [x] Smaller files too: with a light RDO pass one block back (`-l <λ> --max-back 1 --refine-back 1`),
+    some setting beats each astcenc preset (fast / medium / thorough) at once on PSNR, SSIM, Zstd and
+    Deflate size and time at 4x4, 6x6 and 8x8 (BENCHMARKS.md, 8598d56; each pair on one cloud runner).
   - [ ] A GPU kernel, a SIMD batch encoder, other footprints (the decoder already reads every 2D one), HDR.
 - [x] ETC2 / EAC for mobile fallbacks: ETC2 RGB (all five modes), ETC2 RGBA8 and EAC R11 / RG11 (unsigned),
   KTX2 only, with the RDO pass. On Kodak, one thread, effort 0 is 0.37 dB ahead of Compressonator in an

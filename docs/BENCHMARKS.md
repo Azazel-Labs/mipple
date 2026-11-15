@@ -715,15 +715,51 @@ Every astcenc preset is beaten in PSNR and SSIM, in less time, at every footprin
 
 - **fast:** effort 1 at 4x4 (+0.20 dB in 83% of its time; effort 0 is 0.025 dB behind in 67% with files 1.7%
   smaller), effort 0 at 6x6 (+0.002 dB, SSIM 0.98530 against 0.98337, in 61%) and at 8x8 (+0.23 dB in 46%).
-  astcenc fast's files are smaller after Zstd at 6x6 and 8x8 (effort 0's are 2.6% / 7.9% larger).
+  astcenc fast's files are smaller after Zstd at 6x6 and 8x8 (effort 0's are 2.6% / 7.9% larger), until a
+  light RDO pass is added (below).
 - **medium:** effort 2, +0.19 / +0.11 / +0.03 dB at 4x4 / 6x6 / 8x8 in 75% / 83% / 55% of its time; files
-  0.5% / 2.7% / 4.1% larger after Zstd.
+  0.5% / 2.7% / 4.1% larger after Zstd, again until light RDO is added.
 - **thorough:** effort 3 at 4x4 (+0.05 dB in 44% of its time, files 0.4% smaller), effort 4 at 6x6 (+0.004
   dB in 41%, files 0.3% larger) and effort 5 at 8x8 (+0.008 dB in 65%, files 0.4% larger). Effort 7 leads it
   by 0.35 / 0.18 / 0.07 dB in 2.8× / 1.6× / 1.2× its time.
 
 Against ISPC fast, effort 0 is 0.77 / 0.10 / 0.26 dB ahead at 4x4 / 6x6 / 8x8 with higher SSIM, in 91% / 89%
 / 90% of its time, with files 2.7% / 1.4% / 0.1% smaller after Zstd.
+
+### Better on every metric at once: light RDO
+
+The effort settings above win on PSNR, SSIM and time but give up file size at 6x6 and 8x8. A light RDO
+pass that looks only one block back (`-l <λ> --max-back 1 --refine-back 1`: a whole copy of the previous
+block, its head with the weights re-chosen, and its weights with the endpoints refitted) closes that gap.
+With it, some setting beats each astcenc preset on all five columns at once (PSNR, SSIM, Zstd-19 and
+Deflate-9 bits/texel, and time) at every footprint. Same setup as above, mipple 8598d56. Each comparison is
+one cloud run with both encoders on the same runner, so the times compare within a row:
+
+| footprint | astcenc preset | mipple setting | PSNR dB | SSIM | Zstd-19 bpt | Deflate-9 bpt | time s | runner |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 4x4 | fast | effort 1 | 44.784 / 44.580 | 0.99753 / 0.99722 | 7.196 / 7.216 | 7.348 / 7.362 | 1.75 / 2.27 | Xeon 6975P-C |
+| 4x4 | medium | effort 2 `-l 0.03` | 45.414 / 45.223 | 0.99777 / 0.99750 | 7.346 / 7.363 | 7.462 / 7.483 | 8.43 / 10.08 | Xeon 6975P-C |
+| 4x4 | thorough | effort 3 | 45.526 / 45.472 | 0.99781 / 0.99759 | 7.426 / 7.453 | 7.542 / 7.560 | 15.31 / 36.19 | EPYC 7763 |
+| 6x6 | fast | effort 0 `-l 0.3` | 37.664 / 37.657 | 0.98517 / 0.98337 | 3.198 / 3.205 | 3.240 / 3.262 | 2.37 / 2.47 | EPYC 7763 |
+| 6x6 | medium | effort 2 `-l 0.35` | 38.297 / 38.218 | 0.98654 / 0.98561 | 3.265 / 3.298 | 3.287 / 3.340 | 7.92 / 8.58 | EPYC 7763 |
+| 6x6 | thorough | effort 4 `-l 0.1` | 38.454 / 38.451 | 0.98709 / 0.98664 | 3.368 / 3.384 | 3.388 / 3.407 | 13.14 / 30.55 | EPYC 9V74 |
+| 8x8 | fast | effort 0 `-l 1.5` | 33.875 / 33.682 | 0.96073 / 0.95448 | 1.708 / 1.742 | 1.723 / 1.770 | 1.30 / 1.73 | EPYC 9V45 |
+| 8x8 | medium | effort 2 `-l 0.8` | 34.412 / 34.404 | 0.96468 / 0.96329 | 1.828 / 1.843 | 1.837 / 1.863 | 3.99 / 6.22 | EPYC 9V45 |
+| 8x8 | thorough | effort 5 `-l 0.5` | 34.636 / 34.635 | 0.96619 / 0.96589 | 1.880 / 1.917 | 1.887 / 1.926 | 22.14 / 32.43 | EPYC 9V74 |
+
+Each cell is mipple / astcenc; `-l` rows also pass `--max-back 1 --refine-back 1`. In the same runs, with
+more room on some columns:
+
+- **4x4:** effort 2 `-l 0.06` beats medium by 0.17 dB with files 1.2% smaller (7.277 bpt, 8.46 s), and
+  effort 3 `-l 0.03` beats thorough by 0.05 dB with files 1.1% smaller (45.522 dB, 7.373 bpt, 16.67 s).
+- **6x6:** effort 5 `-l 0.3` beats thorough by 0.09 dB with files 2.4% smaller (38.540 dB, 3.302 bpt, 26.92 s
+  against 30.55 s).
+- **8x8:** effort 2 `-l 1` matches medium's PSNR within 0.003 dB (34.401) with files 2.3% smaller (1.801 bpt),
+  and effort 3 `-l 1` beats it by 0.07 dB with files 2.1% smaller (34.469 dB, 1.805 bpt, 5.61 s against 6.22
+  s). Effort 5 `-l 1` gives up 0.02 dB to thorough for files 5.5% smaller (34.611 dB, 1.812 bpt).
+
+The 6x6 fast and 8x8 thorough wins are narrow on one column each (time 96%, PSNR +0.001 dB). The widest is
+4x4 thorough: 42% of the time, files 0.4% smaller, +0.05 dB.
 
 Scoring astcenc's files exposed a decoder bug, fixed: a 2- or 3-partition block may spell equal CEMs the long
 way (with the extra CEM bits below the weights), and the decoder read those blocks with the short form's

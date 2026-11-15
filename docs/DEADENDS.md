@@ -304,6 +304,9 @@ Measured on Kodak images 1-3, single thread, effort 0, unless noted. ISPC fast t
   endpoints to its weights: Kodak 6x6 λ 0.3 w1 3.02 s against 3.03 s, 3.201 bpt against 3.198.
 - **Counting partition texels in registers and caching the starting error in polish_parts.**
   Byte-identical, 3.00 s against 3.01 s on Kodak 6x6 λ 0.3 w1, within noise.
+- **Prefetching the hash buckets for the base block's full LZ parse.** The parse's chain loop is
+  29% of `cost_until`, so `LzModel::cost` prefetched all 14 positions' buckets first. Byte-identical,
+  2.96 s against 2.98 s on Kodak 6x6 λ 0.3 w1, within noise. The buckets (512 KiB) already sit in L2.
 
 ## ETC2 / EAC
 
