@@ -667,9 +667,10 @@ fn optimize_chunk(
 }
 
 /// A chunk Zstd level 1 shrinks to this or less, within [`VERIFY_AGREE`] of the rate model's
-/// estimate, skips the level-19 check: none of the 44,603 such chunks over Kodak, Poly Haven and the
-/// synthetic set (footprints 4x4 to 8x8, λ 0.1 to 4) grew at level 19.
-const VERIFY_SURE: f64 = 0.98;
+/// estimate, skips the full check: none of the 12,015 such chunks (of 14,480) over 24 Kodak, 16 Poly
+/// Haven and 6 synthetic images (footprints 4x4, 6x6 and 8x8, λ 0.1 to 4, window 1 and full) grew at
+/// level 19. At 0.999 one did, by 0.09%.
+const VERIFY_SURE: f64 = 0.998;
 const VERIFY_AGREE: f64 = 0.03;
 
 /// The check runs at most at this level, a fraction of level 19's time. It keeps or reverts the same
