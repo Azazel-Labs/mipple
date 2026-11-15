@@ -22,6 +22,9 @@ on:
       callers:
         description: "Also record call stacks (DWARF): inclusive time, and the callers of these symbols (`|`-separated substrings)"
         default: ""
+      annotate:
+        description: "Instruction-level hot spots of these symbols (`|`-separated substrings of their names)"
+        default: ""
 
 permissions:
   contents: read
@@ -35,6 +38,7 @@ jobs:
       EXT: ${{ inputs.ext }}
       IMAGES: ${{ inputs.images }}
       CALLERS: ${{ inputs.callers }}
+      ANNOTATE: ${{ inputs.annotate }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -79,6 +83,18 @@ jobs:
               perf report -i "perf-$img.data" --no-children --sort srcline --percent-limit 0.3 --stdio 2>/dev/null \
                 | grep -v '^#' | sed '/^$/d' | cut -c1-160 | head -80
               echo '```'
+              if [ -n "$ANNOTATE" ]; then
+                IFS='|' read -ra pats <<< "$ANNOTATE"
+                for pat in "${pats[@]}"; do
+                  sym=$(perf report -i "perf-$img.data" --no-children --sort symbol --stdio 2>/dev/null                     | grep -F -- "$pat" | head -1 | sed 's/^.*\[\.\] //; s/ *$//')
+                  [ -z "$sym" ] && continue
+                  echo
+                  echo "### $img: hottest instructions of \`$sym\` (percent of the symbol, source line)"
+                  echo '```'
+                  perf annotate -i "perf-$img.data" --stdio --no-source -l -s "$sym" 2>/dev/null                     | awk '$1 ~ /^[0-9.]+$/ && $1 + 0 >= 0.4' | sort -rn | head -50 | cut -c1-160
+                  echo '```'
+                done
+              fi
               if [ -n "$CALLERS" ]; then
                 echo
                 echo "### $img: inclusive time by function"
