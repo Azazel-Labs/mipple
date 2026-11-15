@@ -126,6 +126,13 @@ Open for v0.9.x:
     timing on the busy dev machine had shown no gain. 1024 was 1.07× faster for 0.1-0.2 points, 256 no faster than
     512 for more loss, and keeping 12 or 16 blocks per key instead of 8 (`--local-m`) cost time for no gain.
   - Measured, not pursued: a shallower rate-model hash chain saves no time (depth 4 is slower).
+  - Kept: the fast encoder queues the blocks its mode-6 gate (`busy_err`) sends on to the multi-subset search
+    and searches them eight at a time. At λ 1, 7-22% of Kodak blocks are busy but 25-59% of 8-block batches
+    held one. Cloud A/B against bc98005: 1.05× / 1.06× less time at λ 1 / 10, the Kodak-24 table vs Oodle
+    unchanged to 0.1%, and plain effort 2 1.25× faster with identical output.
+  - Estimate: from 941af16 (31.2-31.6 CPU-seconds on the pinned P-core) to 5b90602 is 1.43× × 1.05× less time
+    at λ 1 on the cloud, which puts λ 1 at about 21 CPU-seconds, level with Oodle's 20-22. Not yet re-timed
+    side by side on the dev machine, whose timings swing ±20% under its current load.
   - Next: structural cuts to the far re-indexing and the second base, using the cross-domain research
     sweep's ideas (hash-based block matching from screen-content video coding, lower-bound cascades).
 - [ ] BC7 mode 4 in the fast encoder, p-bit search in quantization, and a faster uber step.
