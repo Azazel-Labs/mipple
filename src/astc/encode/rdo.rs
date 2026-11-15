@@ -488,7 +488,9 @@ fn optimize_chunk(
         ..Default::default()
     };
     let mut prevs: Vec<Prev> = Vec::with_capacity(count);
-    let mut decs: Vec<Rgba> = vec![[0; 4]; count * n];
+    // The chosen blocks' decodes, for whole copies up to `max_back` back: a ring of that many.
+    let slots = max_back.clamp(1, count);
+    let mut decs: Vec<Rgba> = vec![[0; 4]; slots * n];
     // Each chosen block's decoded channel sums.
     let mut dsums: Vec<[i32; 4]> = Vec::with_capacity(count);
     let mut px = vec![[0u8; 4]; n];
@@ -545,7 +547,8 @@ fn optimize_chunk(
                 if lb > limit as f64 || smooth * lb / 16.0 + floor >= best.0 {
                     continue;
                 }
-                consider(prevs[j].bytes, sse(&px, &decs[j * n..j * n + n]), &mut best);
+                let k = j % slots * n;
+                consider(prevs[j].bytes, sse(&px, &decs[k..k + n]), &mut best);
             }
         }
         heads.clear();
@@ -605,18 +608,23 @@ fn optimize_chunk(
             stats.changed += 1;
         }
         data[i * 16..i * 16 + 16].copy_from_slice(&best.1);
+        // Block `i - max_back`'s slot: no later block copies it whole.
+        let di = &mut decs[i % slots * n..][..n];
         if best.1 == base {
-            decs[i * n..i * n + n].copy_from_slice(&dec[..n]);
+            di.copy_from_slice(&dec[..n]);
         } else {
-            decode_block(&best.1, bw, bh, srgb, &mut decs[i * n..i * n + n]);
+            decode_block(&best.1, bw, bh, srgb, di);
         }
-        dsums.push(std::array::from_fn(|c| {
-            decs[i * n..i * n + n].iter().map(|d| d[c] as i32).sum()
-        }));
+        dsums.push(std::array::from_fn(|c| di.iter().map(|d| d[c] as i32).sum()));
         prevs.push(Prev {
             bytes: best.1,
-            sym: prev_sym(fp, best.1),
+            sym: if refit_back > 0 { prev_sym(fp, best.1) } else { None },
         });
+        // No later block reweights or refits block `i - refit_back`: free its fields, so the next
+        // block's reuse the memory (a chunk's worth is megabytes of fresh pages).
+        if let Some(old) = i.checked_sub(refit_back) {
+            prevs[old].sym = None;
+        }
         model.push(&best.1, best.3);
     }
     // Safety net: the rate model is an estimate. If real Zstd says RDO did not help this chunk,
