@@ -756,10 +756,12 @@ more room on some columns:
   against 30.55 s).
 - **8x8:** effort 2 `-l 1` matches medium's PSNR within 0.003 dB (34.401) with files 2.3% smaller (1.801 bpt),
   and effort 3 `-l 1` beats it by 0.07 dB with files 2.1% smaller (34.469 dB, 1.805 bpt, 5.61 s against 6.22
-  s). Effort 5 `-l 1` gives up 0.02 dB to thorough for files 5.5% smaller (34.611 dB, 1.812 bpt).
+  s). Effort 5 `-l 1` gives up 0.02 dB to thorough for files 5.5% smaller (34.611 dB, 1.812 bpt). In a
+  second run (EPYC 9V74, astcenc thorough 32.76 s), effort 6 `-l 0.7` beats thorough by 0.02 dB with SSIM
+  0.96613 and files 3.3% / 3.3% smaller after Zstd / Deflate (34.657 dB, 1.854 bpt) in 83% of its time.
 
-The 6x6 fast and 8x8 thorough wins are narrow on one column each (time 96%, PSNR +0.001 dB). The widest is
-4x4 thorough: 42% of the time, files 0.4% smaller, +0.05 dB.
+The 6x6 fast win is narrow on time (96%), and the 8x8 thorough row on PSNR (+0.001 dB; effort 6 `-l 0.7`
+above has more room). The widest is 4x4 thorough: 42% of the time, files 0.4% smaller, +0.05 dB.
 
 Scoring astcenc's files exposed a decoder bug, fixed: a 2- or 3-partition block may spell equal CEMs the long
 way (with the extra CEM bits below the weights), and the decoder read those blocks with the short form's
