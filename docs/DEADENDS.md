@@ -307,6 +307,10 @@ Measured on Kodak images 1-3, single thread, effort 0, unless noted. ISPC fast t
 - **Prefetching the hash buckets for the base block's full LZ parse.** The parse's chain loop is
   29% of `cost_until`, so `LzModel::cost` prefetched all 14 positions' buckets first. Byte-identical,
   2.96 s against 2.98 s on Kodak 6x6 λ 0.3 w1, within noise. The buckets (512 KiB) already sit in L2.
+- **Building the ASTC path for AVX2 (`-C target-cpu=x86-64-v3`).** The ASTC kernels are SSE2-only, so a
+  whole-crate x86-64-v3 build bounds what runtime AVX2 dispatch could gain. It writes the same bytes and
+  is 2-3% faster on one pinned P-core (Kodak 6x6 effort 0 λ 0.3 w1 3.28 s against 3.36 s, effort 2
+  9.12 s against 9.38 s, best of 3). Too little for multiversioning the whole encoder.
 
 ## ETC2 / EAC
 
