@@ -146,7 +146,16 @@ Open for v0.9.x:
     gained 1.02-1.07× (noisy local timing; see DEADENDS).
   - Next: structural cuts to the far re-indexing and the second base, using the cross-domain research
     sweep's ideas (hash-based block matching from screen-content video coding, lower-bound cascades).
-- [ ] BC7 mode 4 in the fast encoder, p-bit search in quantization, and a faster uber step.
+- [x] BC7 mode 4 in the fast encoder, p-bit search in quantization, and a faster uber step. Kodak-24, λ 0, one
+  thread: effort 8 adds mode 4, 46.018 → 46.033 dB for 0.97-1.04× the CPU time (17 images up, none down). It
+  also feeds RDO below λ 1, whose base is effort 8: `mipple check` λ 0.5 normal_rocks +0.84 dB and 1.7% smaller
+  Zstd. Effort 9 adds the p-bit search by exact error (multi-subset fits, refits and polish, and mode 6's
+  fits). It polishes the top two candidates like effort 8, not every one: 46.084 dB (24/24 images up) for
+  1.75× effort 8's time, where it was 46.018 dB at 1.10× (1.57× the old effort 9's time, paired). The uber
+  trials skip stretch ranges that repeat an earlier index map, with the same output. Efforts 0-5 are
+  unchanged, since the GPU kernel must match them. Efforts 6-7 are unchanged too: both additions fall below
+  the effort curve there (see DEADENDS). RDO's second base (λ ≥ 1) stays as it was. Open: a cheaper p-bit
+  search for effort 5, which would gain +0.05 dB but needs the WGSL kernel to follow.
 - [x] **Smarter entropy reduction** (tried, not merged): RDO already chooses each block's start by J among
   three bases, so a rate-aware weight, a fourth base or a bias on the start moved Kodak-24 BD-rate by under
   0.1% (DEADENDS.md).

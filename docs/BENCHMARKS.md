@@ -26,7 +26,8 @@ while mipple's time includes allocating its output.
 Interleaved, fastest of 2. Effort 8 adds bc7e-style "uber" refits
 (least-squares fits from index sets with the extremes nudged inward and stretched, for every multi-subset
 mode and mode 6) and refines every mode's best encoding and its two best partition candidates before the modes
-compete; effort 9 refines every candidate.
+compete; effort 9 refines every candidate. (Since then effort 8 also tries mode 4, and effort 9 searches
+p-bits by exact error instead of refining every candidate; see the ROADMAP's BC7 mode 4 item.)
 
 | Config | PSNR (dB) | Time, 6 images (s) |
 | --- | --- | --- |
@@ -340,7 +341,8 @@ On kodim01 mipple's top effort beats rgbcx L18 on high-variance blocks and loses
 Every one of the 33 competitor configs is beaten on both PSNR and speed by some mipple effort. The last one to fall
 was ISPC BC1 (`ispc_bc1`): mipple effort 0 is 0.34 dB better (36.05 vs 35.71) and now slightly faster (467 vs
 450 Mpix/s; it was 3% slower before the change below). BC7: effort 8 beats bc7e u6 (46.02 dB in 33.4 s vs
-46.01 dB in 38.7 s), and effort 6 beats ISPC `slow` (45.64 vs 45.63 dB, 6.6× faster).
+46.01 dB in 38.7 s; mode 4, added since, gives +0.015 dB for 0.97-1.04× the time), and effort 6 beats ISPC
+`slow` (45.64 vs 45.63 dB, 6.6× faster).
 
 The BC1 effort-0 speedup came from dependency chains, not arithmetic: the line fit summed 16 texels per
 accumulator in one serial chain (mean, covariance, projection min/max, refit sums), about 64 cycles of latency

@@ -44,6 +44,8 @@ pub fn fast_cfg(opts: BlockOpts) -> Option<fast::Cfg> {
         polish_modes: false,
         polish_parts: false,
         polish_top: 0,
+        mode4: false,
+        pbits: 0,
     };
     // Mode 1 on the 4 best ranked partitions with a refit and ±1 refinement.
     let deep = fast::Cfg {
@@ -102,18 +104,23 @@ pub fn fast_cfg(opts: BlockOpts) -> Option<fast::Cfg> {
         // + more partitions and refits.
         7 => top,
         // bc7e-style: uber index-set refits, and every mode's best (plus its top two
-        // candidates, or every candidate at effort 9) refined before the modes compete.
+        // candidates) refined before the modes compete; + dual-plane mode 4.
         8 => fast::Cfg {
             uber: 4,
             polish_modes: true,
             polish_parts: true,
             polish_top: 2,
+            mode4: true,
             ..top
         },
+        // + p-bit search in the multi-subset fits, refits and polish, and in mode 6's fits.
         _ => fast::Cfg {
             uber: 4,
             polish_modes: true,
             polish_parts: true,
+            polish_top: 2,
+            mode4: true,
+            pbits: 7,
             ..top
         },
     })
@@ -137,7 +144,13 @@ pub fn fast_cfg(opts: BlockOpts) -> Option<fast::Cfg> {
 /// With the reduced base's matching gate in batch.rs, Kodak-24's λ 20-40 cells vs Oodle each held
 /// or gained (λ 30 SSIM −1.8% → −2.4%, λ 40 −1.5% → −2.0%) and the bases took about 55% less time.
 pub fn rdo_alt_cfg(opts: BlockOpts) -> Option<fast::Cfg> {
-    let c = fast_cfg(opts)?;
+    // Without mode 4 or the p-bit search (efforts 8-9's newest additions, unmeasured under RDO);
+    // effort 9 polishes every candidate instead.
+    let c = fast::Cfg {
+        mode4: false,
+        pbits: 0,
+        ..fast_cfg(opts)?
+    };
     Some(if opts.effort == 8 {
         fast::Cfg {
             polish_top: 1,
@@ -150,6 +163,8 @@ pub fn rdo_alt_cfg(opts: BlockOpts) -> Option<fast::Cfg> {
             busy_err: 384.0,
             ..c
         }
+    } else if opts.effort >= 9 {
+        fast::Cfg { polish_top: 0, ..c }
     } else {
         c
     })

@@ -167,8 +167,11 @@ two fitted in 2-D). Each subset is fitted like mode 6 with per-lane membership m
 encoding per lane competes with mode 6, and from effort 4 each lane's winner gets a ±1 refinement of
 its endpoint levels and p-bits under the exact error (indices re-chosen per trial: fixing them loses two
 thirds of the gain). Efforts 8-9 add bc7e's "uber" step (least-squares fits from index sets with the extremes
-nudged inward and linearly stretched) and run it with the refinement on every mode's best encoding (and its
-top candidates) before the modes compete. Mode-6 blocks are packed in registers; 2-subset winners with the scalar packer. Blocks
+nudged inward and linearly stretched; stretches that map every index the same way as an earlier one are
+skipped) and run it with the refinement on every mode's best encoding (and its top two candidates) before the
+modes compete. Effort 8 also tries dual-plane mode 4 (each color channel in the 6-bit scalar plane, both index
+widths). Effort 9 searches p-bits by exact error in the multi-subset fits, refits and polish and in mode 6's
+fits (every p-bit choice quantized and indexed) instead of picking each by its endpoint error. Mode-6 blocks are packed in registers; 2-subset winners with the scalar packer. Blocks
 with alpha go to the scalar encoder.
 
 **BC7, batch encoder** (`bc7::encode_batch`, search levels 0-1, opaque blocks; `pipeline::encode_base` uses

@@ -16,8 +16,9 @@
 //!
 //! Lanes with error left then try modes 1 and 3 on estimated or ranked 2-subset partitions
 //! (`guess_partitions`, `rank_fits`), modes 0 and 2 on ranked 3-subset partitions
-//! (`rank_fits3`) and dual-plane mode 5, with refits, ±1 endpoint refinement and (efforts 8-9)
-//! bc7e-style uber trials. Blocks with alpha go to the scalar encoder.
+//! (`rank_fits3`) and dual-plane modes 5 and 4, with refits, ±1 endpoint refinement and
+//! (efforts 8-9) bc7e-style uber trials; effort 9 also searches p-bits by exact error
+//! ([`Cfg::pbits`]). Blocks with alpha go to the scalar encoder.
 //!
 //! Every value is an integer below 2^24 in f32 (see `crate::exact`), so results do not depend on
 //! rounding, summation order or fused multiply-adds: the portable and AVX2 backends and the GPU
@@ -68,6 +69,13 @@ pub struct Cfg {
     pub polish_parts: bool,
     /// With `polish_parts`: only the first this many candidates of each mode (0 = all).
     pub polish_top: u8,
+    /// Also try dual-plane mode 4 (each color channel in the scalar plane, both index widths),
+    /// beside mode 5 if that is on.
+    pub mode4: bool,
+    /// p-bit search: every p-bit choice quantized and indexed, the lowest exact error kept, in the
+    /// multi-subset fits and refits (bit 0), their uber trials and refinement (bit 1) and mode 6's
+    /// fit and refits (bit 2). Otherwise each p-bit is the one with the lower endpoint error.
+    pub pbits: u8,
 }
 
 /// `floor` for non-negative lanes.
@@ -133,6 +141,71 @@ fn quant_endpoint<V: SimdF32>(e: &[V; 3]) -> ([V; 4], V, [V; 4]) {
         p += 1;
     }
     (best_q, best_p, best_v)
+}
+
+/// Mode 6 with a p-bit search: each of the four p-bit pairs quantizes both endpoints to their
+/// nearest levels and indexes the block; the lowest error wins per lane. The error counts alpha
+/// too (an endpoint with p = 0 decodes alpha 254), so an opaque block only gives up alpha 255
+/// where RGB gains more.
+#[inline(always)]
+fn search6<V: SimdF32>(t: &Texels<V>, e0: &[V; 3], e1: &[V; 3]) -> (Ends<V>, [V; 16], V) {
+    let zero = V::splat(0.0);
+    let half = V::splat(0.5);
+    let top = V::splat(127.0);
+    let mut best = Ends {
+        q: [[zero; 4]; 2],
+        p: [zero; 2],
+        v: [[zero; 4]; 2],
+    };
+    let mut bidx = [zero; 16];
+    let mut berr = V::splat(f32::INFINITY);
+    for pc in [[1.0f32, 1.0], [0.0, 1.0], [1.0, 0.0], [0.0, 0.0]] {
+        let mut cand = best;
+        let mut k = 0;
+        while k < 2 {
+            let e = if k == 0 { e0 } else { e1 };
+            let pv = V::splat(pc[k]);
+            cand.p[k] = pv;
+            let mut c = 0;
+            while c < 4 {
+                let x = if c < 3 { e[c] } else { V::splat(255.0) };
+                cand.q[k][c] = floor((x - pv).mul_add(half, half).simd_max(zero)).simd_min(top);
+                cand.v[k][c] = cand.q[k][c].mul_add(V::splat(2.0), pv);
+                c += 1;
+            }
+            k += 1;
+        }
+        let (cidx, mut cerr) = project(t, &cand);
+        if pc != [1.0, 1.0] {
+            // Alpha decodes to a0 + floor(w (a1 - a0) / 64 + 1/2).
+            let (a0, d64) = (cand.v[0][3], (cand.v[1][3] - cand.v[0][3]) * V::splat(1.0 / 64.0));
+            let mut i = 0;
+            while i < 16 {
+                let d = V::splat(255.0) - a0 - floor(weight(cidx[i], 16).mul_add(d64, half));
+                cerr = d.mul_add(d, cerr);
+                i += 1;
+            }
+        }
+        let take = cerr.simd_lt(berr);
+        berr = V::select(take, cerr, berr);
+        let mut k = 0;
+        while k < 2 {
+            best.p[k] = V::select(take, cand.p[k], best.p[k]);
+            let mut c = 0;
+            while c < 4 {
+                best.q[k][c] = V::select(take, cand.q[k][c], best.q[k][c]);
+                best.v[k][c] = V::select(take, cand.v[k][c], best.v[k][c]);
+                c += 1;
+            }
+            k += 1;
+        }
+        let mut i = 0;
+        while i < 16 {
+            bidx[i] = V::select(take, cidx[i], bidx[i]);
+            i += 1;
+        }
+    }
+    (best, bidx, berr)
 }
 
 #[inline(always)]
@@ -539,6 +612,108 @@ fn quant_two<V: SimdF32>(e: &[[V; 3]; 2], mode: Two) -> ([[V; 3]; 2], [V; 2], [[
     (q, p, v)
 }
 
+/// Nearest levels of one endpoint for `mode` with the p-bit fixed at `p` (ignored without p-bits).
+#[inline(always)]
+fn quant_end_p<V: SimdF32>(e: &[V; 3], p: V, mode: Two) -> ([V; 3], [V; 3]) {
+    let zero = V::splat(0.0);
+    let (mut q, mut v) = ([zero; 3], [zero; 3]);
+    let mut c = 0;
+    while c < 3 {
+        (q[c], v[c]) = match mode {
+            Two::M1 => {
+                let (a, b, _) = quant6p(e[c], p);
+                (a, b)
+            }
+            Two::M3 => {
+                let a =
+                    floor((e[c] - p).mul_add(V::splat(0.5), V::splat(0.5)).simd_max(zero)).simd_min(V::splat(127.0));
+                (a, a.mul_add(V::splat(2.0), p))
+            }
+            Two::M0 => {
+                let (a, b, _) = quant_gen(e[c], p, mode);
+                (a, b)
+            }
+            Two::M2 => {
+                let (a, b, _) = quant_gen(e[c], zero, mode);
+                (a, b)
+            }
+        };
+        c += 1;
+    }
+    (q, v)
+}
+
+/// A p-bit search for the first `NS` subsets: every p-bit choice of `mode` (both values of the
+/// shared bit, or all four endpoint pairs), each endpoint quantized to its nearest levels under
+/// that choice and the subsets re-indexed exactly; the lowest error per subset and lane wins.
+/// Subsets not `live` keep `keep`'s endpoints (their errors are recomputed but cannot win).
+/// Returns each subset's levels, p-bits, values, indices and error.
+#[expect(clippy::type_complexity, reason = "per-subset results")]
+#[inline(always)]
+fn quant_search<V: SimdF32, const NS: usize>(
+    t: &Texels<V>,
+    m: &[[V; 16]; 3],
+    e: &[[[V; 3]; 2]; NS],
+    live: &[bool; NS],
+    keep: &[[[V; 3]; 2]; NS],
+    mode: Two,
+) -> (
+    [[[V; 3]; 2]; NS],
+    [[V; 2]; NS],
+    [[[V; 3]; 2]; NS],
+    [[V; 16]; NS],
+    [V; NS],
+) {
+    let zero = V::splat(0.0);
+    let combos: &[[f32; 2]] = match mode.pbits() {
+        PBits::None => &[[0.0, 0.0]],
+        PBits::Shared => &[[0.0, 0.0], [1.0, 1.0]],
+        PBits::Endpoint => &[[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0]],
+    };
+    let mut bq = [[[zero; 3]; 2]; NS];
+    let mut bp = [[zero; 2]; NS];
+    let mut bv = *keep;
+    let mut bidx = [[zero; 16]; NS];
+    let mut berr = [V::splat(f32::INFINITY); NS];
+    for pc in combos {
+        let p = [V::splat(pc[0]), V::splat(pc[1])];
+        let mut q = [[[zero; 3]; 2]; NS];
+        let mut v = *keep;
+        let mut s = 0;
+        while s < NS {
+            if live[s] {
+                (q[s][0], v[s][0]) = quant_end_p(&e[s][0], p[0], mode);
+                (q[s][1], v[s][1]) = quant_end_p(&e[s][1], p[1], mode);
+            }
+            s += 1;
+        }
+        let (idx, err) = index_multi::<V, NS>(t, m, &v, mode);
+        let mut s = 0;
+        while s < NS {
+            let take = err[s].simd_lt(berr[s]);
+            berr[s] = V::select(take, err[s], berr[s]);
+            let mut k = 0;
+            while k < 2 {
+                bp[s][k] = V::select(take, p[k], bp[s][k]);
+                let mut c = 0;
+                while c < 3 {
+                    bq[s][k][c] = V::select(take, q[s][k][c], bq[s][k][c]);
+                    bv[s][k][c] = V::select(take, v[s][k][c], bv[s][k][c]);
+                    c += 1;
+                }
+                k += 1;
+            }
+            let mut i = 0;
+            while i < 16 {
+                bidx[s][i] = V::select(take, idx[i], bidx[s][i]);
+                i += 1;
+            }
+            s += 1;
+        }
+    }
+    (bq, bp, bv, bidx, berr)
+}
+
 /// Exact indices of all 16 texels for a subset's endpoints (the better of the two palette
 /// entries around the projection) and the error summed over the members `m`.
 #[inline(always)]
@@ -648,9 +823,10 @@ fn polish_multi<V: SimdF32, const NS: usize>(
     mode: Two,
     level: u8,
     passes: u8,
+    pbs: bool,
 ) {
     if level > 0 {
-        uber_multi::<V, NS>(t, m, subs, mode, level);
+        uber_multi::<V, NS>(t, m, subs, mode, level, pbs);
     }
     if passes > 0 {
         refine_multi::<V, NS>(t, m, subs, mode, passes);
@@ -659,11 +835,19 @@ fn polish_multi<V: SimdF32, const NS: usize>(
 
 /// [`polish_multi`] for the subset count of `mode`.
 #[inline(always)]
-fn polish<V: SimdF32>(t: &Texels<V>, m: &[[V; 16]; 3], subs: &mut [Sub<V>; 3], mode: Two, level: u8, passes: u8) {
+fn polish<V: SimdF32>(
+    t: &Texels<V>,
+    m: &[[V; 16]; 3],
+    subs: &mut [Sub<V>; 3],
+    mode: Two,
+    level: u8,
+    passes: u8,
+    pbs: bool,
+) {
     if mode.subsets() == 3 {
-        polish_multi::<V, 3>(t, m, subs, mode, level, passes);
+        polish_multi::<V, 3>(t, m, subs, mode, level, passes, pbs);
     } else {
-        polish_multi::<V, 2>(t, m, subs, mode, level, passes);
+        polish_multi::<V, 2>(t, m, subs, mode, level, passes, pbs);
     }
 }
 
@@ -678,6 +862,7 @@ fn uber_multi<V: SimdF32, const NS: usize>(
     subs: &mut [Sub<V>; 3],
     mode: Two,
     level: u8,
+    pbs: bool,
 ) {
     let zero = V::splat(0.0);
     let maxsel = ((1u32 << mode.index_bits()) - 1) as f32;
@@ -703,12 +888,18 @@ fn uber_multi<V: SimdF32, const NS: usize>(
     } else {
         0
     };
+    let mut seen = StretchSeen::default();
     let mut k = 0;
     while k < nt {
+        if k >= 3 && seen.repeat(k, q, maxsel) {
+            k += 1;
+            continue;
+        }
         let mut oks = [zero.simd_lt(zero); NS];
         let mut qs = [[[zero; 3]; 2]; NS];
         let mut ps = [[zero; 2]; NS];
         let mut vs = [[[zero; 3]; 2]; NS];
+        let mut es = [[[zero; 3]; 2]; NS];
         let mut s = 0;
         while s < NS {
             let mut idx2 = base[s];
@@ -726,17 +917,7 @@ fn uber_multi<V: SimdF32, const NS: usize>(
                     i += 1;
                 }
             } else {
-                // Stretch combination (ly, hy), skipping the identity (0, max).
-                let mut n = k - 3;
-                let side = (q + 2) as usize;
-                let mut ly = (n / side) as i32 - q;
-                let mut hy = (n % side) as i32 + maxsel as i32 - 1;
-                if ly > 0 || (ly == 0 && hy >= maxsel as i32) {
-                    // Shift past the identity.
-                    n += 1;
-                    ly = (n / side) as i32 - q;
-                    hy = (n % side) as i32 + maxsel as i32 - 1;
-                }
+                let (ly, hy) = stretch(k, q, maxsel);
                 let scale = V::splat(maxsel / (hy - ly) as f32);
                 let l = V::splat(ly as f32);
                 let mut i = 0;
@@ -746,11 +927,19 @@ fn uber_multi<V: SimdF32, const NS: usize>(
                 }
             }
             let (e, ok) = ls_two(t, &m[s], &idx2, mode, &prev[s]);
+            es[s] = e;
             (qs[s], ps[s], vs[s]) = quant_two(&e, mode);
             oks[s] = ok;
             s += 1;
         }
-        let (idx3, err3) = index_multi(t, m, &vs, mode);
+        let (idx3, err3) = if pbs {
+            let (bq, bp, bv, bidx, berr) = quant_search::<V, NS>(t, m, &es, &[true; NS], &vs, mode);
+            (qs, ps, vs) = (bq, bp, bv);
+            (bidx, berr)
+        } else {
+            let (idx, err) = index_multi(t, m, &vs, mode);
+            ([idx; NS], err)
+        };
         let mut s = 0;
         while s < NS {
             let take = oks[s] & err3[s].simd_lt(subs[s].err);
@@ -761,7 +950,7 @@ fn uber_multi<V: SimdF32, const NS: usize>(
                         q: qs[s],
                         p: ps[s],
                         v: vs[s],
-                        idx: idx3,
+                        idx: idx3[s],
                         err: err3[s],
                     },
                     &subs[s],
@@ -770,6 +959,54 @@ fn uber_multi<V: SimdF32, const NS: usize>(
             s += 1;
         }
         k += 1;
+    }
+}
+
+/// The index range `[ly, hy]` that uber trial `k` (>= 3) stretches onto `0..=maxsel`: ly in
+/// -q..=1 and hy in maxsel-1..=maxsel+q, row-major, skipping the identity (0, maxsel).
+#[inline(always)]
+fn stretch(k: usize, q: i32, maxsel: f32) -> (i32, i32) {
+    let mut n = k - 3;
+    let side = (q + 2) as usize;
+    let mut ly = (n / side) as i32 - q;
+    let mut hy = (n % side) as i32 + maxsel as i32 - 1;
+    if ly > 0 || (ly == 0 && hy >= maxsel as i32) {
+        // Shift past the identity.
+        n += 1;
+        ly = (n / side) as i32 - q;
+        hy = (n % side) as i32 + maxsel as i32 - 1;
+    }
+    (ly, hy)
+}
+
+/// The index maps of the uber stretch trials run so far. Two ranges can map every index the same
+/// way (often with 2-bit indices), and then they give the same trial in every lane.
+#[derive(Default)]
+struct StretchSeen {
+    maps: [[u8; 16]; 32],
+    n: usize,
+}
+
+impl StretchSeen {
+    /// Whether trial `k`'s map equals an earlier trial's (or the identity); records it if not.
+    /// The map is computed with the same f32 operations as the trials.
+    #[inline(always)]
+    fn repeat(&mut self, k: usize, q: i32, maxsel: f32) -> bool {
+        let (ly, hy) = stretch(k, q, maxsel);
+        let scale = maxsel / (hy - ly) as f32;
+        let mut map = [0u8; 16];
+        let mut ident = true;
+        for (x, o) in map.iter_mut().enumerate().take(maxsel as usize + 1) {
+            let y = (((x as f32 - ly as f32) * scale + 0.5).max(0.0)).floor().min(maxsel);
+            *o = y as u8;
+            ident &= y as usize == x;
+        }
+        if ident || self.maps[..self.n].contains(&map) {
+            return true;
+        }
+        self.maps[self.n] = map;
+        self.n += 1;
+        false
     }
 }
 
@@ -897,7 +1134,13 @@ fn refine_multi<V: SimdF32, const NS: usize>(
 /// takes its refit, so each gets exactly the result it gets alone. A subset's indices are its
 /// members' (the only ones callers read). For two subsets the third is a copy of the first.
 #[inline(always)]
-fn encode_multi<V: SimdF32, const NS: usize>(t: &Texels<V>, m: &[[V; 16]; 3], mode: Two, refits: u8) -> [Sub<V>; 3] {
+fn encode_multi<V: SimdF32, const NS: usize>(
+    t: &Texels<V>,
+    m: &[[V; 16]; 3],
+    mode: Two,
+    refits: u8,
+    pbs: bool,
+) -> [Sub<V>; 3] {
     let zero = V::splat(0.0);
     let mut e = [[[zero; 3]; 2]; NS];
     let mut q = [[[zero; 3]; 2]; NS];
@@ -909,12 +1152,19 @@ fn encode_multi<V: SimdF32, const NS: usize>(t: &Texels<V>, m: &[[V; 16]; 3], mo
         (q[s], p[s], v[s]) = quant_two(&e[s], mode);
         s += 1;
     }
-    let (idx, err) = index_multi::<V, NS>(t, m, &v, mode);
+    let (mut idxs, err) = if pbs {
+        let (bq, bp, bv, bidx, berr) = quant_search::<V, NS>(t, m, &e, &[true; NS], &v, mode);
+        (q, p, v) = (bq, bp, bv);
+        (bidx, berr)
+    } else {
+        let (idx, err) = index_multi::<V, NS>(t, m, &v, mode);
+        ([idx; NS], err)
+    };
     let mut best = [Sub {
         q: q[0],
         p: p[0],
         v: v[0],
-        idx,
+        idx: idxs[0],
         err: err[0],
     }; NS];
     let mut s = 1;
@@ -923,7 +1173,7 @@ fn encode_multi<V: SimdF32, const NS: usize>(t: &Texels<V>, m: &[[V; 16]; 3], mo
             q: q[s],
             p: p[s],
             v: v[s],
-            idx,
+            idx: idxs[s],
             err: err[s],
         };
         s += 1;
@@ -945,7 +1195,21 @@ fn encode_multi<V: SimdF32, const NS: usize>(t: &Texels<V>, m: &[[V; 16]; 3], mo
             }
             s += 1;
         }
-        let (idx, err) = index_multi::<V, NS>(t, m, &v, mode);
+        let err = if pbs {
+            let mut keep = [[[zero; 3]; 2]; NS];
+            let mut s = 0;
+            while s < NS {
+                keep[s] = best[s].v;
+                s += 1;
+            }
+            let (bq, bp, bv, bidx, berr) = quant_search::<V, NS>(t, m, &ne, &live, &keep, mode);
+            (q, p, v, idxs) = (bq, bp, bv, bidx);
+            berr
+        } else {
+            let (idx, err) = index_multi::<V, NS>(t, m, &v, mode);
+            idxs = [idx; NS];
+            err
+        };
         let mut any = false;
         let mut s = 0;
         while s < NS {
@@ -958,7 +1222,7 @@ fn encode_multi<V: SimdF32, const NS: usize>(t: &Texels<V>, m: &[[V; 16]; 3], mo
                             q: q[s],
                             p: p[s],
                             v: v[s],
-                            idx,
+                            idx: idxs[s],
                             err: err[s],
                         },
                         &best[s],
@@ -1888,6 +2152,241 @@ fn pack_m5(rot: u8, cq: &[[u8; 3]; 2], av: &[u8; 2], cidx: &[u8; 16], aidx: &[u8
     super::pack(&blk)
 }
 
+/// Nearest `bits`-bit level (no p-bit, bit-replicated to 8 bits) of 8-bit targets (multiples of
+/// 1/16): the exactly rounded level and its neighbours. Returns (level, value).
+#[inline(always)]
+fn quant_n<V: SimdF32>(x: V, bits: u32) -> (V, V) {
+    let zero = V::splat(0.0);
+    let full = ((1u32 << bits) - 1) as f32;
+    let c = round_level(x, zero, full, false);
+    let (mut bq, mut bv, mut be) = (zero, zero, V::splat(f32::INFINITY));
+    let mut off = -1;
+    while off <= 1 {
+        let q = (c + V::splat(off as f32)).simd_clamp(zero, V::splat(full));
+        let v = q.mul_add(
+            V::splat((1u32 << (8 - bits)) as f32),
+            floor(q * V::splat(1.0 / (1u32 << (2 * bits - 8)) as f32)),
+        );
+        let d = v - x;
+        let e = d * d;
+        let take = e.simd_lt(be);
+        bq = V::select(take, q, bq);
+        bv = V::select(take, v, bv);
+        be = V::select(take, e, be);
+        off += 1;
+    }
+    (bq, bv)
+}
+
+/// A mode with `bits`-bit indices, for the index helpers (which read only the index width).
+fn index_mode(bits: u32) -> Two {
+    if bits == 2 { Two::M2 } else { Two::M1 }
+}
+
+/// The first `ch` channels of endpoints `e` at their nearest `cbits`-bit levels: (levels, values).
+#[inline(always)]
+fn quant_plane<V: SimdF32>(e: &([V; 3], [V; 3]), ch: usize, cbits: u32) -> ([[V; 2]; 2], [[V; 3]; 2]) {
+    let zero = V::splat(0.0);
+    let mut q = [[zero; 2]; 2];
+    let mut v = [[zero; 3]; 2];
+    let mut c = 0;
+    while c < ch {
+        (q[0][c], v[0][c]) = quant_n(e.0[c], cbits);
+        (q[1][c], v[1][c]) = quant_n(e.1[c], cbits);
+        c += 1;
+    }
+    (q, v)
+}
+
+/// One plane of a mode-4 block: the first `ch` channels of `tp` (1 or 2; the rest are zero) with
+/// `cbits`-bit endpoints and `ibits`-bit indices. Endpoints `e` quantized, the texels indexed,
+/// one least-squares refit kept when better. Returns levels, indices and error.
+#[inline(always)]
+fn fit_plane4<V: SimdF32>(
+    tp: &Texels<V>,
+    ch: usize,
+    e: ([V; 3], [V; 3]),
+    cbits: u32,
+    ibits: u32,
+) -> ([[V; 2]; 2], [V; 16], V) {
+    let ones = [V::splat(1.0); 16];
+    let mode = index_mode(ibits);
+    let (mut q, v) = quant_plane(&e, ch, cbits);
+    let (mut idx, mut err) = index_two(tp, &ones, &v, mode);
+    let (a, b, _) = ls_ends(tp, &ones, &idx, 1 << ibits, e);
+    let (q2, v2) = quant_plane(&(a, b), ch, cbits);
+    let (idx2, err2) = index_two(tp, &ones, &v2, mode);
+    let take = err2.simd_lt(err);
+    err = V::select(take, err2, err);
+    let mut k = 0;
+    while k < 2 {
+        let mut c = 0;
+        while c < 2 {
+            q[k][c] = V::select(take, q2[k][c], q[k][c]);
+            c += 1;
+        }
+        k += 1;
+    }
+    let mut i = 0;
+    while i < 16 {
+        idx[i] = V::select(take, idx2[i], idx[i]);
+        i += 1;
+    }
+    (q, idx, err)
+}
+
+/// Mode 4 with channel `r` in the scalar plane (6-bit endpoints) and the other two in the color
+/// plane (5-bit), for both index selections: [color 2-bit / scalar 3-bit, color 3-bit / scalar
+/// 2-bit]. Endpoints as in [`encode_m5`]: the scalar plane's min/max, the color plane's principal
+/// axis and extreme projections, each quantized, indexed and refitted once. The rotated channel's
+/// color slot holds 31 (alpha 255 after the swap); `av` holds 6-bit levels.
+#[inline(always)]
+fn encode_m4<V: SimdF32>(t: &Texels<V>, r: usize) -> [M5<V>; 2] {
+    let zero = V::splat(0.0);
+    let ones = [V::splat(1.0); 16];
+    let (u, w) = match r {
+        0 => (1, 2),
+        1 => (0, 2),
+        _ => (0, 1),
+    };
+    let ts: Texels<V> = [t[r], [zero; 16], [zero; 16]];
+    let (mut lo, mut hi) = (t[r][0], t[r][0]);
+    let mut i = 1;
+    while i < 16 {
+        lo = lo.simd_min(t[r][i]);
+        hi = hi.simd_max(t[r][i]);
+        i += 1;
+    }
+    let tc: Texels<V> = [t[u], t[w], [zero; 16]];
+    let n = V::splat(16.0);
+    let sum = [sum16!(|i| tc[0][i]), sum16!(|i| tc[1][i]), zero];
+    let cov = [
+        dot16!(|i| tc[0][i], tc[0][i]) * n - sum[0] * sum[0],
+        dot16!(|i| tc[0][i], tc[1][i]) * n - sum[0] * sum[1],
+        zero,
+        dot16!(|i| tc[1][i], tc[1][i]) * n - sum[1] * sum[1],
+        zero,
+        zero,
+    ];
+    let v = principal_axis(cov, 3);
+    let ws = {
+        let s = shrink(abs_max(&v), 6);
+        [floor(v[0] * s), floor(v[1] * s), floor(v[2] * s)]
+    };
+    let (ehi, elo) = subset_ends(&tc, &ones, n, &sum, &ws);
+    let inv16 = V::splat(1.0 / 16.0);
+    let ce = (
+        [elo[0] * inv16, elo[1] * inv16, zero],
+        [ehi[0] * inv16, ehi[1] * inv16, zero],
+    );
+    let ae = ([lo, zero, zero], [hi, zero, zero]);
+    let mut out = [M5 {
+        cq: [[zero; 3]; 2],
+        av: [zero; 2],
+        cidx: [zero; 16],
+        aidx: [zero; 16],
+        err: zero,
+    }; 2];
+    let mut isb = 0;
+    while isb < 2 {
+        let (cib, aib) = if isb == 0 { (2, 3) } else { (3, 2) };
+        let (cq, cidx, cerr) = fit_plane4(&tc, 2, ce, 5, cib);
+        let (aq, aidx, aerr) = fit_plane4(&ts, 1, ae, 6, aib);
+        let mut q = [[V::splat(31.0); 3]; 2];
+        let mut k = 0;
+        while k < 2 {
+            q[k][u] = cq[k][0];
+            q[k][w] = cq[k][1];
+            k += 1;
+        }
+        out[isb] = M5 {
+            cq: q,
+            av: [aq[0][0], aq[1][0]],
+            cidx,
+            aidx,
+            err: cerr + aerr,
+        };
+        isb += 1;
+    }
+    out
+}
+
+/// Per lane: `a` where `take` is set, else `b`.
+#[inline(always)]
+fn merge_m5<V: SimdF32>(take: V::Mask, a: &M5<V>, b: &M5<V>) -> M5<V> {
+    let mut out = *b;
+    let mut k = 0;
+    while k < 2 {
+        let mut c = 0;
+        while c < 3 {
+            out.cq[k][c] = V::select(take, a.cq[k][c], b.cq[k][c]);
+            c += 1;
+        }
+        out.av[k] = V::select(take, a.av[k], b.av[k]);
+        k += 1;
+    }
+    let mut i = 0;
+    while i < 16 {
+        out.cidx[i] = V::select(take, a.cidx[i], b.cidx[i]);
+        out.aidx[i] = V::select(take, a.aidx[i], b.aidx[i]);
+        i += 1;
+    }
+    out.err = V::select(take, a.err, b.err);
+    out
+}
+
+/// Keeps `e` (with its packing code) in `bm` in the lanes where it errs less.
+#[inline(always)]
+fn offer_m5<V: SimdF32>(bm: &mut Option<(M5<V>, V)>, e: &M5<V>, code: usize) {
+    let code = V::splat(code as f32);
+    *bm = Some(match *bm {
+        None => (*e, code),
+        Some((b, bc)) => {
+            let take = e.err.simd_lt(b.err);
+            (merge_m5(take, e, &b), V::select(take, code, bc))
+        }
+    });
+}
+
+/// Scalar packing of a mode-4 block with rotation `rot` (1-3) and index selection `isb`, anchor
+/// fix-up per plane (color indices are 3-bit with `isb` = 1, else 2-bit; the scalar plane's the
+/// other width).
+fn pack_m4(rot: u8, isb: u8, cq: &[[u8; 3]; 2], aq: &[u8; 2], cidx: &[u8; 16], aidx: &[u8; 16]) -> [u8; 16] {
+    let mut blk = super::Bc7Block {
+        mode: 4,
+        rotation: rot,
+        idx_sel: isb,
+        ..Default::default()
+    };
+    let (nc, na) = if isb == 0 { (4u8, 8u8) } else { (8, 4) };
+    let mut ep = [
+        [cq[0][0], cq[0][1], cq[0][2], aq[0]],
+        [cq[1][0], cq[1][1], cq[1][2], aq[1]],
+    ];
+    let (mut ci, mut ai) = (*cidx, *aidx);
+    if ci[0] >= nc / 2 {
+        for c in 0..3 {
+            let x = ep[0][c];
+            ep[0][c] = ep[1][c];
+            ep[1][c] = x;
+        }
+        for x in &mut ci {
+            *x = nc - 1 - *x;
+        }
+    }
+    if ai[0] >= na / 2 {
+        let x = ep[0][3];
+        ep[0][3] = ep[1][3];
+        ep[1][3] = x;
+        for x in &mut ai {
+            *x = na - 1 - *x;
+        }
+    }
+    blk.ep[0] = ep;
+    (blk.idx, blk.idx2) = if isb == 0 { (ci, ai) } else { (ai, ci) };
+    super::pack(&blk)
+}
+
 /// Packs eight mode-6 blocks: four 32-bit words per lane, anchor fix-up included.
 #[inline(always)]
 fn pack<V: SimdF32>(e: &Ends<V>, idx: &[V; 16]) -> [V::Int; 4] {
@@ -2086,14 +2585,25 @@ fn encode8<V: SimdF32>(t: &Texels<V>, cfg: Cfg, gate: bool) -> Encoded8<V> {
     let (hi, lo) = line_ends(t, &sum, &ws);
     let mut e0 = [lo[0] * inv16, lo[1] * inv16, lo[2] * inv16];
     let mut e1 = [hi[0] * inv16, hi[1] * inv16, hi[2] * inv16];
-    let mut ends = quantize(&e0, &e1);
-    let (mut idx, mut err) = project(t, &ends);
+    let pbs6 = cfg.pbits & 4 != 0;
+    let (mut ends, mut idx, mut err) = if pbs6 {
+        search6(t, &e0, &e1)
+    } else {
+        let ends = quantize(&e0, &e1);
+        let (idx, err) = project(t, &ends);
+        (ends, idx, err)
+    };
     if cfg.refits > 0 {
         let mut r = 0;
         while r < cfg.refits {
             let (a, b, ok) = ls_ends(t, &[V::splat(1.0); 16], &idx, 16, (e0, e1));
-            let cand = quantize(&a, &b);
-            let (cidx, cerr) = project(t, &cand);
+            let (cand, cidx, cerr) = if pbs6 {
+                search6(t, &a, &b)
+            } else {
+                let cand = quantize(&a, &b);
+                let (cidx, cerr) = project(t, &cand);
+                (cand, cidx, cerr)
+            };
             let take = ok & cerr.simd_lt(err);
             if !V::mask_any(take) {
                 break;
@@ -2188,9 +2698,9 @@ fn encode8<V: SimdF32>(t: &Texels<V>, cfg: Cfg, gate: bool) -> Encoded8<V> {
                 for (ci, part) in list.iter().take(kk).enumerate() {
                     let m = part_masks::<V>(*part, mode);
                     let subs = if ns == 3 {
-                        encode_multi::<V, 3>(t, &m, mode, cfg.two_refits)
+                        encode_multi::<V, 3>(t, &m, mode, cfg.two_refits, cfg.pbits & 1 != 0)
                     } else {
-                        encode_multi::<V, 2>(t, &m, mode, cfg.two_refits)
+                        encode_multi::<V, 2>(t, &m, mode, cfg.two_refits, cfg.pbits & 1 != 0)
                     };
                     bound = bound.simd_min(sum_err(&subs, ns));
                     pre[slot][ci] = Some(subs);
@@ -2212,7 +2722,7 @@ fn encode8<V: SimdF32>(t: &Texels<V>, cfg: Cfg, gate: bool) -> Encoded8<V> {
                         && worth(sum_err(&subs, ns), bound)
                     {
                         let m = part_masks::<V>(*part, mode);
-                        polish(t, &m, &mut subs, mode, cfg.uber, cfg.refine);
+                        polish(t, &m, &mut subs, mode, cfg.uber, cfg.refine, cfg.pbits & 2 != 0);
                         bound = bound.simd_min(sum_err(&subs, ns));
                     }
                     let [s0, s1, s2] = subs;
@@ -2240,7 +2750,7 @@ fn encode8<V: SimdF32>(t: &Texels<V>, cfg: Cfg, gate: bool) -> Encoded8<V> {
                 if let Some((mut b, bp)) = mb {
                     if cfg.polish_modes && (!cfg.polish_parts || cfg.polish_top != 0) && worth(sum_err(&b, ns), bound) {
                         let m = part_masks::<V>(bp, mode);
-                        polish(t, &m, &mut b, mode, cfg.uber, cfg.refine);
+                        polish(t, &m, &mut b, mode, cfg.uber, cfg.refine, cfg.pbits & 2 != 0);
                         bound = bound.simd_min(sum_err(&b, ns));
                     }
                     let e = if ns == 3 {
@@ -2267,46 +2777,31 @@ fn encode8<V: SimdF32>(t: &Texels<V>, cfg: Cfg, gate: bool) -> Encoded8<V> {
                     // ±1 refinement of this mode's winners only (refinement never raises the
                     // error, so they stay winners).
                     let m = part_masks::<V>(bp, mode);
-                    polish(t, &m, &mut b, mode, 0, cfg.refine);
+                    polish(t, &m, &mut b, mode, 0, cfg.refine, false);
                 }
                 pack_two_lanes(mode, bp, &b, V::mask_to_bools(lanes), &mut over);
             }
-            if cfg.mode5 {
-                // Dual plane: each color channel in the scalar plane; the best rotation per lane.
-                let mut bm: Option<(M5<V>, V::Int)> = None;
-                for r in 0..3 {
-                    let e = encode_m5(t, r);
-                    bm = Some(match bm {
-                        None => (e, V::Int::splat(r as i32 + 1)),
-                        Some((b, br)) => {
-                            let take = e.err.simd_lt(b.err);
-                            let mut out = b;
-                            let mut k = 0;
-                            while k < 2 {
-                                let mut c = 0;
-                                while c < 3 {
-                                    out.cq[k][c] = V::select(take, e.cq[k][c], b.cq[k][c]);
-                                    c += 1;
-                                }
-                                out.av[k] = V::select(take, e.av[k], b.av[k]);
-                                k += 1;
-                            }
-                            let mut i = 0;
-                            while i < 16 {
-                                out.cidx[i] = V::select(take, e.cidx[i], b.cidx[i]);
-                                out.aidx[i] = V::select(take, e.aidx[i], b.aidx[i]);
-                                i += 1;
-                            }
-                            out.err = V::select(take, e.err, b.err);
-                            (out, V::Int::select(take, V::Int::splat(r as i32 + 1), br))
-                        }
-                    });
+            if cfg.mode5 || cfg.mode4 {
+                // Dual plane: each color channel in the scalar plane; the best rotation (and for
+                // mode 4 index selection) per lane. Code: 1-3 mode 5 rotations, 4 + 2 r + isb mode 4.
+                let mut bm: Option<(M5<V>, V)> = None;
+                if cfg.mode5 {
+                    for r in 0..3 {
+                        offer_m5(&mut bm, &encode_m5(t, r), r + 1);
+                    }
                 }
-                if let Some((b, br)) = bm {
+                if cfg.mode4 {
+                    for r in 0..3 {
+                        let [e0, e1] = encode_m4(t, r);
+                        offer_m5(&mut bm, &e0, 4 + 2 * r);
+                        offer_m5(&mut bm, &e1, 5 + 2 * r);
+                    }
+                }
+                if let Some((b, bc)) = bm {
                     let take = busy & b.err.simd_lt(best_err);
                     if V::mask_any(take) {
                         winner = V::Int::select(take, V::Int::splat(9), winner);
-                        let rots = br.to_array();
+                        let codes = bc.to_array();
                         let mut cqa = [[[0f32; LANES]; 3]; 2];
                         let mut ava = [[0f32; LANES]; 2];
                         let mut cia = [[0f32; LANES]; 16];
@@ -2334,7 +2829,12 @@ fn encode8<V: SimdF32>(t: &Texels<V>, cfg: Cfg, gate: bool) -> Encoded8<V> {
                             let av = [ava[0][l] as u8, ava[1][l] as u8];
                             let ci: [u8; 16] = std::array::from_fn(|i| cia[i][l] as u8);
                             let ai: [u8; 16] = std::array::from_fn(|i| aia[i][l] as u8);
-                            over[l] = Some(pack_m5(rots[l] as u8, &cq, &av, &ci, &ai));
+                            let code = codes[l] as u8;
+                            over[l] = Some(if code <= 3 {
+                                pack_m5(code, &cq, &av, &ci, &ai)
+                            } else {
+                                pack_m4((code - 4) / 2 + 1, (code - 4) % 2, &cq, &av, &ci, &ai)
+                            });
                         }
                     }
                 }
@@ -2545,6 +3045,8 @@ mod tests {
                 polish_modes: false,
                 polish_parts: false,
                 polish_top: 0,
+                mode4: false,
+                pbits: 0,
             },
             Cfg {
                 power: 3,
@@ -2563,6 +3065,8 @@ mod tests {
                 polish_modes: true,
                 polish_parts: true,
                 polish_top: 1,
+                mode4: false,
+                pbits: 0,
             },
         ] {
             let fast = encode_surface(&s, cfg, 0u8.into());
@@ -2664,6 +3168,8 @@ mod tests {
             polish_modes: false,
             polish_parts: false,
             polish_top: 0,
+            mode4: false,
+            pbits: 0,
         };
         let fast = encode_surface(&s, cfg, 0u8.into());
         let w = crate::format::Format::Bc7.error_weights();

@@ -189,6 +189,31 @@ CPU times come from paired runs on the same core.
   against non-mode-6 starts (B 2 / 8 / 32, with or without keeping the true best) −0.02% to +0.00% / −0.07% to
   −0.01%. Every Oodle-table cell moved 0.04 points or less. All within noise; each extra base costs time.
 
+## BC7 base encoder (`bc7::fast`)
+
+Kodak-24 at λ 0, mean PSNR. CPU times are the best of 1-3 runs on an idle E-core of a loaded machine (±15%),
+each config paired with the unmodified build on the same core. Effort 8 is 46.018 dB, and the line from
+effort 6 to 8 is +0.38 dB for 3.3-4.2× the CPU time.
+
+- **Mode 4 at efforts 6-7.** +0.021 dB at effort 6 (45.640 → 45.661) for 1.20-1.24× the time, +0.019 dB at
+  effort 7. At effort 8 it costs 0.97-1.04× for +0.015 dB (17 images up, none down), so it went there.
+- **p-bit search at efforts 6-7.** In the multi-subset fits and refits: +0.051 dB at effort 6 for 1.58× the
+  CPU time, and Zstd files 0.37% larger. With mode 6's fits too: +0.067 dB at 1.60×, and effort 7 +0.069 dB
+  at 2.3-2.6×. All well below the effort 6-8 line. At effort 8 the search costs 2.06× (+0.054 dB), so it went
+  to effort 9. Efforts 0-5 were not tried for time: the GPU kernel must match them (effort 5 would gain
+  +0.052 dB).
+- **p-bit search in mode 6's uber trials.** −0.002 dB at effort 8 on its own, and −0.003 dB beside the other
+  three sites (46.068 vs 46.072), at 2.4× effort 8's time instead of 2.1×.
+- **Polishing every candidate (the old effort 9).** +0.0004 dB over effort 8 for 1.10× its time. With mode 4
+  and the p-bit search on, it gives +0.003 dB for 1.10× again (9 images up, 3 down at two decimals), and Zstd
+  files 0.03% larger. Effort 9 now polishes the top two candidates, like effort 8.
+- **Cheaper uber or polish at effort 8.** Uber 3 instead of 4 (one fewer stretch step): 0.82× the CPU time
+  for −0.023 dB. Polishing only each mode's best (`polish_top` 1): 0.78× for −0.028 dB. Both drop effort 8
+  below bc7e u6's 46.01 dB, which it has to beat (see BENCHMARKS). Untimed and also worse: mode-6 uber 2
+  (−0.012 dB) and `POLISH_REACH` 1.25 instead of 1.5 (−0.012 dB). The exact cut is kept instead: with 2-bit
+  indices (modes 2 and 3), 12 of uber 4's 24 stretch ranges map every index the same way as an earlier one
+  (or not at all), so they are skipped.
+
 ## Field split (`--prep`)
 
 - **The transform alone at higher λ.** The field split loses to RDO at higher λ, because RDO
