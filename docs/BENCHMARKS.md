@@ -753,8 +753,8 @@ run:
 
 Every astcenc preset is beaten in PSNR and SSIM, in less time, at every footprint:
 
-- **fast:** effort 1 at 4x4 (+0.20 dB in 83% of its time; effort 0 is 0.025 dB behind in 67% with files 1.7%
-  smaller), effort 0 at 6x6 (+0.002 dB, SSIM 0.98530 against 0.98337, in 61%) and at 8x8 (+0.23 dB in 46%).
+- **fast:** effort 1 at 4x4 (+0.20 dB in 83% of its time; effort 0 was 0.025 dB behind in 67% with files 1.7%
+  smaller, and is ahead since 168a9a3, see below), effort 0 at 6x6 (+0.002 dB, SSIM 0.98530 against 0.98337, in 61%) and at 8x8 (+0.23 dB in 46%).
   astcenc fast's files are smaller after Zstd at 6x6 and 8x8 (effort 0's are 2.6% / 7.9% larger), until a
   light RDO pass is added (below).
 - **medium:** effort 2, +0.19 / +0.11 / +0.03 dB at 4x4 / 6x6 / 8x8 in 75% / 83% / 55% of its time; files
@@ -848,6 +848,24 @@ At the fast end, a re-run at cfb4cc1 (EPYC 7763, after the cheaper per-process s
 At 4x4 the light pass costs more than effort 0 and 1 save: by default they take 3.26 / 3.73 s against
 astcenc fast's 3.04 s, so the 4x4 fast row stays at `-l 0` (1.94 s).
 
+At 168a9a3 effort 0 searches harder up to 30 texels (4x4 to 6x5): a line-fit rerank of 16 partition patterns
+and three polish passes. Re-run on one cloud EPYC 7763 (Kodak 24, one pinned thread, `bench.yml -f
+footprints=4x4,5x4,5x5,6x5 -f efforts='0,0:-l 0,1:-l 0' -f astcenc=fast`). Each cell is PSNR dB / SSIM /
+Zstd-19 bpt / Deflate-9 bpt / time s:
+
+| footprint | astcenc fast | mipple effort 0 `-l 0` | mipple effort 0 (light RDO) |
+| --- | --- | --- | --- |
+| 4x4 | 44.580 / .99722 / 7.216 / 7.362 / 3.05 | 44.685 / .99748 / 7.094 / 7.263 / 2.06 | 44.688 / .99748 / 7.044 / 7.208 / 3.38 |
+| 5x4 | 42.679 / .99577 / 5.853 / 5.974 / 2.31 | 42.741 / .99610 / 5.720 / 5.840 / 1.86 | 42.737 / .99607 / 5.649 / 5.762 / 2.99 |
+| 5x5 | 40.697 / .99290 / 4.625 / 4.719 / 2.15 | 40.799 / .99347 / 4.645 / 4.728 / 1.83 | 40.794 / .99341 / 4.562 / 4.639 / 2.87 |
+| 6x5 | 39.080 / .98912 / 3.825 / 3.902 / 2.21 | 39.224 / .99016 / 3.911 / 3.976 / 1.80 | 39.223 / .99008 / 3.837 / 3.898 / 2.77 |
+
+- **4x4 and 5x4:** effort 0 `-l 0` beats fast on all five columns: +0.11 / +0.06 dB, files 1.7% / 2.3%
+  smaller after Zstd, in 68% / 81% of its time (the previous effort 0 was 0.02 / 0.17 dB behind).
+- **5x5 and 6x5:** `-l 0` is +0.10 / +0.14 dB with higher SSIM in 85% / 81% of the time, but its files are 0.4%
+  / 2.2% larger after Zstd. The default light RDO makes them 1.4% smaller / 0.3% larger, at 1.3× fast's time:
+  the light pass costs about 1 s here, more than effort 0 saves.
+
 ### The other footprints
 
 Every other 2D LDR footprint at a419177, same setup (Kodak 24, one pinned thread, best of three, default
@@ -877,7 +895,7 @@ Zstd-19 bpt / Deflate-9 bpt / time s:
 - **Effort 0 against fast:** from 8x5 up it is 0.09-0.64 dB ahead with higher SSIM in 66-95% of the time,
   but its files are 4-12% larger: the default λ (8x8's 0.5 for every footprint past 8x8) is too light there.
   At 5x4 and 5x5 it has smaller files and higher SSIM but lower PSNR; at 6x5 it is level. At all three it is
-  9-14% slower.
+  9-14% slower. (Since 168a9a3 effort 0 is ahead of fast in PSNR at all three; see the re-run above.)
 
 At e570c02 the default λ keeps rising past 8x8 (2 / 3.5 / 4.5 / 6 at 10x8 / 10x10 / 12x10 / 12x12). Re-run on
 one cloud EPYC 9V74 (same setup, against fast and thorough):
