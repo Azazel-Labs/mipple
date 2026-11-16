@@ -191,6 +191,43 @@ CPU times come from paired runs on the same core.
   encoder −0.02% / +0.02%, the 64-level mode-6 encoding as a fourth base +0.01% / +0.03%, a λ·B-bit bias
   against non-mode-6 starts (B 2 / 8 / 32, with or without keeping the true best) −0.02% to +0.00% / −0.07% to
   −0.01%. Every Oodle-table cell moved 0.04 points or less. All within noise; each extra base costs time.
+- **SSIM levers other than the luma error term (closing the gap to XUBC7).** All on Kodak-24, the
+  12-λ grid (0-16), Zstd-19, against 3ab7142. "XUBC7" is the BD-rate against Basis XUBC7 (bc7e level 2,
+  q100) at equal PSNR / equal luma SSIM, which was −8.50% / +16.18%. "Oodle" is the size against Oodle
+  2.9.16 at λ 10 / 20 / 30 / 40, which was −1.56 / −1.04 / −1.61 / −2.29% at equal RMSE and −3.59 / −2.23
+  / −1.71 / −1.18% at equal SSIM. `--luma-weight 0.25` (now the default) took XUBC7 to −8.32% / +12.95%
+  for a λ 20 RMSE lead of −0.74%: about 11 points of the SSIM gap per point of that lead. Other levers buy a
+  third of that or less, and variants of the luma term no more than the plain one.
+  - *A contrast-loss penalty.* When a candidate decodes to less variance than the source (σy² < σx², mean
+    over channels), its distortion is multiplied by ((2σx² + C2) / (σx² + σy² + C2))^α, SSIM's contrast
+    term, with C2 = 58.5. It is added only when the candidate could become best or runner-up, so the bounds
+    stay valid. α 1: XUBC7 −8.39% / +15.91%, Oodle RMSE λ 20 −0.93%. α 2: −8.24% / +15.72%, −0.77%.
+    SSIM's loss sits in low-variance windows: on four images, windows with luma variance below 8 hold 20% of
+    the windows but 69% of the SSIM loss from λ 0 to 0.5, and only 43% of the MSE added. Blocks there lose
+    little contrast in absolute terms.
+  - *A stronger or narrower smoothness weight.* `--smooth-scale` 5 / 6 (default 4): XUBC7 −8.21% / +14.83%
+    and −7.85% / +13.79%, Oodle RMSE λ 20 −0.64% / −0.11%. `--smooth-window-std 8` (default 16): +14.40%,
+    with λ 10 RMSE at −0.48%. k 20 with scale 6: +14.65%, λ 20 at −0.43%. k 24 with scale 5: no SSIM gain
+    (+16.31%), and λ 40 SSIM falls to −0.31%. Scale 16 (Kodak-8): 7 points of gap, but every equal-RMSE
+    cell falls behind Oodle (+1.3% to +4.0%). Adding a contrast penalty (α 1) on top of scale 5 gives
+    +14.59% at −0.44%.
+  - *A second, sharper flatness weight.* β·k²/(k²+σ²) with a small k, added to the window term to target
+    near-flat windows. k 3 / β 8: +9.28% at equal SSIM, but −6.02% at equal PSNR and every equal-RMSE cell
+    behind Oodle (+0.33% to +2.68%). k 4 / β 4: +11.13%, with λ 20 / 30 behind (+1.04% / +0.22%). With
+    the luma term on top (k 3 / β 8, γ 0.25): +6.27%, with every RMSE cell behind (+1.1% to +3.4%).
+  - *The smoothness window measured on luma variance* instead of the largest channel's: +16.38%. RMSE
+    leads widen 0.06-0.11 points, but SSIM leads shrink 0.2-0.3 (λ 40 −1.18% → −0.87%).
+  - *Variants of the luma term.* For reference, plain γ 0.3 / 0.35 / 0.5 give +12.43% / +11.94% / +10.42%
+    at a λ 20 RMSE lead of −0.64% / −0.46% / −0.11%. Only the mean-removed (AC) luma error, γ 0.35 / 0.5:
+    +12.39% / +11.11% at −0.40% / −0.02%. The luma term weighted by flatness ((smooth − 1) / (scale − 1))
+    instead of the smooth weight, γ 0.5 / 1: +14.32% / +12.75% at −0.88% / −0.55%, at best level with the
+    plain term. γ 0.5 with `--smooth-scale 3`: +12.44% at −0.85%, but the equal-SSIM leads shrink below
+    today's (λ 40 −1.18% → −0.91%); γ 0.75 with scale 3: +10.44% at −0.19%; γ 0.5 with k 24: +11.73% at
+    −0.36%, λ 40 SSIM −0.52%.
+  - *Per-block error caps (Kodak-8, 8 λ, base +19.66% at equal SSIM).* `--max-rms-ratio 2 --min-rms 1`:
+    +19.01%, but −5.17% → −2.89% at equal PSNR and λ 20-40 behind Oodle at RMSE (up to +3.4%). Ratio 3-5
+    with min-rms 1, ratio 2 alone, or `--min-rms 1.5` alone: within 0.1 point. The SSIM loss is not
+    in a few blocks with large errors.
 
 ## BC7 base encoder (`bc7::fast`)
 

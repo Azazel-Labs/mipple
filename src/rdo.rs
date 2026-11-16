@@ -103,6 +103,13 @@ pub struct RdoParams {
     /// deviation at half weight, instead of over the block alone with `smooth_std` (see
     /// [`smooth_map`]). 0 uses the block alone.
     pub smooth_window_std: f32,
+    /// Weight γ of an extra luma error term (`None` picks the per-format default, see
+    /// [`RdoParams::luma_weight_for`]; 0 disables it): a candidate's distortion gains γ·3 times
+    /// the squared error of its Rec. 709 luma (smooth-weighted like the RGB error), so of two
+    /// candidates with equal RGB error the one whose error lies along luma, which SSIM measures,
+    /// costs more. Added only when a candidate could become the block's best or runner-up, so
+    /// every lower bound on J stays valid.
+    pub luma_weight: Option<f32>,
     /// Reject candidates whose RMS error exceeds this multiple of the base encoding's.
     pub max_rms_ratio: f32,
     /// ... unless it is within this RMS per channel: blocks the base encodes almost exactly would
@@ -172,6 +179,7 @@ impl Default for RdoParams {
             // −0.42% at λ 0.5-4, and smaller at equal RMSE and SSIM than Oodle Texture in every
             // cell at λ 10-40 (a 12x12 window, k 12-24 and per-channel averaging all did worse).
             smooth_window_std: 16.0,
+            luma_weight: None,
             max_rms_ratio: 10.0,
             // 3 rather than 1.5: −5% BD-rate for BC4/BC5 on Kodak (smooth single-channel blocks
             // were stuck at their base encoding), BC1/BC7 within ±0.1%.
@@ -333,6 +341,17 @@ impl RdoParams {
         })
     }
 
+    /// Luma error weight (see [`RdoParams::luma_weight`]): by default [`BC7_LUMA_WEIGHT`] for
+    /// BC7, 0 for other formats; always 0 for normal maps and formats that do not weigh all of R,
+    /// G and B.
+    pub fn luma_weight_for(&self, format: Format) -> f32 {
+        let w = format.error_weights();
+        if self.normal_map || w[..3].contains(&0) {
+            return 0.0;
+        }
+        self.luma_weight.unwrap_or(if format == Format::Bc7 { BC7_LUMA_WEIGHT } else { 0.0 })
+    }
+
     /// Deferred-decision margin: by default 0.3 (a runner-up within 30% of the best), 0.15 for
     /// BC7 (0.3 is about 5% slower for 0.1 point of the λ 20-40 equal-RMSE lead over Oodle).
     pub fn defer_for(&self, format: Format) -> f32 {
@@ -380,6 +399,14 @@ impl RdoStats {
 // ---------------------------------------------------------------------------------------------
 // LZ rate model
 // ---------------------------------------------------------------------------------------------
+
+/// Default BC7 [`RdoParams::luma_weight`]. Kodak-24 (Zstd-19, λ 0-16) against 0: the BD-rate gap to
+/// Basis XUBC7 (bc7e level 2) at equal luma SSIM falls from +16.2% to +12.9%, at equal PSNR it moves
+/// from −8.5% to −8.3%; against Oodle Texture 2.9.16 at λ 10-40 every cell stays ahead (equal RMSE
+/// λ 20 −1.0% → −0.7%, the thinnest; equal SSIM gains 0.4-0.9 points). 0.3 / 0.5 close the SSIM gap
+/// to +12.4% / +10.4% for a λ 20 RMSE lead of −0.6% / −0.1%; weighting only the mean-removed luma
+/// error, or by flatness instead of the smooth weight, did no better for the same lead.
+pub const BC7_LUMA_WEIGHT: f32 = 0.25;
 
 const HASH_BITS: u32 = 13;
 
@@ -1534,6 +1561,19 @@ fn smooth_factor(src: &Block, w: &[u32; 4], p: &RdoParams) -> f32 {
     1.0 + (p.smooth_scale - 1.0) * k2 / (k2 + max_std * max_std)
 }
 
+/// Squared Rec. 709 luma error of `b` against `a`, in units of 10⁻⁸ (fixed-point weights 2126,
+/// 7152, 722).
+fn luma_sse(a: &Block, b: &Block) -> i64 {
+    let mut e = 0i64;
+    for t in 0..16 {
+        let d = 2126 * (a[t][0] as i64 - b[t][0] as i64)
+            + 7152 * (a[t][1] as i64 - b[t][1] as i64)
+            + 722 * (a[t][2] as i64 - b[t][2] as i64);
+        e += d * d;
+    }
+    e
+}
+
 /// z² floor for [`normal_factor`]: normals within about 14° of the surface plane, or outside the
 /// unit disc, weigh as if at that angle.
 const NORMAL_Z2_MIN: f32 = 1.0 / 16.0;
@@ -2154,6 +2194,7 @@ fn bc7_far(
     model: &mut LzModel,
     best: &mut (f64, [u8; 16], f32, LzState),
     pool: Option<&mut Vec<([u8; 16], u64)>>,
+    pen: &mut dyn FnMut(&[u8; 16], f64, Option<&Block>) -> f64,
 ) {
     let mut pool = pool;
     let (fin, fin_sums, far_back, w, lambda) = (f7.fin, f7.fin_sums, f7.far_back, f7.w, f7.lambda);
@@ -2185,7 +2226,7 @@ fn bc7_far(
             continue;
         }
         let prev = blocks[j];
-        let mut pair = [([0u8; 16], UNKNOWN); 2];
+        let mut pair: [([u8; 16], u64, Option<&Block>); 2] = [([0u8; 16], UNKNOWN, None); 2];
         let mut np = 0;
         let bnd = limit.min(((best.0 - floor(prev[0])).max(0.0) * 16.0 / smooth) as u64 + 2);
         if keep & 1 != 0
@@ -2199,19 +2240,19 @@ fn bc7_far(
                 .sum::<u64>()
                 / 16;
             if lb <= bnd {
-                pair[np] = (prev, block_sse(s, prev_dec, w));
+                pair[np] = (prev, block_sse(s, prev_dec, w), Some(prev_dec));
                 np += 1;
             }
         }
         if keep & 2 != 0 && fields.endpoints.insert(field_key(&prev[..8])) {
             let mut c = base;
             c[..8].copy_from_slice(&prev[..8]);
-            if let Some(r) = bc7::reindex_bounded_with(&c, f7.pre.pal6[j].as_ref(), s, w, bnd, &mut fields.seg) {
-                pair[np] = r;
+            if let Some((c, e)) = bc7::reindex_bounded_with(&c, f7.pre.pal6[j].as_ref(), s, w, bnd, &mut fields.seg) {
+                pair[np] = (c, e, None);
                 np += 1;
             }
         }
-        for &(c, err) in &pair[..np] {
+        for &(c, err, pre) in &pair[..np] {
             if err > limit || same_bytes(&c, &base, 0, n) || !seen.insert(&c) {
                 continue;
             }
@@ -2225,7 +2266,10 @@ fn bc7_far(
             let Some((bits, rep)) = model.cost_until(&c[..n], bit_budget(best.0, dist, lambda)) else {
                 continue;
             };
-            let jj = dist + lambda * bits as f64;
+            let mut jj = dist + lambda * bits as f64;
+            if jj < best.0 {
+                jj += pen(&c, dist, pre);
+            }
             if jj < best.0 {
                 *best = (jj, c, bits, rep);
             }
@@ -2336,7 +2380,11 @@ fn optimize_chunk(
     let mut seen_prev = Seen::new(max_back + local_k + row_n + all);
     let mut fields = FieldsSeen::new(max_back.max(far_back) + local_k + row_n + all);
     let mut dec = [[0u8; 4]; 16];
+    let mut cdec = [[0u8; 4]; 16];
     let lambda = p.lambda as f64;
+    // Luma term scale: γ·3 (luma's squared weights sum to about 1/3 of a channel's), per texel
+    // (/16) and back from fixed point (/1e8).
+    let luma = p.luma_weight_for(format) as f64 * 3.0 / 16.0 / 1e8;
     let original = p.verify_zstd_level.map(|_| blocks.to_vec());
     let mut fin: Vec<Option<(bc7::Bc7Block, Block)>> = Vec::with_capacity(blocks.len());
     // BC7: per-channel texel sums of each final block's decoding, for the far search's bound.
@@ -2371,9 +2419,29 @@ fn optimize_chunk(
             None => smooth_factor(s, w, p),
         } as f64;
         let score = |err: u64, bits: f32| smooth * err as f64 / 16.0 + lambda * bits as f64;
+        // Luma error term (see `RdoParams::luma_weight`), added to a candidate's J only when it
+        // could become the best or runner-up: it only ever adds, so every bound below stays valid.
+        let lumw = luma * smooth;
+        // `pre` is the candidate already decoded, when the caller has it (BC7's block error decodes).
+        let pen = |c: &[u8; 16], dist: f64, pre: Option<&Block>, buf: &mut Block| -> f64 {
+            if lumw <= 0.0 || dist <= 0.0 {
+                return 0.0;
+            }
+            let d = match pre {
+                Some(d) => d,
+                None => {
+                    format.decode_block(&c[..n], buf);
+                    &*buf
+                }
+            };
+            lumw * luma_sse(s, d) as f64
+        };
+        // Whether `block_err` leaves the candidate decoded in `dec`.
+        let err_decodes = format == Format::Bc7;
         let mut base = blocks[i];
         format.decode_block(&base[..n], &mut dec);
         let mut base_err = block_sse(s, &dec, w);
+        let mut base_pen = pen(&base, smooth * base_err as f64 / 16.0, Some(&dec), &mut cdec);
         let (mut base_bits, mut base_rep) = model.cost(&base[..n]);
         let mut runner = no_runner;
         let collecting = fast_b && matches!(phase, Phase::EvalA { .. });
@@ -2390,11 +2458,14 @@ fn optimize_chunk(
             format.decode_block(&a[..n], &mut dec);
             let a_err = block_sse(s, &dec, w);
             let (a_bits, a_rep) = model.cost(&a[..n]);
-            if score(a_err, a_bits) < score(base_err, base_bits) {
-                runner = (score(base_err, base_bits), base, base_bits, base_rep);
-                (base, base_err, base_bits, base_rep) = (a, a_err, a_bits, a_rep);
-            } else if score(a_err, a_bits) < runner.0 {
-                runner = (score(a_err, a_bits), a, a_bits, a_rep);
+            let a_pen = pen(&a, smooth * a_err as f64 / 16.0, Some(&dec), &mut cdec);
+            let ja = score(a_err, a_bits) + a_pen;
+            let jb = score(base_err, base_bits) + base_pen;
+            if ja < jb {
+                runner = (jb, base, base_bits, base_rep);
+                (base, base_err, base_bits, base_rep, base_pen) = (a, a_err, a_bits, a_rep, a_pen);
+            } else if ja < runner.0 {
+                runner = (ja, a, a_bits, a_rep);
             }
         }
         let base_unpacked = unpack_final(format, &base).map(|(u, _)| u);
@@ -2407,7 +2478,12 @@ fn optimize_chunk(
         // Error budget: a multiple of the base error, plus a floor so near-lossless blocks still
         // have room to move.
         let limit = p.error_limit(base_err, channels);
-        let mut best = (score(base_err, base_bits), base, base_bits, base_rep);
+        let mut best = (
+            score(base_err, base_bits) + base_pen,
+            base,
+            base_bits,
+            base_rep,
+        );
         let j_start = best.0;
 
         let back = max_back.min(i);
@@ -2532,6 +2608,7 @@ fn optimize_chunk(
                     &mut model,
                     &mut best,
                     collecting.then_some(&mut pool),
+                    &mut |c, d, pre| pen(c, d, pre, &mut cdec),
                 );
             }
             model.hint = if d > back { d * n } else { 0 };
@@ -2580,6 +2657,7 @@ fn optimize_chunk(
                     continue;
                 }
                 let t = thr(&best, &runner);
+                let fresh = err_decodes && *known == UNKNOWN;
                 let err = match *known {
                     UNKNOWN => {
                         let b = bound((t - floor(c)).max(0.0));
@@ -2604,7 +2682,10 @@ fn optimize_chunk(
                 let Some((bits, rep)) = model.cost_until(&c[..n], bit_budget(t, dist, lambda)) else {
                     continue;
                 };
-                let j = dist + lambda * bits as f64;
+                let mut j = dist + lambda * bits as f64;
+                if j < runner.0 {
+                    j += pen(c, dist, fresh.then_some(&dec), &mut cdec);
+                }
                 if j < best.0 {
                     runner = best;
                     best = (j, *c, bits, rep);
@@ -2683,7 +2764,10 @@ fn optimize_chunk(
                 let Some((bits, rep)) = model.cost_until(&c[..n], bit_budget(t, dist, lambda)) else {
                     continue;
                 };
-                let j = dist + lambda * bits as f64;
+                let mut j = dist + lambda * bits as f64;
+                if j < runner.0 {
+                    j += pen(&c, dist, None, &mut cdec);
+                }
                 if j < best.0 {
                     runner = best;
                     best = (j, c, bits, rep);
@@ -2731,7 +2815,10 @@ fn optimize_chunk(
                     let Some((bits, rep)) = model.cost_until(&c[..n], bit_budget(t, dist, lambda)) else {
                         continue;
                     };
-                    let jj = dist + lambda * bits as f64;
+                    let mut jj = dist + lambda * bits as f64;
+                    if jj < runner.0 {
+                        jj += pen(&c, dist, err_decodes.then_some(&dec), &mut cdec);
+                    }
                     if jj < best.0 {
                         runner = best;
                         best = (jj, c, bits, rep);
@@ -2769,6 +2856,7 @@ fn optimize_chunk(
                 &mut model,
                 &mut best,
                 collecting.then_some(&mut pool),
+                &mut |c, d, pre| pen(c, d, pre, &mut cdec),
             );
         }
 
@@ -2812,7 +2900,10 @@ fn optimize_chunk(
                 let Some((bits, rep)) = model.cost_until(&c[..n], bit_budget(t, dist, lambda)) else {
                     continue;
                 };
-                let jj = dist + lambda * bits as f64;
+                let mut jj = dist + lambda * bits as f64;
+                if jj < runner.0 {
+                    jj += pen(&c, dist, None, &mut cdec);
+                }
                 if jj < best.0 {
                     runner = best;
                     best = (jj, c, bits, rep);
@@ -2866,10 +2957,14 @@ fn optimize_chunk(
                     }
                     let t = thr(&best, &runner);
                     let bnd = limit.min(((t - floor(&c)).max(0.0) * 16.0 / smooth) as u64 + 2);
+                    let mut fresh = false;
                     let err = match &m6 {
                         Some((lo, _)) if a == 8 => lo.err(half(&c, 1), bnd),
                         Some((_, hi)) if bc7::is_mode6(prev) => hi.err(half(&c, 0), s, w, bnd),
-                        _ => block_err(format, &c[..n], s, w, bnd, (&cur, cur_half), &mut dec),
+                        _ => {
+                            fresh = err_decodes;
+                            block_err(format, &c[..n], s, w, bnd, (&cur, cur_half), &mut dec)
+                        }
                     };
                     if err > limit {
                         continue;
@@ -2884,7 +2979,10 @@ fn optimize_chunk(
                     let Some((bits, rep)) = model.cost_until(&c[..n], bit_budget(t, dist, lambda)) else {
                         continue;
                     };
-                    let j = dist + lambda * bits as f64;
+                    let mut j = dist + lambda * bits as f64;
+                    if j < runner.0 {
+                        j += pen(&c, dist, fresh.then_some(&dec), &mut cdec);
+                    }
                     if j < best.0 {
                         runner = best;
                         best = (j, c, bits, rep);

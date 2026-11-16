@@ -393,28 +393,33 @@ The "equal SSIM" column interpolates on 10·log10(1/(1−SSIM)), with SSIM on lu
 
 | vs | Zstd-19, equal PSNR | Deflate-9, equal PSNR | Zstd-19, equal SSIM |
 | --- | --- | --- | --- |
-| Basis UASTC RDO (shipped UASTC) | **−55.9%** | **−53.5%** | **−43.8%** |
-| Basis UASTC RDO, transcoded BC7 | **−51.9%** | **−49.9%** | **−39.0%** |
-| Basis XUBC7, bc7f, q100 | **−11.6%** | **−7.7%** | +15.7% |
-| Basis XUBC7, bc7e level 2, q100 | **−8.5%** | **−4.9%** | +16.2% |
-| Basis XUBC7, bc7f, q75 (DCT) | **−34.8%** | **−29.9%** | **−28.6%** |
+| Basis UASTC RDO (shipped UASTC) | **−54.3%** | **−51.9%** | **−45.0%** |
+| Basis UASTC RDO, transcoded BC7 | **−50.2%** | **−48.3%** | **−40.3%** |
+| Basis XUBC7, bc7f, q100 | **−11.3%** | **−7.3%** | +12.6% |
+| Basis XUBC7, bc7e level 2, q100 | **−8.3%** | **−4.6%** | +12.9% |
+| Basis XUBC7, bc7f, q75 (DCT) | **−34.3%** | **−29.3%** | **−29.8%** |
+
+mipple's rows are encoded with the BC7 luma error term (default `--luma-weight 0.25`, below). Before it the
+four XUBC7 / UASTC columns read −55.9 / −53.5 / −43.8% (UASTC), −51.9 / −49.9 / −39.0% (as BC7), −11.6 / −7.7
+/ +15.7% (bc7f q100), −8.5 / −4.9 / +16.2% (bc7e level 2) and −34.8 / −29.9 / −28.6% (q75). mipple's λ 16 now
+stops at 32.97 dB, above UASTC λ 8 (32.18 dB), so the UASTC BD-rates cover one point less of its curve.
 
 Matched points (24-image means; Zstd-19 bits per texel):
 
 | Config | PSNR (dB) | SSIM | bpt |
 | --- | --- | --- | --- |
+| mipple λ 0.25 | 45.38 | 0.99702 | 6.177 |
 | mipple λ 0 | 45.37 | 0.99749 | 7.175 |
 | XUBC7 bc7e2 rdo 0 | 45.32 | 0.99746 | 5.597 |
-| mipple λ 0.25 | 45.22 | 0.99651 | 6.029 |
-| mipple λ 0.5 | 43.95 | 0.99352 | 5.083 |
+| mipple λ 0.5 | 44.28 | 0.99485 | 5.299 |
 | XUBC7 bc7f rdo 25 | 43.48 | 0.99632 | 5.070 |
 | UASTC λ 0 | 43.22 | 0.99622 | 7.418 |
+| mipple λ 1 | 42.06 | 0.98870 | 4.086 |
 | XUBC7 bc7f rdo 50 | 41.92 | 0.99464 | 4.571 |
-| mipple λ 1 | 41.64 | 0.98585 | 3.868 |
 | UASTC λ 1 | 41.01 | 0.98591 | 6.355 |
-| mipple λ 2 | 39.70 | 0.97606 | 3.140 |
+| mipple λ 2 | 40.18 | 0.97984 | 3.308 |
 | XUBC7 bc7f rdo 100 | 39.67 | 0.98909 | 3.789 |
-| mipple λ 4 | 37.46 | 0.96044 | 2.516 |
+| mipple λ 4 | 38.03 | 0.96685 | 2.671 |
 | XUBC7 bc7f q75 rdo 0 | 36.37 | 0.95718 | 3.901 |
 
 ### UASTC
@@ -430,18 +435,33 @@ that is 45.32 dB at 5.60 bpt, 22% below Zstd-19 on mipple's λ 0 blocks (45.37 d
 mipple's curve at the same PSNR. That is the gain from a format-aware entropy coder over Zstd on raw blocks,
 the v1.2 "output B" item in ROADMAP.md.
 
-**PSNR below the top.** mipple's RDO is ahead in PSNR. At about 39.7 dB, mipple λ 2 is 3.14 bpt against
-3.79 for XUBC7 rdo 100, 17% smaller, and the BD-rate over the whole range is −8.5% to −11.6%. XUBC7's DCT
+**PSNR below the top.** mipple's RDO is ahead in PSNR. At 39.67 dB, mipple's curve (between λ 2 and λ 4) is
+about 3.14 bpt against 3.79 for XUBC7 rdo 100, 17% smaller, and the BD-rate over the whole range is −8.3% to
+−11.3%. XUBC7's DCT
 curve (q75) loses PSNR quickly: rdo 0 is 36.37 dB at 3.90 bpt, where mipple needs about 2.25 bpt.
 
 **SSIM.** The ranking flips: XUBC7 has much higher SSIM at the same PSNR. At about 39.7 dB, XUBC7 rdo 100
-scores 0.98909 and mipple λ 2 scores 0.97606. At equal SSIM, mipple needs about 16% more bits than either
-q100 curve, and XUBC7 wins on 23 of 24 images (all but kodim20). Its error is not simply moved from luma
-to chroma. On kodim01 (bc7f rdo 100 against mipple λ 2, both near 39 dB), mipple has the higher luma PSNR
+scores 0.98909 and mipple about 0.9773 (0.97606 at λ 2 before the luma term). At equal SSIM, mipple needs
+about 13% more bits than either q100 curve (16% before), and XUBC7 wins on 23 of 24 images (all but
+kodim20). Its error is not simply moved from luma to chroma. Before the luma term, on kodim01 (bc7f rdo 100 against mipple λ 2, both near 39 dB), mipple has the higher luma PSNR
 (41.27 against 41.11 dB) and still the lower SSIM (0.9888 against 0.9923). A lead from the same pair: of
 the 4x4 blocks with source luma std ≥ 2, 3.9% of mipple's keep less than 70% of their luma std, against
 1.3% of XUBC7's. Over-flattened texture is what SSIM's contrast term punishes. This is now a ROADMAP item.
 Oodle, for comparison, stays behind mipple at equal SSIM (previous section).
+
+**Luma error term.** BC7 RDO now adds γ·3 × the smooth-weighted Rec. 709 luma error to each candidate's
+distortion (`--luma-weight γ`, default 0.25 for BC7 and 0 for other formats, normal maps and `--role mask`).
+SSIM is computed on luma, so it gains from this first-order, while RGB RMSE loses only second-order. The
+term is added only to a candidate that could become the best or the runner-up, so every search bound stays
+valid. At γ 0.25 the equal-SSIM gap to XUBC7 (bc7e level 2) falls from +16.2% to +12.9% and the equal-PSNR
+lead moves from −8.5% to −8.3%. Every image gains (kodim02 +11.8% → +7.5%, kodim15 +6.2% → +3.1%, kodim20
+−3.7% → −9.1%), but XUBC7 is still smaller at equal SSIM on 23 of 24. Against Oodle every cell stays ahead:
+equal RMSE λ 20 goes from −1.0% to −0.7%, the thinnest, and the equal-SSIM lead widens by 0.4-0.9 points
+(next section). More weight trades further along the same line: γ 0.3 gives +12.4% with λ 20 at −0.6%
+on RMSE, and γ 0.5 gives +10.4% with λ 20 at −0.1%. A contrast-loss term, stronger or sharper smoothness
+weights and per-block error caps bought a third as much SSIM or less per point of the Oodle lead
+(DEADENDS.md). The remaining gap sits in near-flat windows: windows with luma variance below 8 are a fifth
+of all windows and hold 69% of the SSIM loss.
 
 ### Time
 
@@ -497,12 +517,12 @@ mipple's size at Oodle's quality, relative to Oodle's size (Kodak-24 totals; neg
 
 | Oodle λ | BC1 at RMSE | BC1 at SSIM | BC7 at RMSE | BC7 at SSIM | BC4 at RMSE | BC4 at SSIM | BC5 at RMSE | BC5 at SSIM |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 0 | −18.9% | −9.4% | −6.4% (15/24 images) | −2.6% (4/24) | −13.4% | −5.4% | −31.1% | −11.3% |
+| 0 | −18.9% | −9.4% | −6.5% (15/24 images) | −2.6% (4/24) | −13.4% | −5.4% | −31.1% | −11.3% |
 | 1 | −15.1% | −6.8% | −2.9% (12/24) | −0.8% (4/24) | −4.0% | −1.7% | −4.5% | −1.8% |
-| 10 | −11.5% | −7.5% | −1.6% | −3.7% | −6.6% | −2.1% | −10.7% | −4.2% |
-| 20 | −11.0% | −7.3% | −1.2% | −2.3% | −9.6% | −3.2% | −15.7% | −5.7% |
-| 30 | −11.3% | −6.9% | −1.8% | −1.9% | −12.6% | −4.3% | −19.0% | −6.3% |
-| 40 | −11.5% | −6.7% | −2.5% | −1.4% | −15.1% | −5.1% | −21.2% | −6.7% |
+| 10 | −11.5% | −7.5% | −1.6% | −4.1% | −6.6% | −2.1% | −10.7% | −4.2% |
+| 20 | −11.0% | −7.3% | −0.7% | −3.1% | −9.6% | −3.2% | −15.7% | −5.7% |
+| 30 | −11.3% | −6.9% | −1.2% | −2.2% | −12.6% | −4.3% | −19.0% | −6.3% |
+| 40 | −11.5% | −6.7% | −2.0% | −1.6% | −15.1% | −5.1% | −21.2% | −6.7% |
 
 All four are rerun at 4e8547d (the near-tie deferred decision, the neighbourhood smoothness weight, BC1
 lookahead and the BC7 far-search gate; before it BC1 was −8.8% / −4.0% to −5.7% at λ 10-40 and BC7 −0.4% to
@@ -514,7 +534,10 @@ which gave up 0.1-0.4 points of each lead (from −1.9% / −1.7% / −2.3% / �
 −2.4% / −2.0% at SSIM) for 1.22× / 1.24× / 1.21× less time at λ 1 / 10 / 30 (GitHub-hosted AMD EPYC 7763,
 one thread, `ab.yml`). It is rerun again for the ranker's 512-block reach (was 2048; see the ROADMAP's BC7
 speed item), which gave up 0.1-0.4 points more (from −1.8% / −1.4% / −2.0% / −2.8% at RMSE and −3.8% / −2.6%
-/ −2.2% / −1.8% at SSIM) for 1.17× / 1.21× less time at λ 1 / 10.
+/ −2.2% / −1.8% at SSIM) for 1.17× / 1.21× less time at λ 1 / 10. It is rerun once more for the luma error term
+(`--luma-weight`, default 0.25 for BC7; see the XUBC7 section), which gives up 0.0-0.4 points at RMSE for 0.4-0.9 more
+at SSIM (from −1.6% / −1.0% / −1.6% / −2.3% at RMSE and −3.6% / −2.2% / −1.7% / −1.2% at SSIM, after the
+64-block field-swap refinement).
 
 Speed (BC7, Core Ultra 7 155H): Oodle's CPU time is UE's process CPU time for a cook with an empty DDC minus
 the same cook with a full one, about 62 CPU-seconds for Kodak-24 at λ 30 (High). mipple reaches that quality
@@ -580,8 +603,8 @@ not a side-by-side measurement.
 
 mipple is now smaller at both of Oodle's quality measures at every λ in every format. Per image it is not a
 sweep: BC1 loses 1 of 288 image/λ/metric cells (kodim05 at λ 40 on SSIM, +0.3%); BC7 at λ 10-40 is behind on
-RMSE for 10 of 96 image/λ pairs (up to +0.8%, kodim08) and on SSIM for 19 (up to +4.1%, kodim20, kodim19 and
-kodim09, smooth-sky images where Oodle's RDO keeps more structure at λ 30-40); BC4 and BC5 are behind on RMSE
+RMSE for 21 of 96 image/λ pairs (up to +2.8%, kodim09 at λ 20) and on SSIM for 19 (up to +5.1%, kodim20 at λ 30,
+and +4.5% on kodim07: Oodle's RDO keeps more structure in their flat areas at λ 30-40); BC4 and BC5 are behind on RMSE
 in 4 and 2 of 120 image/λ pairs at λ 1-40 (up to +0.4%, +0.6%), but on SSIM in 14 and 22: BC4 most on kodim18
 and kodim05 (about +4% at λ 20-40), BC5 on kodim02 and kodim13 (up to +6.7%).
 

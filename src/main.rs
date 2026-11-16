@@ -158,6 +158,11 @@ struct RdoArgs {
     /// --smooth-std (0 uses the block alone).
     #[arg(long, default_value_t = 16.0)]
     smooth_window_std: f32,
+    /// Extra weight on each candidate's luma error (Rec. 709), which SSIM measures, on top of
+    /// its RGB error: higher trades PSNR for SSIM at the same size (0 disables) [default: 0.25
+    /// for BC7, 0 for other formats, normal maps and --role mask].
+    #[arg(long)]
+    luma_weight: Option<f32>,
     /// Hash-chain depth of the rate model's match finder.
     #[arg(long, default_value_t = 16, value_parser = clap::value_parser!(u8).range(1..=16))]
     chain_depth: u8,
@@ -191,6 +196,7 @@ impl RdoArgs {
             smooth_scale: self.smooth_scale,
             smooth_std: self.smooth_std,
             smooth_window_std: self.smooth_window_std,
+            luma_weight: self.luma_weight,
             max_rms_ratio: self.max_rms_ratio,
             min_rms: self.min_rms,
             chain_depth: self.chain_depth as usize,
@@ -808,6 +814,10 @@ fn encode(a: EncodeArgs) -> Result<()> {
         Some(lambda) => a.rdo.params(lambda),
         None => a.rdo.params(0.0).light_astc(a.format, a.effort),
     };
+    if role == Role::Mask {
+        // Data channels: their luma means nothing.
+        opts.rdo.luma_weight.get_or_insert(0.0);
+    }
     opts.rdo.verify_zstd_level = (a.zstd > 0).then_some(a.zstd);
 
     let surfaces = a.input.iter().map(|i| Surface::load(i)).collect::<Result<Vec<_>>>()?;
