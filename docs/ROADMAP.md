@@ -147,8 +147,9 @@ Open for v0.9.x:
   - Next: structural cuts to the far re-indexing and the second base, using the cross-domain research
     sweep's ideas (hash-based block matching from screen-content video coding, lower-bound cascades).
 - [ ] BC7 mode 4 in the fast encoder, p-bit search in quantization, and a faster uber step.
-- [ ] **Smarter entropy reduction:** pick mode/partition/p-bits by an estimated rate *given the previous blocks*
-  (not a fixed mode-6 weight), so the base encoder and RDO share one objective.
+- [x] **Smarter entropy reduction** (tried, not merged): RDO already chooses each block's start by J among
+  three bases, so a rate-aware weight, a fourth base or a bias on the start moved Kodak-24 BD-rate by under
+  0.1% (DEADENDS.md).
 - [ ] **Wider searches elsewhere:** far endpoints for BC4 (−0.38%, 1.4×) need a tighter bound, and Oodle's far
   index-pattern reuse (about half mipple's distinct BC1 index patterns on kodim18) needs a cheap way to find
   index patterns that fit (refit candidates over 2048 blocks: −0.17%, several times slower).

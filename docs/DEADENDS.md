@@ -180,6 +180,14 @@ CPU times come from paired runs on the same core.
   bounds' 16-texel `f32` loops could run eight lanes wide (a570dcf). Cloud A/B: 0.999× at λ 1 and
   10, 24/24 identical. The bounds are 6% of a profile, but their time is in the scalar `f64`
   segment tests and the call overhead, not the texel loop.
+- **Rate-aware entropy reduction (a start chosen with rate in mind, not the fixed mode-6 weight).** RDO
+  already picks each block's start by J among three bases: the entropy-reduced one (mode-6 error × 0.4), the
+  plain effort-8 alt and the mode-6-only alt. On kodim05 at λ 1 they start 39% / 57% / 4% of blocks, and only
+  32% of final blocks equal their start. Kodak-24, λ 1-8, pooled BD-rate against e2d7a80 (PSNR / SSIM):
+  mode-6 weight 1 +0.01% / +0.05%, weight 0.25 +0.01% / −0.03%, a λ-scaled multi-subset penalty in the reduced
+  encoder −0.02% / +0.02%, the 64-level mode-6 encoding as a fourth base +0.01% / +0.03%, a λ·B-bit bias
+  against non-mode-6 starts (B 2 / 8 / 32, with or without keeping the true best) −0.02% to +0.00% / −0.07% to
+  −0.01%. Every Oodle-table cell moved 0.04 points or less. All within noise; each extra base costs time.
 
 ## Field split (`--prep`)
 

@@ -2312,11 +2312,11 @@ fn effort_table(effort: u8, texels: usize) -> Effort {
         });
     }
     match effort {
-        // Above 16 texels, two polish passes and no alternative endpoint modes for the candidate's
+        // Above 30 texels, two polish passes and no alternative endpoint modes for the candidate's
         // weights: on Kodak (tiled, one thread), 16% / 6% less time at 6x6 / 8x8 for 0.10 / 0.03 dB,
         // files 1.3% / 0.3% smaller (SSIM up at 6x6). Two partitions and the dual plane only off a
         // line by 16 and 8: 0.025 / 0.015 dB at 6x6 / 8x8 for about 6% of the time.
-        0 if texels > 16 => Effort {
+        0 if texels > 30 => Effort {
             patterns: [1, 0],
             candidates: 1,
             shortlist: 0,
@@ -2328,6 +2328,23 @@ fn effort_table(effort: u8, texels: usize) -> Effort {
             alts: 0,
             top: 1,
         },
+        // Up to 30 texels (6x5), the search below 16 texels with the line-fit rerank of 16 patterns
+        // (32 halved) and no alternative endpoint modes. On the Kodak tile (no RDO, one thread):
+        // +0.22 / +0.14 / +0.11 dB at 5x4 / 5x5 / 6x5, files about 0.2% larger after Zstd, in
+        // 1.2-1.3x the time: enough to pass astcenc fast's PSNR there, still in less time.
+        0 if texels > 16 => Effort {
+            patterns: [1, 0],
+            candidates: 1,
+            shortlist: 0,
+            refine: 0,
+            polish: 3,
+            dual: 1,
+            line: [8.0, 16.0, 2.0],
+            rerank: 32,
+            alts: 0,
+            top: 1,
+        },
+        // Rerank 16: +0.15 dB at 4x4 on the Kodak tile for about 1.14x the time.
         0 => Effort {
             patterns: [1, 0],
             candidates: 1,
@@ -2336,7 +2353,7 @@ fn effort_table(effort: u8, texels: usize) -> Effort {
             polish: 3,
             dual: 1,
             line: [8.0, 16.0, 2.0],
-            rerank: 0,
+            rerank: 16,
             alts: 1,
             top: 1,
         },
