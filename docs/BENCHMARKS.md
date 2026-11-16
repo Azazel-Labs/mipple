@@ -923,6 +923,42 @@ KiB chunks like the other formats' passes. The cached refit sums and the re-weig
 1.22-1.43× / 1.49-1.75× / 1.70-1.89× faster at 4x4 / 6x6 / 8x8 over the λ range, output byte-identical (6727c53
 on the same core: 67-93 s / 54-71 s / 52-64 s).
 
+## Normal-map RDO (`--role normal`)
+
+BC5 and EAC RG11 store a normal's X and Y; the shader rebuilds Z = sqrt(1 - X² - Y²). An XY error
+moves the rebuilt unit normal by |Δn|² ≈ ΔX² + ΔY² + (XΔX + YΔY)²/Z², so the same XY error costs more
+on tilted texels. With `--role normal` (or `--normal`) the RDO scales each block's error by
+1 + w·mean((X² + Y²)/2Z²) (Z² floored at 1/16; `--normal-weight w`, default 4). `bench` and `encode`
+report **lit PSNR** for normal maps: Lambert shading n·l averaged over every light direction has
+mean squared error |Δn|²/3, so lit PSNR is -10·log10(mean |Δn|²/3), a renderer's view of the error
+rather than the stored channels'.
+
+32 Poly Haven normal maps (`test-images/polyhaven-test/*_nor*.png`, 1024², CC0), `mipple bench`
+default effort, λ 0 to 16; Zstd-19 bits per texel, lit PSNR and RG PSNR on pooled MSE, mean angular
+error:
+
+| Format | λ | w = 0: bpt | lit dB | RG dB | ° | w = 4: bpt | lit dB | RG dB | ° |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| BC5 | 1 | 5.518 | 35.62 | 40.53 | 1.30 | 5.601 | 35.86 | 40.75 | 1.26 |
+| BC5 | 4 | 3.928 | 30.97 | 35.63 | 2.23 | 4.127 | 31.78 | 36.35 | 2.07 |
+| BC5 | 16 | 1.708 | 24.03 | 28.69 | 4.70 | 2.112 | 25.49 | 29.96 | 4.03 |
+| EAC RG11 | 1 | 5.516 | 35.86 | 40.80 | 1.26 | 5.598 | 36.13 | 41.04 | 1.23 |
+| EAC RG11 | 4 | 3.975 | 31.16 | 35.84 | 2.19 | 4.165 | 31.98 | 36.56 | 2.03 |
+| EAC RG11 | 16 | 1.754 | 24.14 | 28.80 | 4.72 | 2.142 | 25.53 | 30.00 | 4.06 |
+
+At a given λ the weighted RDO spends more bits on tilted blocks and keeps more quality; on the
+rate-quality curve (BD-rate against w = 0, λ 0 to 16) it is better on all three metrics:
+
+| Weight | BC5 lit | BC5 RG PSNR | BC5 angle | EAC RG11 lit | EAC RG11 RG PSNR | EAC RG11 angle |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1 | -0.84% | -0.20% | -0.35% | | | |
+| 2 | -1.07% | -0.22% | -0.48% | -1.06% | -0.21% | -0.47% |
+| **4** (default) | **-1.16%** | **-0.14%** | **-0.57%** | **-1.17%** | **-0.15%** | **-0.58%** |
+| 8 | -1.07% | +0.06% | -0.58% | | | |
+
+λ 0 (no RDO) is unchanged. The weight only applies to BC5 and EAC RG11 (signed or not) with
+`--role normal`; other formats store Z or a swizzle and keep plain RGB error.
+
 ## Lossless field split (`--prep`)
 
 `src/prep.rs` applies a BC7Prep-style lossless transform before Zstd: blocks are split into byte streams of

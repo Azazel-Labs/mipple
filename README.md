@@ -108,8 +108,11 @@ mipple check --update-baseline                        # accept the current outpu
 When a change is meant to move the numbers, run the check, read the table, and if the trade is the one you
 wanted, re-run with `--update-baseline` and commit the new CSV with the change. CI runs `mipple check` on Linux.
 
-Normal maps: `-f bc5 --normal`. Masks: `-f bc4`. Data maps are linear by default; BC1/BC7 default to sRGB
-(`--linear` / `--srgb` override).
+Tell `encode` what the texture holds with `--role albedo|normal|mask` (default albedo). `normal` (or `--normal`)
+is linear with renormalized mips, and for `-f bc5` / `eac-rg11` the RDO weighs each block by how far its X/Y
+error moves the rebuilt unit normal (−1.2% BD-rate on lit PSNR; `--normal-weight`, see
+[BENCHMARKS](docs/BENCHMARKS.md#normal-map-rdo---role-normal)). `mask` is linear with alpha as data (`-f bc4` for
+one channel). Albedo is sRGB where the format has an sRGB variant; `--linear` / `--srgb` override any role.
 
 ## Opening in VS Code
 
@@ -123,7 +126,7 @@ Open the folder and accept the recommended extensions (rust-analyzer, CodeLLDB, 
 
 | Command | What it does |
 | --- | --- |
-| `encode IN -o OUT.ktx2\|OUT.dds\|OUT.astc [-f bc7] [-e 0-9] [-l λ] [--entropy off\|on\|auto] [--normal] [--no-mips] [--alpha auto\|transparency\|data] [--alpha-cutoff C] [--zstd N]` | Encode with mips, optional RDO (ASTC: a light pass by default, `-l 0` for none); KTX2 (Zstd level N, 0 = raw), DDS or `.astc` (one level) by extension (ETC2/EAC: KTX2 only; ASTC: KTX2 or `.astc`) |
+| `encode IN -o OUT.ktx2\|OUT.dds\|OUT.astc [-f bc7] [-e 0-9] [-l λ] [--entropy off\|on\|auto] [--role albedo\|normal\|mask] [--no-mips] [--alpha auto\|transparency\|data] [--alpha-cutoff C] [--zstd N]` | Encode with mips, optional RDO (ASTC: a light pass by default, `-l 0` for none); KTX2 (Zstd level N, 0 = raw), DDS or `.astc` (one level) by extension (ETC2/EAC: KTX2 only; ASTC: KTX2 or `.astc`) |
 | `decode IN.ktx2\|IN.dds\|IN.astc -o OUT.png [--level N] [--normal] [--astc-linear]` | Decode one mip level (a `.astc` file records no sRGB flag: it decodes as sRGB unless `--astc-linear`) |
 | `info IN.ktx2\|IN.astc` | Header, per-level offsets and sizes, key/value data |
 | `compare A B [--normal]` | PSNR (RGB, per channel, luma), SSIM, normal angular error |

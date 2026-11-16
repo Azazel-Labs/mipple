@@ -212,7 +212,9 @@ Open for v0.9.x:
 
 - [ ] **Perceptual distortion:** per-block masking (activity-weighted SSE) and λ normalized across texture
   types, as Oodle does; an NVIDIA FLIP metric in `bench`.
-- [ ] **Normal maps:** score on lit output (Aras' method) inside RDO, not just in metrics.
+- [x] **Normal maps:** `--role albedo|normal|mask`; BC5 / EAC RG11 RDO weighs each block by how far its X/Y
+  error moves the rebuilt unit normal (−1.2% BD-rate on lit PSNR, better RG PSNR and angle too), and `bench`
+  reports lit PSNR. Still open: per-channel weights for `mask`, and ASTC normal maps (X/Y in RG or LA).
 - [ ] **Analytical mode prediction** (bc7f): closed-form SSE estimates (line-fit residual + endpoint/weight
   quantization noise) to choose mode pairs (1 vs 3, 0 vs 2, 4 vs 5) without trial encodes. See
   `docs/research/bc7f-bc7g.md`.

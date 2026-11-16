@@ -44,6 +44,8 @@ pub struct BenchRow {
     pub ssim: f64,
     /// Mean angular error in degrees, for inputs recognized as normal maps.
     pub normal_deg: Option<f64>,
+    /// Lit-output PSNR ([`metrics::normal_lit_psnr`]), for inputs recognized as normal maps.
+    pub lit_db: Option<f64>,
     pub raw_bytes: usize,
     pub zstd_bytes: usize,
     pub deflate_bytes: usize,
@@ -93,14 +95,18 @@ fn is_image(p: &Path) -> bool {
     )
 }
 
-/// Heuristic: file names containing "normal", or ending in `_n` / `_nrm`, are normal maps.
+/// Heuristic: file names containing "normal", or ending in `_n`, `_nrm` or `_nor` (Poly Haven; also
+/// `_nor_gl` / `_nor_dx`), are normal maps.
 pub fn is_normal_map(p: &Path) -> bool {
     let stem = p
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("")
         .to_ascii_lowercase();
-    stem.contains("normal") || stem.ends_with("_n") || stem.ends_with("_nrm")
+    stem.contains("normal")
+        || ["_n", "_nrm", "_nor", "_nor_gl", "_nor_dx"]
+            .iter()
+            .any(|s| stem.ends_with(s))
 }
 
 /// Size after Deflate at `level`.
@@ -266,6 +272,7 @@ pub fn run_images(
                     lambda,
                     reduce_entropy: reduce,
                     row: (surface.width as usize).div_ceil(4),
+                    normal_map: normal,
                     ..cfg.rdo
                 };
                 let t1 = Instant::now();
@@ -288,6 +295,7 @@ pub fn run_images(
                 let deflate_bytes = deflate_len(&data, cfg.deflate_level)?;
                 let dec = decode_blocks(format, &data, surface.width, surface.height, srgb, normal);
                 let (psnr, ssim, normal_deg) = quality(format, surface, &dec, normal);
+                let lit_db = normal.then(|| metrics::normal_lit_psnr(surface, &dec));
                 let row = BenchRow {
                     hash: fnv1a(&data),
                     base_new,
@@ -299,6 +307,7 @@ pub fn run_images(
                     psnr,
                     ssim,
                     normal_deg,
+                    lit_db,
                     raw_bytes: data.len(),
                     zstd_bytes,
                     deflate_bytes,
@@ -335,7 +344,10 @@ pub fn row_line(r: &BenchRow) -> String {
         r.lambda,
         fmt_db(r.psnr),
         r.ssim,
-        r.normal_deg.map(|d| format!("  normal {d:.2}°")).unwrap_or_default(),
+        r.normal_deg
+            .zip(r.lit_db)
+            .map(|(d, l)| format!("  normal {d:.2}° lit {}", fmt_db(l)))
+            .unwrap_or_default(),
         r.bpt(r.zstd_bytes),
         r.bpt(r.deflate_bytes),
         r.changed_pct,
@@ -355,12 +367,12 @@ fn truncate(s: &str, n: usize) -> String {
 /// Writes every row as CSV.
 pub fn write_csv(rows: &[BenchRow], path: &Path) -> Result<()> {
     let mut s = String::from(
-        "image,format,lambda,width,height,psnr_db,ssim,normal_deg,raw_bytes,zstd_bytes,deflate_bytes,zstd_bpt,deflate_bpt,changed_pct,base_secs,rdo_secs\n",
+        "image,format,lambda,width,height,psnr_db,ssim,normal_deg,raw_bytes,zstd_bytes,deflate_bytes,zstd_bpt,deflate_bpt,changed_pct,base_secs,rdo_secs,lit_psnr_db\n",
     );
     for r in rows {
         let _ = writeln!(
             s,
-            "{},{},{},{},{},{},{:.5},{},{},{},{},{:.4},{:.4},{:.2},{:.4},{:.4}",
+            "{},{},{},{},{},{},{:.5},{},{},{},{},{:.4},{:.4},{:.2},{:.4},{:.4},{}",
             r.image,
             r.format.name(),
             r.lambda,
@@ -377,6 +389,7 @@ pub fn write_csv(rows: &[BenchRow], path: &Path) -> Result<()> {
             r.changed_pct,
             r.base_secs,
             r.rdo_secs,
+            r.lit_db.map(|l| format!("{l:.4}")).unwrap_or_default(),
         );
     }
     std::fs::write(path, s).with_context(|| format!("writing {}", path.display()))

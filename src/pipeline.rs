@@ -47,6 +47,23 @@ pub struct EncodeOptions {
     pub gpu: GpuMode,
 }
 
+/// What a texture holds ([`EncodeOptions::with_role`]): sets how its values are read and how
+/// errors are weighed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "cli", derive(clap::ValueEnum))]
+pub enum Role {
+    /// Colour: sRGB for formats that store colour ([`Format::default_srgb`]), alpha as
+    /// transparency where the format keeps it.
+    #[default]
+    Albedo,
+    /// A tangent-space normal map: linear, renormalized mips, Z reconstructed from X and Y for
+    /// BC5 and EAC RG11, whose RDO weighs each block's error by how far it moves the unit normal
+    /// ([`RdoParams::normal_map`]).
+    Normal,
+    /// Linear data channels (roughness, AO, height, packed masks): no sRGB, alpha as data.
+    Mask,
+}
+
 /// Where base encoding runs ([`EncodeOptions::gpu`]). Every GPU encoder writes the same blocks as
 /// the CPU encoder, so this only changes speed.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -74,6 +91,13 @@ impl EncodeOptions {
             rdo: RdoParams::default_for(format),
             gpu: GpuMode::Auto,
         }
+    }
+
+    /// These options for a texture holding `role`: sets [`Self::srgb`] and [`Self::normal_map`].
+    pub fn with_role(mut self, role: Role) -> Self {
+        self.normal_map = role == Role::Normal;
+        self.srgb = role == Role::Albedo && self.format.default_srgb();
+        self
     }
 
     /// The per-block settings these options imply.
@@ -369,6 +393,7 @@ fn rdo_params(opts: &EncodeOptions) -> RdoParams {
         reduce_entropy: opts.rdo.reduce_entropy || opts.block_opts().reduce_entropy,
         // The 8-bit RDO does not apply to BC6H, whose own pass runs in `encode_hdr`.
         lambda: if opts.format.is_bc6h() { 0.0 } else { opts.rdo.lambda },
+        normal_map: opts.normal_map,
         ..opts.rdo
     }
 }
@@ -608,4 +633,21 @@ pub fn decode_blocks(format: Format, data: &[u8], width: u32, height: u32, srgb:
 pub fn decode_level(tex: &EncodedTexture, level: usize, normal_map: bool) -> Surface {
     let l = &tex.levels[level];
     decode_blocks(tex.format, &l.data, l.width, l.height, tex.srgb, normal_map)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn roles_set_colour_space_and_normal_weighting() {
+        let albedo = EncodeOptions::new(Format::Bc7).with_role(Role::Albedo);
+        assert!(albedo.srgb && !albedo.normal_map);
+        let normal = EncodeOptions::new(Format::Bc7).with_role(Role::Normal);
+        assert!(!normal.srgb && normal.normal_map && rdo_params(&normal).normal_map);
+        let mask = EncodeOptions::new(Format::Bc7).with_role(Role::Mask);
+        assert!(!mask.srgb && !mask.normal_map);
+        // Formats without an sRGB variant stay linear as albedo.
+        assert!(!EncodeOptions::new(Format::Bc5).with_role(Role::Albedo).srgb);
+    }
 }

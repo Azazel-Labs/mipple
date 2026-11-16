@@ -101,6 +101,22 @@ pub fn normal_from_rg(r: u8, g: u8) -> [f32; 3] {
     [x / len, y / len, z / len]
 }
 
+/// Lit-output PSNR of a normal map (dB), using only R and G (Z reconstructed on both sides): the
+/// Lambert term n·l (peak 1) averaged over all light directions, for which the mean squared
+/// difference is |Δn|² / 3.
+pub fn normal_lit_psnr(a: &Surface, b: &Surface) -> f64 {
+    let mut sum = 0f64;
+    for (p, q) in a.pixels.iter().zip(&b.pixels) {
+        if p[..2] == q[..2] {
+            continue;
+        }
+        let (u, v) = (normal_from_rg(p[0], p[1]), normal_from_rg(q[0], q[1]));
+        sum += (0..3).map(|k| f64::from(u[k] - v[k]).powi(2)).sum::<f64>();
+    }
+    let mse = sum / 3.0 / a.pixels.len().max(1) as f64;
+    if mse == 0.0 { f64::INFINITY } else { -10.0 * mse.log10() }
+}
+
 /// Mean angular error in degrees between two normal maps, using only R and G
 /// (Z reconstructed on both sides, as a BC5 shader would).
 pub fn normal_angle_error_deg(a: &Surface, b: &Surface) -> f64 {

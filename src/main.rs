@@ -5,7 +5,7 @@ use clap::{Args, Parser, Subcommand};
 use mipple::bench::{self, BenchConfig};
 use mipple::gpu::Gpu;
 use mipple::hdr::{self, HdrSurface};
-use mipple::pipeline::{self, EncodeOptions};
+use mipple::pipeline::{self, EncodeOptions, Role};
 use mipple::{EntropyMode, Format, RdoParams, Surface, astc, dds, ktx2, metrics, synth};
 use std::path::PathBuf;
 use std::time::Instant;
@@ -166,6 +166,11 @@ struct RdoArgs {
     /// ... but always allow this RMS error per channel.
     #[arg(long, default_value_t = 3.0)]
     min_rms: f32,
+    /// Normal maps stored as X and Y (BC5, EAC RG11): how strongly each block's error is weighted by
+    /// how far it moves the reconstructed unit normal (1 = first-order normal error, 0 = plain XY
+    /// error).
+    #[arg(long, default_value_t = 4.0)]
+    normal_weight: f32,
 }
 
 impl RdoArgs {
@@ -188,6 +193,7 @@ impl RdoArgs {
             max_rms_ratio: self.max_rms_ratio,
             min_rms: self.min_rms,
             chain_depth: self.chain_depth as usize,
+            normal_weight: self.normal_weight,
             ..RdoParams::default()
         }
     }
@@ -217,8 +223,15 @@ struct EncodeArgs {
     /// also the decode mode the blocks are encoded for.
     #[arg(long)]
     srgb: bool,
-    /// Input is a tangent-space normal map (renormalized mips; implies linear).
-    #[arg(long)]
+    /// What the texture holds. albedo: colour (sRGB for colour formats, alpha as transparency
+    /// where the format keeps it); normal: a tangent-space normal map (linear, renormalized mips, Z
+    /// reconstructed for BC5 and EAC RG11, whose RDO weighs errors by how far they move the unit
+    /// normal); mask: linear data channels (roughness, AO, packed masks; alpha as data). --linear
+    /// and --srgb override the role's color space.
+    #[arg(long, value_enum, default_value_t = Role::Albedo)]
+    role: Role,
+    /// Same as --role normal.
+    #[arg(long, conflicts_with = "role")]
     normal: bool,
     /// Only encode the top level (always, for an .astc output).
     #[arg(long)]
@@ -428,6 +441,7 @@ fn main() -> Result<()> {
             println!("SSIM luma {:.5}", metrics::ssim_luma(&sa, &sb));
             if normal {
                 println!("Normal angular error {:.3}°", metrics::normal_angle_error_deg(&sa, &sb));
+                println!("Normal lit PSNR {:.3} dB", metrics::normal_lit_psnr(&sa, &sb));
             }
             Ok(())
         }
@@ -752,14 +766,13 @@ fn encode(a: EncodeArgs) -> Result<()> {
     let mut opts = EncodeOptions::new(a.format);
     opts.effort = a.effort;
     opts.entropy = a.entropy;
-    opts.normal_map = a.normal;
-    opts.srgb = if a.normal || a.linear {
-        false
+    let role = if a.normal { Role::Normal } else { a.role };
+    opts = opts.with_role(role);
+    if a.linear {
+        opts.srgb = false;
     } else if a.srgb {
-        true
-    } else {
-        a.format.default_srgb()
-    };
+        opts.srgb = true;
+    }
     opts.mips = !a.no_mips && !is_astc_file;
     opts.alpha = a.alpha;
     opts.alpha_cutoff = a.alpha_cutoff;
@@ -820,7 +833,7 @@ fn encode(a: EncodeArgs) -> Result<()> {
     std::fs::write(&a.output, &bytes).with_context(|| format!("writing {}", a.output.display()))?;
 
     let raw: usize = tex.levels.iter().map(|l| l.data.len()).sum();
-    let dec = pipeline::decode_level(&tex, 0, a.normal);
+    let dec = pipeline::decode_level(&tex, 0, opts.normal_map);
     let channels = a.format.metric_channels(surface.has_alpha());
     let texels: f64 = tex.levels.iter().map(|l| l.width as f64 * l.height as f64).sum();
     println!(
@@ -853,8 +866,12 @@ fn encode(a: EncodeArgs) -> Result<()> {
     println!(
         "  level 0 PSNR {:.2} dB{}",
         metrics::psnr(&surface, &dec, &channels),
-        if a.normal {
-            format!(", normal error {:.2}°", metrics::normal_angle_error_deg(&surface, &dec))
+        if opts.normal_map {
+            format!(
+                ", normal error {:.2}°, lit PSNR {:.2} dB",
+                metrics::normal_angle_error_deg(&surface, &dec),
+                metrics::normal_lit_psnr(&surface, &dec)
+            )
         } else {
             String::new()
         }

@@ -115,6 +115,14 @@ pub struct RdoParams {
     /// next block is searched after each and the pair with the lower total kept. `None` picks a
     /// per-format default ([`RdoParams::defer_for`]); 0 disables it.
     pub defer: Option<f32>,
+    /// The source is a tangent-space normal map stored as X and Y with Z reconstructed (BC5,
+    /// EAC RG11): each block's distortion is scaled by how far its XY errors move the unit
+    /// normal, which is the error lit shading sees ([`normal_factor`]).
+    pub normal_map: bool,
+    /// Strength of the [`RdoParams::normal_map`] weighting: 1 is the first-order error of the
+    /// reconstructed normal, 0 plain XY error. The default 4 over-weights tilted blocks, which
+    /// lit PSNR on Poly Haven normal maps favors (BD-rate -1.2% vs 0, -0.3% vs 1).
+    pub normal_weight: f32,
 }
 
 impl Default for RdoParams {
@@ -151,6 +159,8 @@ impl Default for RdoParams {
             local_m: None,
             row: 0,
             defer: None,
+            normal_map: false,
+            normal_weight: 4.0,
         }
     }
 }
@@ -1493,6 +1503,27 @@ fn smooth_factor(src: &Block, w: &[u32; 4], p: &RdoParams) -> f32 {
     }
     let k2 = p.smooth_std * p.smooth_std;
     1.0 + (p.smooth_scale - 1.0) * k2 / (k2 + max_std * max_std)
+}
+
+/// z² floor for [`normal_factor`]: normals within about 14° of the surface plane, or outside the
+/// unit disc, weigh as if at that angle.
+const NORMAL_Z2_MIN: f32 = 1.0 / 16.0;
+
+/// Distortion multiplier for a block of a normal map stored as X and Y ([`RdoParams::normal_map`]).
+/// With Z = sqrt(1 - x² - y²) reconstructed, an error (dx, dy) moves the unit normal by
+/// dx² + dy² + (x dx + y dy)² / z² to first order; for uncorrelated channel errors of equal size
+/// that is (dx² + dy²) (1 + (x² + y²) / 2z²). Lambert shading averaged over all light directions
+/// sees a third of the squared normal error, so this weights the error of the lit output. 1 for a
+/// flat normal, growing as normals tilt.
+fn normal_factor(src: &Block, strength: f32) -> f32 {
+    let mut s = 0f32;
+    for t in src {
+        let x = t[0] as f32 / 127.5 - 1.0;
+        let y = t[1] as f32 / 127.5 - 1.0;
+        let r2 = x * x + y * y;
+        s += r2 / (2.0 * (1.0 - r2).max(NORMAL_Z2_MIN));
+    }
+    1.0 + strength * s / 16.0
 }
 
 /// Per-block distortion multipliers from neighbourhood smoothness, in the spirit of x264's
@@ -3180,7 +3211,16 @@ pub fn optimize_with_alt(
         };
     }
     let chunk = (p.chunk_bytes_for(format) / format.block_bytes()).max(1);
-    let smooth = smooth_map(src, w, p);
+    let mut smooth = smooth_map(src, w, p);
+    if p.normal_map && p.normal_weight > 0.0 && matches!(format, Format::Bc5 | Format::EacRg11 | Format::EacRg11Snorm) {
+        let base = smooth.unwrap_or_else(|| src.iter().map(|b| smooth_factor(b, w, p)).collect());
+        smooth = Some(
+            base.iter()
+                .zip(src)
+                .map(|(&f, b)| f * normal_factor(b, p.normal_weight))
+                .collect(),
+        );
+    }
     let smooth_chunks: Vec<Option<&[f32]>> = (0..src.len().div_ceil(chunk))
         .map(|k| smooth.as_deref().map(|m| &m[k * chunk..((k + 1) * chunk).min(m.len())]))
         .collect();
@@ -3202,6 +3242,20 @@ pub fn optimize_with_alt(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Flat normals keep the plain weight; tilted ones, whose reconstructed Z amplifies X/Y error,
+    /// weigh more, with Z² floored so near-horizontal normals stay finite.
+    #[test]
+    fn normal_factor_grows_with_tilt() {
+        let block = |r: u8, g: u8| [[r, g, 255, 255]; 16];
+        let flat = normal_factor(&block(128, 128), 1.0);
+        assert!((flat - 1.0).abs() < 1e-3, "{flat}");
+        let tilted = normal_factor(&block(200, 128), 1.0);
+        assert!(tilted > 1.1, "{tilted}");
+        let edge = normal_factor(&block(255, 255), 1.0);
+        assert!(edge.is_finite() && edge > tilted && edge <= 1.0 + 2.0 / (2.0 * NORMAL_Z2_MIN));
+        assert_eq!(normal_factor(&block(200, 128), 0.0), 1.0);
+    }
 
     /// The kept context gives what a fresh one does, across levels and sizes in any order.
     #[test]
