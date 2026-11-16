@@ -261,6 +261,7 @@ Open for v0.9.x:
 - [ ] Alpha-weighted RGB error for partly transparent texels (per-texel weights in the BC7 encoders and RDO), and
   RDO matching of hidden texels to anything (now they are pinned to the visible mean).
 - [ ] Better mip filters (Kaiser/Lanczos).
-- [ ] Per-role presets (`--role albedo|normal|mask|ui`) choosing format, λ and smooth protection.
+- [ ] Per-role presets: `--role albedo|normal|mask` sets the colour space and normal weighting (done);
+  still open: a role choosing format, λ and smooth protection, and a `ui` role.
 - [ ] Rate model for GDeflate (GPU decompression); `--backend` switch for verification.
 - [ ] `ktx validate` (KTX-Software) in CI.
