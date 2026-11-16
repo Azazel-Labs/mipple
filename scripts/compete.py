@@ -10,14 +10,23 @@ Encoders (each is skipped if its path is not given or not found):
   --harness    tools/competitors bcn_harness (bc7f, Intel ISPC Texture Compressor, icbc, stb_dxt)
   --cmp        AMD compressonatorcli
   --texconv    Microsoft DirectXTex texconv
+  --basisu     Binomial basis_universal `basisu` (BC7 only): UASTC LDR 4x4 with RDO, and XUBC7
+
+Basis UASTC and XUBC7 are not BC7 encoders but intermediate formats that ship in KTX2 and are transcoded
+to BC7 at load time. Each encode is unpacked to a BC7 DDS (`basisu -export_dds BC7`) and graded by
+`mipple score` like the rest, but the size columns are what ships: for UASTC, the UASTC blocks after the
+same Zstd-19 / Deflate-9 (the KTX2 is written without basisu's own Zstd and its blocks scored by mipple); for
+XUBC7, the KTX2's level data (XUBC7 is its own entropy coder, so both columns hold the same byte count). A
+second row per UASTC encode ("... as BC7") gives the size of the transcoded BC7 blocks themselves.
 
 --threads N limits every encoder to N threads (mipple: RAYON_NUM_THREADS; bc7enc_rdo: OMP_NUM_THREADS;
-harness: its thread argument; Compressonator: -NumThreads; texconv: -singleproc when N = 1).
+harness: its thread argument; Compressonator: -NumThreads; texconv: -singleproc when N = 1; basisu:
+-no_multithreading when N = 1, else -max_threads N).
 --base-only skips RDO sweeps (use with --threads 1 for a per-core speed table).
 
 Time is the encoder's own reported encode time where it prints one (mipple pipeline encode, bc7enc_rdo encoding + RDO
-time, harness block loop) and process wall time otherwise (Compressonator, texconv); the wall
-time is always recorded too.
+time, harness block loop, basisu compression including PNG load, not the transcode to BC7) and process wall
+time otherwise (Compressonator, texconv); the wall time is always recorded too.
 
 On hybrid CPUs (Intel P/E cores) single-thread timings swing several-fold with the core the OS picks;
 use --affinity with a performance core's mask for them.
@@ -45,9 +54,34 @@ FIELDS = SCORE_FIELDS + ["family", "x", "wall", "threads"]
 
 
 class Cfg:
-    def __init__(self, fmt, family, label, x, argv, env=None, out_name=None):
+    def __init__(self, fmt, family, label, x, argv, env=None, out_name=None, ship=None):
         self.fmt, self.family, self.label, self.x = fmt, family, label, x
         self.argv, self.env, self.out_name = argv, env or {}, out_name
+        # ship: None (the DDS is what ships), "uastc" or "xubc7" (argv writes a KTX2; see run()).
+        self.ship = ship
+
+
+def ktx2_level0(path):
+    """(vkFormat, supercompression scheme, level-0 bytes, supercompression global data length) of a KTX2."""
+    import struct
+    b = Path(path).read_bytes()
+    if b[:12] != b"\xabKTX 20\xbb\r\n\x1a\n":
+        raise RuntimeError(f"{path}: not a KTX2 file")
+    vk_format, = struct.unpack_from("<I", b, 12)
+    scheme, = struct.unpack_from("<I", b, 44)
+    sgd_len, = struct.unpack_from("<Q", b, 72)
+    off, length, _ = struct.unpack_from("<QQQ", b, 80)
+    return vk_format, scheme, b[off:off + length], sgd_len
+
+
+def bc7_dds(path, width, height, blocks):
+    """Writes 16-byte 4x4 blocks into a DX10 DDS tagged BC7_UNORM (so `mipple score` reports their Zstd and
+    Deflate sizes; its PSNR is meaningless for non-BC7 blocks)."""
+    import struct
+    hdr = struct.pack("<4sIIIIIII44xIIIIIIIIIIIII", b"DDS ", 124, 0x1 | 0x2 | 0x4 | 0x1000 | 0x80000, height, width,
+                      len(blocks), 0, 1, 32, 0x4, 0x30315844, 0, 0, 0, 0, 0, 0x1000, 0, 0, 0, 0)
+    dx10 = struct.pack("<IIIII", 98, 3, 0, 1, 0)
+    Path(path).write_bytes(hdr + dx10 + blocks)
 
 
 # Distinct mipple effort tiers per format (efforts 0-9; BC1 efforts 8 and 9 are the same search; BC7 levels 0-2, 3-5, 6-7 and 8-9 share
@@ -58,7 +92,7 @@ MIPPLE_EFFORTS = {"bc1": (0, 1, 2, 3, 4, 5, 6, 7, 8), "bc7": (0, 1, 2, 3, 4, 5, 
 def configs(a):
     T = a.threads
     out = []
-    lam_m = [0.0] if a.base_only else [0.0, 0.25, 0.5, 1, 2, 4, 8]
+    lam_m = [0.0] if a.base_only else a.mipple_lambdas
     menv = {"RAYON_NUM_THREADS": str(T)}
     oenv = {"OMP_NUM_THREADS": str(T)}
 
@@ -122,6 +156,29 @@ def configs(a):
                                                       "-o", str(Path(d).parent), s],
                            out_name="texconv"))
 
+    def basisu():
+        if not a.basisu:
+            return
+        thr = ["-no_multithreading"] if T == 1 else ["-max_threads", str(T)]
+        common = ["-ktx2", f"-{a.basisu_color}", *thr]
+        for lam in a.basisu_uastc_lambdas:
+            rdo = ["-uastc_rdo_l", f"{lam:g}", "-uastc_rdo_d", str(a.basisu_uastc_dict)] if lam > 0 else []
+            out.append(Cfg("bc7", "basis UASTC RDO", f"basis UASTC λ={lam:g}", lam,
+                           lambda s, d, rdo=rdo: [a.basisu, "-uastc", "-uastc_level", "2", *rdo, "-ktx2_no_zstandard",
+                                                  *common, "-file", s, "-output_file", d], ship="uastc"))
+        for spec in a.basisu_xubc7:
+            # "<base>:q<quality>:<rdo levels>" curves (base bc7f, or bc7e<N> for bc7e_scalar level N); one family
+            # per base and quality, x = RDO level.
+            base, q, lvls = spec.split(":")
+            bflags = ["-xubc7_bc7e_scalar_level", base[4:]] if base.startswith("bc7e") else ["-xubc7_bc7f"]
+            for r in lvls.split(","):
+                fam = f"basis XUBC7 {base} {q}"
+                out.append(Cfg("bc7", fam, f"{fam} rdo{r}", int(r),
+                               lambda s, d, q=q, r=r, bflags=bflags: [
+                                   a.basisu, "-xubc7", *bflags, "-quality", q[1:], "-xubc7_rdo_level", r,
+                                   "-effort", str(a.basisu_xubc7_effort), *a.basisu_xubc7_args.split(), *common,
+                                   "-file", s, "-output_file", d], ship="xubc7"))
+
     rdo_lams = [0.0, 0.1, 0.25, 0.5, 1, 2, 4]
     for fmt in a.formats:
         mipple(fmt)
@@ -132,6 +189,7 @@ def configs(a):
                     [f"ispc_bc7:{p}" for p in ("ultrafast", "veryfast", "fast", "basic", "slow")])
             cmp("bc7", "BC7", [(["-Quality", "0.05"], "q0.05"), (["-Quality", "0.2"], "q0.2"), (["-Quality", "0.6"], "q0.6")])
             texconv("bc7", "BC7_UNORM", [(["-bc", "q"], "quick")])
+            basisu()
         elif fmt == "bc1":
             bc7enc("bc1", ["-1"], [(["-L0"], "L0"), (["-L6"], "L6"), (["-L12"], "L12"), (["-L18"], "L18")], rdo_lams)
             harness("bc1", ["icbc:1", "icbc:5", "icbc:8", "icbc:9", "stb_bc1", "stb_bc1hq", "ispc_bc1"])
@@ -166,17 +224,55 @@ def pin_cpus(mask):
         os.sched_setaffinity(0, {i for i in range(mask.bit_length()) if mask >> i & 1})
 
 
+CPU_TIME = False  # --cpu-time: record the encoder process's CPU time (user + kernel) instead
+
+
+def spawn(argv, cwd, env):
+    """Runs argv to completion; returns (CompletedProcess, CPU seconds of the child, user + kernel)."""
+    if sys.platform != "win32":
+        import resource
+        r0 = resource.getrusage(resource.RUSAGE_CHILDREN)
+        p = subprocess.run(argv, cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="replace", env=env)
+        r1 = resource.getrusage(resource.RUSAGE_CHILDREN)
+        return p, (r1.ru_utime - r0.ru_utime) + (r1.ru_stime - r0.ru_stime)
+    import ctypes
+    from ctypes import wintypes
+    q = subprocess.Popen(argv, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8",
+                         errors="replace", env=env)
+    out, err = q.communicate()
+    t = [wintypes.FILETIME() for _ in range(4)]
+    k32 = ctypes.windll.kernel32
+    k32.GetProcessTimes.argtypes = [wintypes.HANDLE] + [ctypes.POINTER(wintypes.FILETIME)] * 4
+    if not k32.GetProcessTimes(wintypes.HANDLE(int(q._handle)), *[ctypes.byref(x) for x in t]):
+        raise RuntimeError("GetProcessTimes failed")
+    ticks = lambda ft: (ft.dwHighDateTime << 32 | ft.dwLowDateTime)
+    cpu = (ticks(t[2]) + ticks(t[3])) / 1e7  # kernel + user, 100 ns units
+    return subprocess.CompletedProcess(argv, q.returncode, out, err), cpu
+
+
 def run(cfg, src, dst, work):
     env = dict(os.environ, **cfg.env)
-    argv = [str(x) for x in cfg.argv(str(src), str(dst))]
+    out = Path(dst).with_suffix(".ktx2") if cfg.ship else dst
+    argv = [str(x) for x in cfg.argv(str(src), str(out))]
     t0 = time.perf_counter()
-    p = subprocess.run(argv, cwd=work, capture_output=True, text=True, encoding="utf-8", errors="replace", env=env)
+    p, cpu = spawn(argv, work, env)
     wall = time.perf_counter() - t0
     if p.returncode != 0:
         raise RuntimeError(f"failed ({p.returncode}): {' '.join(argv)}\n{p.stdout[-1500:]}\n{p.stderr[-1500:]}")
+    if cfg.ship:  # basisu: time its compression, then transcode the KTX2 to a BC7 DDS for scoring
+        m = re.search(r"Compression succeeded to file .* in ([0-9.]+) secs", p.stdout)
+        if not m:
+            raise RuntimeError(f"no compression time in basisu output: {p.stdout[-1500:]}")
+        x = [argv[0], "-export_dds", "BC7", "-file", str(out), "-output_file", str(dst)]
+        q = subprocess.run(x, cwd=work, capture_output=True, text=True, encoding="utf-8", errors="replace")
+        if q.returncode != 0 or not Path(dst).is_file():
+            raise RuntimeError(f"failed ({q.returncode}): {' '.join(x)}\n{q.stdout[-1500:]}\n{q.stderr[-1500:]}")
+        return (cpu if CPU_TIME else float(m.group(1))), wall
     if cfg.out_name == "texconv":
         produced = Path(dst).parent / (Path(src).stem + ".dds")
         os.replace(produced, dst)
+    if CPU_TIME:
+        return cpu, wall
     secs = wall
     enc = re.search(r"Total encoding time: ([0-9.]+) secs", p.stdout)
     if enc:  # bc7enc_rdo: base encode + RDO pass, excluding PNG load, stats and file write
@@ -194,7 +290,8 @@ def summarize(rows, images, args):
     lines = [f"# Competitive benchmark\n",
              f"Corpus: {len(images)} images from `{args.corpus}`; threads per encoder: {args.threads}. "
              "Sizes are corpus totals after each back end; PSNR is the per-image mean over the format's channels; "
-             "time is total encode seconds (see scripts/compete.py for what each encoder's time covers).\n"]
+             + ("time is total CPU seconds of the encoder processes (user + kernel, with --cpu-time).\n" if args.cpu_time else
+                "time is total encode seconds (see scripts/compete.py for what each encoder's time covers).\n")]
     by_fmt = defaultdict(list)
     for r in rows:
         by_fmt[r["format"]].append(r)
@@ -204,15 +301,16 @@ def summarize(rows, images, args):
             continue
         agg = OrderedDict()
         for r in frows:
-            a = agg.setdefault(r["label"], {"family": r["family"], "x": r["x"], "n": 0, "psnr": 0.0, "zstd": 0,
-                                            "deflate": 0, "texels": 0, "secs": 0.0})
+            a = agg.setdefault(r["label"], {"family": r["family"], "x": r["x"], "n": 0, "psnr": 0.0, "ssim": 0.0,
+                                            "zstd": 0, "deflate": 0, "texels": 0, "secs": 0.0})
             a["n"] += 1
             a["psnr"] += float(r["psnr"])
+            a["ssim"] += float(r["ssim"])
             a["zstd"] += int(r["zstd_bytes"])
             a["deflate"] += int(r["deflate_bytes"])
             a["texels"] += int(r["width"]) * int(r["height"])
             a["secs"] += float(r["secs"])
-        curves = defaultdict(lambda: {"zstd": [], "deflate": []})
+        curves = defaultdict(lambda: {"zstd": [], "deflate": [], "ssim": [], "secs": []})
         pts = []
         for label, a in agg.items():
             if a["n"] != len(images):
@@ -222,8 +320,12 @@ def summarize(rows, images, args):
             mps = a["texels"] / 1e6 / max(a["secs"], 1e-9)
             pts.append((label, a["family"], a["x"], psnr, zb, db, a["secs"], mps))
             if a["x"] not in (None, "", "None"):
-                curves[a["family"]]["zstd"].append((zb, psnr))
-                curves[a["family"]]["deflate"].append((db, psnr))
+                c = curves[a["family"]]
+                c["zstd"].append((zb, psnr))
+                c["deflate"].append((db, psnr))
+                # SSIM as dB of its complement, so BD-rate interpolates on a scale like PSNR's.
+                c["ssim"].append((zb, -10 * math.log10(max(1 - a["ssim"] / a["n"], 1e-12))))
+                c["secs"].append(a["secs"])
         mcurve = sorted(curves.get("mipple RDO", {"zstd": []})["zstd"], key=lambda p: p[1])
 
         def vs_mipple_curve(psnr, zb):
@@ -264,15 +366,20 @@ def summarize(rows, images, args):
                         gap = f"best is {m[0]}, {psnr - m[3]:.2f} dB short"
                     lines.append(f"| {label} | {psnr:.2f} | {mps:.2f} | ✗ | {gap} |")
         if "mipple RDO" in curves and len(curves) > 1:
-            lines += ["", "BD-rate of **mipple RDO** vs each RDO family (negative = mipple needs fewer bits at equal PSNR):", "",
-                      "| vs family | Zstd-19 | Deflate-9 |", "| --- | --- | --- |"]
             m = curves["mipple RDO"]
+            span = lambda c: f"{min(c['secs']):.1f}-{max(c['secs']):.1f}"
+            lines += ["", "BD-rate of **mipple RDO** vs each RDO family (negative = mipple needs fewer bits at equal PSNR, "
+                      "or at equal SSIM in the last column; for Basis rows the bits are what ships, see scripts/compete.py), "
+                      f"and each family's total time range over its sweep (mipple RDO: {span(m)} s):", "",
+                      "| vs family | Zstd-19 | Deflate-9 | Zstd-19, equal SSIM | family time (s) |",
+                      "| --- | --- | --- | --- | --- |"]
             for fam, c in curves.items():
                 if fam == "mipple RDO":
                     continue
                 z, d = bd_rate(c["zstd"], m["zstd"]), bd_rate(c["deflate"], m["deflate"])
+                ss = bd_rate(c["ssim"], m["ssim"])
                 f = lambda v: "n/a (no overlap)" if v is None else f"{v:+.1f}%"
-                lines.append(f"| {fam} | {f(z)} | {f(d)} |")
+                lines.append(f"| {fam} | {f(z)} | {f(d)} | {f(ss)} | {span(c)} |")
     return "\n".join(lines) + "\n"
 
 
@@ -293,6 +400,21 @@ def main():
     ap.add_argument("--harness")
     ap.add_argument("--cmp")
     ap.add_argument("--texconv")
+    ap.add_argument("--basisu")
+    floats = lambda v: [float(x) for x in v.split(",")]
+    ap.add_argument("--mipple-lambdas", type=floats, default=[0.0, 0.25, 0.5, 1, 2, 4, 8],
+                    help="mipple RDO λ sweep (comma-separated)")
+    ap.add_argument("--basisu-uastc-lambdas", type=floats, default=[0.0, 0.5, 1, 2, 3, 5, 8],
+                    help="UASTC -uastc_rdo_l sweep; 0 = no RDO")
+    ap.add_argument("--basisu-uastc-dict", type=int, default=4096, help="UASTC RDO dictionary bytes (-uastc_rdo_d)")
+    ap.add_argument("--basisu-xubc7", type=lambda v: v.split(";"),
+                    default=["bc7f:q100:0,25,50,75,100", "bc7e2:q100:0,25,50,75,100", "bc7f:q75:0,25,50"],
+                    help="XUBC7 curves, ';'-separated '<bc7f|bc7e<level>>:q<quality>:<rdo levels>' "
+                         "(q100 = no weight-grid DCT)")
+    ap.add_argument("--basisu-xubc7-effort", type=int, default=3)
+    ap.add_argument("--basisu-color", choices=["linear", "srgb"], default="linear",
+                    help="basisu colour space; linear (no sRGB perceptual weighting) is what PSNR measures")
+    ap.add_argument("--basisu-xubc7-args", default="", help="extra XUBC7 flags (e.g. '-xubc7_num_stripes 1')")
     ap.add_argument("--threads", type=int, default=os.cpu_count())
     ap.add_argument("--base-only", action="store_true")
     ap.add_argument("--bc7enc-window", type=int, default=1024)
@@ -308,12 +430,17 @@ def main():
     ap.add_argument("--affinity", type=lambda v: int(v, 0), default=0,
                     help="CPU mask (e.g. 0x4000) to pin this script and every encoder it runs to; "
                          "needed for meaningful single-thread timings on hybrid CPUs (P/E cores)")
+    ap.add_argument("--cpu-time", action="store_true",
+                    help="record each encoder process's CPU time (user + kernel, so it includes image load and file "
+                         "write) instead of its own timer; robust to time-slicing on a loaded machine")
+    ap.add_argument("--shard", default="", help="i/n: run only every n-th image starting at i (rows.csv files of "
+                    "the shards concatenate; rebuild the summary with --summary-only)")
     ap.add_argument("--summary-only", action="store_true", help="rebuild summary.md from rows.csv")
     args = ap.parse_args()
     if args.affinity:
         pin_cpus(args.affinity)
     args.formats = args.formats.split(",")
-    for name in ("mipple", "bc7enc", "harness", "cmp", "texconv"):
+    for name in ("mipple", "bc7enc", "harness", "cmp", "texconv", "basisu"):
         v = getattr(args, name)
         if v:
             p = Path(v).expanduser().resolve()
@@ -325,6 +452,12 @@ def main():
     images = sorted(p.resolve() for p in args.corpus.iterdir() if p.suffix.lower() == ".png")
     if args.limit:
         images = images[: args.limit]
+    all_images = images
+    if args.shard:
+        i, n = map(int, args.shard.split("/"))
+        images = images[i::n]
+    global CPU_TIME
+    CPU_TIME = args.cpu_time
     work = (args.out / "work").resolve()
     work.mkdir(parents=True, exist_ok=True)
     rows_path = args.out / "rows.csv"
@@ -356,11 +489,39 @@ def main():
                 return None
             row = dict(zip(SCORE_FIELDS, next(csv.reader([p.stdout.strip()]))))
             row.update(family=cfg.family, x="" if cfg.x is None else cfg.x, wall=f"{wall:.4f}", threads=args.threads)
-            w.writerow(row)
+            out_rows = [row]
+            if cfg.ship:
+                ktx = dst.with_suffix(".ktx2")
+                _, scheme, data, sgd = ktx2_level0(ktx)
+                texels = int(row["width"]) * int(row["height"])
+                shipped = dict(row)
+                if cfg.ship == "uastc":
+                    if scheme != 0:
+                        raise RuntimeError(f"{ktx}: UASTC KTX2 is supercompressed (scheme {scheme})")
+                    fake = dst.with_name(dst.stem + "_uastc.dds")
+                    bc7_dds(fake, int(row["width"]), int(row["height"]), data)
+                    q = subprocess.run([args.mipple, "score", str(img), str(fake), "--csv"], capture_output=True,
+                                       text=True, encoding="utf-8")
+                    fake.unlink()
+                    if q.returncode != 0:
+                        print(f"  score failed for {fake}: {q.stderr}", file=sys.stderr, flush=True)
+                        return None
+                    u = dict(zip(SCORE_FIELDS, next(csv.reader([q.stdout.strip()]))))
+                    zb, db = int(u["zstd_bytes"]), int(u["deflate_bytes"])
+                    row.update(label=f"{cfg.label} as BC7", family=f"{cfg.family} as BC7")
+                    out_rows = [shipped, row]
+                else:
+                    zb = db = len(data) + sgd
+                    out_rows = [shipped]
+                shipped.update(zstd_bytes=zb, deflate_bytes=db, zstd_bpt=f"{zb * 8 / texels:.4f}",
+                               deflate_bpt=f"{db * 8 / texels:.4f}")
+                ktx.unlink()
+            for r in out_rows:
+                w.writerow(r)
+                rows.append(r)
             f.flush()
-            rows.append(row)
             dst.unlink()
-            return row
+            return out_rows[0]
 
         def dst_for(cfg, img):
             return work / (re.sub(r"[^A-Za-z0-9._-]+", "_", f"{cfg.fmt}_{cfg.label}") + "__" + img.stem + ".dds")
@@ -416,7 +577,8 @@ def main():
                           f"zstd {sum(int(r['zstd_bytes']) for r in sel) * 8 / sum(int(r['width']) * int(r['height']) for r in sel):5.3f} bpt  "
                           f"time {t_cfg:8.2f}s", flush=True)
         f.close()
-    (args.out / "summary.md").write_text(summarize(rows, images, args), encoding="utf-8")
+    (args.out / "summary.md").write_text(summarize(rows, all_images if args.summary_only else images, args),
+                                         encoding="utf-8")
     print(f"wrote {args.out / 'summary.md'}")
 
 

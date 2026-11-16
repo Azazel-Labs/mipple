@@ -156,8 +156,17 @@ Open for v0.9.x:
 - [ ] Rebalance RDO chunks for many threads without making output depend on the thread count (BC5 on Kodak:
   24 chunks on 20 threads run as two uneven rounds). Tried: splitting each block's search over back distances
   across threads; no faster on a 155H, since per-block joins wait for the slowest core.
-- [ ] Add **Basis UASTC + RDO + Zstd** and **XUBC7** to the head-to-head (`basisu -unpack` to DDS, then score).
-  Add **bc7g** to `scripts/compete.py` when released. NVTT 3 needs a manual download.
+- [x] **Basis UASTC + RDO + Zstd** and **XUBC7** in the head-to-head (`compete.py --basisu`: basisu 073eb6a,
+  `-export_dds BC7`, then score; sizes are what ships). On Kodak-24, mipple's BC7 RDO is −55.9% BD-rate (Zstd-19,
+  equal PSNR) against UASTC RDO and −8.5% against XUBC7 (bc7e level 2), but **+16.2% at equal SSIM** against
+  XUBC7 (BENCHMARKS.md, "vs Basis UASTC and XUBC7"). Still open: **bc7g** is unreleased (checked 2026-11-16),
+  add it to `scripts/compete.py` when it ships; NVTT 3 sits behind an NVIDIA developer login (proprietary
+  license), so it stays a manual download.
+- [ ] Close the SSIM gap to XUBC7: at equal PSNR its BC7 has much higher SSIM than mipple's RDO (about
+  39.7 dB, XUBC7 bc7f rdo 100 vs mipple λ 2: 0.9891 vs 0.9761), and it is smaller at equal SSIM on 23 of 24
+  Kodak images. A lead: on kodim01 at about 39 dB, 3.9% of mipple's textured blocks lose more than 30% of
+  their luma contrast, against 1.3% for XUBC7. Try a contrast-loss term in the RDO error (smooth protection
+  only guards low-variance blocks).
 - [x] BC3: a BC4 alpha half and a 4-color BC1 color half, both halves through the same RDO pass (each
   half's copy, re-index and refit, like BC5), alpha as transparency like BC7; −15.7% BD-rate against
   bc7enc_rdo at a fifth of its time (BENCHMARKS.md). No GPU kernel yet.

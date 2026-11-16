@@ -36,7 +36,8 @@ bc7e level ~0.8 quality. It also serves as the real-time BC7 fallback when Basis
 
 Announced, not released. Geldreich describes it as bc7f's analytical techniques combined with SIMD, aiming
 for a few CPU threads to compete with GPU encoders. The wiki says it "is in the works" and will be open
-source. No code or numbers yet. Add it to `scripts/compete.py` when it ships.
+source. No code or numbers yet. Add it to `scripts/compete.py` when it ships. Re-checked 2026-11-16: still
+unreleased (nothing in basis_universal master at 073eb6a, 2026-10-30, or in the bc7e repository).
 
 ## What this means for mipple
 

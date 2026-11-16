@@ -358,6 +358,125 @@ Two fixes went into this run:
 - BC1 built its single-color match tables on first use, which cost about 2 ms per process inside the timed
   encode (~10% of an image at effort 0). They are now `const` tables built at compile time.
 
+## vs Basis UASTC and XUBC7 (basisu)
+
+`bench-results/compete-kodak24-basis/`: all 24 Kodak images, one thread per encoder, mipple effort 5 at λ 0-16
+against Binomial's `basisu` (basis_universal master 073eb6a of 2026-10-30, newer than release 2.50; Apache-2.0,
+built from source with CMake). Neither Basis format is a BC7 encoder. Both are intermediate formats that ship
+in a KTX2 and are transcoded to BC7 at load time. `compete.py --basisu` writes each encode as a KTX2,
+transcodes it with `basisu -export_dds BC7`, and grades that BC7 with `mipple score` like every other row.
+The size columns hold what ships:
+
+- **UASTC** (`-uastc -uastc_level 2`, RDO `-uastc_rdo_l` 0.5-8 with the default 4096-byte dictionary; λ 0 is
+  no RDO) ships as UASTC blocks under Zstd supercompression. The KTX2 is written without basisu's Zstd, and
+  its raw blocks get the same Zstd-19 and Deflate-9 as mipple's. Check on kodim01 at λ 1: basisu's own KTX2 at
+  Zstd level 19 is 352,474 bytes, against 352,290 bytes of Zstd-19 blocks here (the difference is the KTX2
+  header and metadata). The extra "UASTC ... as BC7" rows give the transcoded BC7 blocks after Zstd and
+  Deflate, which is what a game would ship if it transcoded at build time.
+- **XUBC7** (`-xubc7`) is Basis' newer BC7 intermediate, with a weight-grid DCT below quality 100 and its
+  own entropy coder. Its size is the KTX2's level-0 bytes plus the supercompression global data, in both
+  columns. It is already entropy coded, so no Zstd or Deflate is applied on top. There are three
+  curves, each over `-xubc7_rdo_level`, at `-effort 3` (the default) with
+  `-xubc7_num_stripes 1`:
+  - the bc7f base (`-xubc7_bc7f`) at `-quality 100`, which is no weight-grid DCT;
+  - the bc7e_scalar level-2 base (`-xubc7_bc7e_scalar_level 2`) at `-quality 100`;
+  - the bc7f base at `-quality 75`, with the DCT.
+
+Both formats use `-linear`, so no sRGB perceptual weighting, matching what PSNR measures. On 4 images, UASTC
+gave identical results with `-srgb`.
+
+BD-rate of mipple's RDO curve against each family, for corpus totals. Negative means mipple needs fewer bits.
+The "equal SSIM" column interpolates on 10·log10(1/(1−SSIM)), with SSIM on luma.
+
+| vs | Zstd-19, equal PSNR | Deflate-9, equal PSNR | Zstd-19, equal SSIM |
+| --- | --- | --- | --- |
+| Basis UASTC RDO (shipped UASTC) | **−55.9%** | **−53.5%** | **−43.8%** |
+| Basis UASTC RDO, transcoded BC7 | **−51.9%** | **−49.9%** | **−39.0%** |
+| Basis XUBC7, bc7f, q100 | **−11.6%** | **−7.7%** | +15.7% |
+| Basis XUBC7, bc7e level 2, q100 | **−8.5%** | **−4.9%** | +16.2% |
+| Basis XUBC7, bc7f, q75 (DCT) | **−34.8%** | **−29.9%** | **−28.6%** |
+
+Matched points (24-image means; Zstd-19 bits per texel):
+
+| Config | PSNR (dB) | SSIM | bpt |
+| --- | --- | --- | --- |
+| mipple λ 0 | 45.37 | 0.99749 | 7.175 |
+| XUBC7 bc7e2 rdo 0 | 45.32 | 0.99746 | 5.597 |
+| mipple λ 0.25 | 45.22 | 0.99651 | 6.029 |
+| mipple λ 0.5 | 43.95 | 0.99352 | 5.083 |
+| XUBC7 bc7f rdo 25 | 43.48 | 0.99632 | 5.070 |
+| UASTC λ 0 | 43.22 | 0.99622 | 7.418 |
+| XUBC7 bc7f rdo 50 | 41.92 | 0.99464 | 4.571 |
+| mipple λ 1 | 41.64 | 0.98585 | 3.868 |
+| UASTC λ 1 | 41.01 | 0.98591 | 6.355 |
+| mipple λ 2 | 39.70 | 0.97606 | 3.140 |
+| XUBC7 bc7f rdo 100 | 39.67 | 0.98909 | 3.789 |
+| mipple λ 4 | 37.46 | 0.96044 | 2.516 |
+| XUBC7 bc7f q75 rdo 0 | 36.37 | 0.95718 | 3.901 |
+
+### UASTC
+
+UASTC is not close. Its λ 0 encode is 2.2 dB below mipple's base encode, and it is still 3% larger after
+Zstd (7.42 against 7.18 bpt). Its RDO then spends PSNR much faster than it saves bits: λ 1 costs 2.2 dB
+for 14% fewer bits.
+
+### XUBC7
+
+**Lossless top.** At rdo 0, XUBC7 entropy-codes a full-quality BC7 encode losslessly. With the bc7e base,
+that is 45.32 dB at 5.60 bpt, 22% below Zstd-19 on mipple's λ 0 blocks (45.37 dB, 7.18 bpt) and 17% below
+mipple's curve at the same PSNR. That is the gain from a format-aware entropy coder over Zstd on raw blocks,
+the v1.2 "output B" item in ROADMAP.md.
+
+**PSNR below the top.** mipple's RDO is ahead in PSNR. At about 39.7 dB, mipple λ 2 is 3.14 bpt against
+3.79 for XUBC7 rdo 100, 17% smaller, and the BD-rate over the whole range is −8.5% to −11.6%. XUBC7's DCT
+curve (q75) loses PSNR quickly: rdo 0 is 36.37 dB at 3.90 bpt, where mipple needs about 2.25 bpt.
+
+**SSIM.** The ranking flips: XUBC7 has much higher SSIM at the same PSNR. At about 39.7 dB, XUBC7 rdo 100
+scores 0.98909 and mipple λ 2 scores 0.97606. At equal SSIM, mipple needs about 16% more bits than either
+q100 curve, and XUBC7 wins on 23 of 24 images (all but kodim20). Its error is not simply moved from luma
+to chroma. On kodim01 (bc7f rdo 100 against mipple λ 2, both near 39 dB), mipple has the higher luma PSNR
+(41.27 against 41.11 dB) and still the lower SSIM (0.9888 against 0.9923). A lead from the same pair: of
+the 4x4 blocks with source luma std ≥ 2, 3.9% of mipple's keep less than 70% of their luma std, against
+1.3% of XUBC7's. Over-flattened texture is what SSIM's contrast term punishes. This is now a ROADMAP item.
+Oodle, for comparison, stays behind mipple at equal SSIM (previous section).
+
+### Time
+
+The machine was busy with other jobs, so the full run measured each encoder process's CPU time (user plus
+kernel, `--cpu-time`) rather than wall time. That time includes PNG load and file write and is robust to
+time-slicing. It is not robust to a busy SMT sibling, which inflates every number here relative to the quiet
+pinned-core tables above. For example, mipple's λ 0 base encode is about 0.055 s per image there and 0.27 s
+here.
+
+The table below is a separate check on the four development images (kodim01, 03, 13 and 23).
+Every encoder was pinned to one P-core (logical CPU 2), the configs were interleaved, and each kept the
+fastest of three runs. Times are CPU seconds per image.
+
+| Encoder | No RDO | RDO sweep |
+| --- | --- | --- |
+| mipple e5 | 0.27 (λ 0) | 1.6-4.8 (λ 16 → 0.25) |
+| Basis UASTC | 4.4 | 9.8-11.8 (λ 8 → 0.5) |
+| Basis XUBC7 bc7f q100 | 0.94 (rdo 0) | 1.7-1.9 |
+| Basis XUBC7 bc7e2 q100 | 1.9 (rdo 0) | 2.7-2.9 |
+| Basis XUBC7 bc7f q75 | 2.1 (rdo 0) | 2.8 |
+
+On the same four images, the 24-image run's times were up to 7.5% higher for mipple and 10-33% higher for
+basisu, with the ordering unchanged. The committed rows therefore favor mipple slightly on time; prefer the
+table above. UASTC's RDO takes 9.8-11.8 s per image against mipple's 1.6-4.8 s. XUBC7 is about as fast as
+mipple's middle λ (λ 1: 2.3 s; XUBC7 bc7e2 rdo 50: 2.9 s) and faster than mipple's light settings
+(λ 0.25-0.5: 4.7-4.8 s). Treat all of these times as ±25%.
+
+Exploration on those four images (not in the committed rows):
+
+- UASTC with a 16 KiB RDO dictionary moves along about the same curve as the 4096-byte default (λ 1: 1.1%
+  smaller, 0.15 dB lower).
+- XUBC7 with 1 stripe instead of the default 8 is 0.4-0.8% smaller.
+- Effort 7 is no better than effort 3 (bc7e2 rdo 0: 5.693 against 5.658 bpt).
+- XUBC7 at q90 is already 3.4 dB below q100 at rdo 0 (bc7f: 40.89 against 44.30 dB, 4.86 against 5.56 bpt).
+
+**bc7g** is not released (checked 2026-11-16; see [research/bc7f-bc7g.md](research/bc7f-bc7g.md)). **NVTT 3**
+is a proprietary download behind an NVIDIA developer login, so it is not automated.
+
 ## vs Oodle Texture 2.9.16 (Unreal Engine 5.8)
 
 Oodle Texture is closed source, so `scripts/ue_oodle/run_ue_oodle.py`
@@ -1111,6 +1230,18 @@ python3 scripts/compete.py --corpus test-images/kodak --out bench-results/compet
     --mipple target/release/mipple --bc7enc /path/to/bc7enc_rdo/build/bc7enc \
     --harness /path/to/bcn_harness       # add --threads 1 --base-only --affinity MASK for per-core tables
 python3 scripts/compete_astc.py test-images/kodak --harness /path/to/bcn_harness --runs 3 --efforts 0,2
+```
+
+The Basis rows (`bench-results/compete-kodak24-basis/`) come from basisu built from basis_universal 073eb6a
+(`cmake -S . -B build && cmake --build build --config Release`; the exe lands in `bin/`). They were run as 5
+shards (`--shard i/5`, each pinned with `--affinity` to its own P-core, rows concatenated), then the summary
+was rebuilt with `--summary-only --threads 1 --cpu-time`:
+
+```sh
+python3 scripts/compete.py --corpus test-images/kodak --out bench-results/compete-kodak24-basis --formats bc7 \
+    --threads 1 --cpu-time --interleave --repeat 2 --affinity 0x4 --only "mipple e5 λ,basis" \
+    --mipple target/release/mipple --basisu /path/to/basis_universal/bin/basisu \
+    --mipple-lambdas 0,0.25,0.5,1,2,4,8,16 --basisu-xubc7-args "-xubc7_num_stripes 1"
 ```
 
 Building bc7enc_rdo with recent GCC needs `-DCMAKE_CXX_FLAGS="-include cstdint"`; add `-DSUPPORT_BC7E=TRUE`

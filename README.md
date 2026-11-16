@@ -40,6 +40,8 @@ notes on Binomial's bc7f/bc7g encoders: [docs/research/bc7f-bc7g.md](docs/resear
 
 **bc7enc_rdo:** RDO on all 24 Kodak images, 20 threads per encoder, graded identically with `mipple score`. BD-rate is the size difference at equal PSNR (negative = mipple is smaller); times are the range over each encoder's λ sweep. **Oodle Texture 2.9.16** is closed source, so it is run the way a game team runs it: a stock Unreal Engine 5.8 install imports the same Kodak images and cooks them (RDO on, Lossy Compression Amount Low to Highest = Oodle λ 10-40), and Oodle's blocks are taken from the cook and compressed with Zstd-19 like mipple's. mipple's size is measured at Oodle's RMSE and at its SSIM (positive = mipple is larger); there is no timing, since Unreal builds textures in parallel. Every caveat is in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 
+**Basis UASTC and XUBC7** (basisu, BC7 rows below the Oodle ones) are intermediate formats that ship in KTX2 and transcode to BC7 at load, so their size is what ships (UASTC blocks after Zstd-19 / Deflate-9; XUBC7's own entropy-coded stream in both columns), graded on the transcoded BC7; times are single-thread CPU seconds for the 24 images, the range over each sweep, from a busy local machine (noisy and inflated; mipple's from the same interleaved run).
+
 | Format | vs | Zstd-19 | Deflate-9 | mipple time (s) | competitor time (s) |
 | --- | --- | --- | --- | --- | --- |
 | BC1 | bc7enc_rdo | **−26.8%** | **−23.9%** | 7.8-11.7 | 11.9-13.3 |
@@ -55,6 +57,10 @@ notes on Binomial's bc7f/bc7g encoders: [docs/research/bc7f-bc7g.md](docs/resear
 | BC7 | bc7enc_rdo (-e) | **−30.5%** | **−28.6%** | 17.1-28.5 | 38.1-44.4 |
 | BC7 | Oodle Texture 2.9.16 (Unreal 5.8), equal RMSE | **−2.3%** to **−1.0%** (λ 10-40) | n/a | n/a | n/a |
 | BC7 | Oodle Texture 2.9.16 (Unreal 5.8), equal SSIM | **−3.6%** to **−1.2%** (λ 10-40) | n/a | n/a | n/a |
+| BC7 | Basis UASTC RDO (+ Zstd), equal PSNR | **−55.9%** | **−53.5%** | 43-118 | 118-321 |
+| BC7 | Basis UASTC RDO (+ Zstd), equal SSIM | **−43.8%** | **−41.6%** | 43-118 | 118-321 |
+| BC7 | Basis XUBC7 (bc7e level 2), equal PSNR | **−8.5%** | **−4.9%** | 43-118 | 54-82 |
+| BC7 | Basis XUBC7 (bc7e level 2), equal SSIM | +16.2% | +19.3% | 43-118 | 54-82 |
 | BC3 | bc7enc_rdo | **−16.0%** | **−14.4%** | n/a | n/a |
 | ETC2 RGB | Compressonator | **−25.2%** | **−24.6%** | n/a | n/a |
 | ETC2 RGBA | Compressonator | **−23.6%** | **−24.1%** | n/a | n/a |
@@ -62,7 +68,7 @@ notes on Binomial's bc7f/bc7g encoders: [docs/research/bc7f-bc7g.md](docs/resear
 | ASTC 6x6 | ISPC fast | **−16.6%** | **−16.1%** | n/a | n/a |
 | ASTC 8x8 | ISPC fast | **−29.8%** | **−29.1%** | n/a | n/a |
 
-Refresh after a new benchmark run with `python scripts/readme_charts.py` (reads `bench-results/compete-kodak24-rdo/rows.csv` and `bench-results/oodle-ue/results.json`, rewrites this block and `docs/img/*.svg`).
+Refresh after a new benchmark run with `python scripts/readme_charts.py` (reads `bench-results/compete-kodak24-rdo/rows.csv`, `bench-results/compete-kodak24-basis/rows.csv` and `bench-results/oodle-ue/results.json`, rewrites this block and `docs/img/*.svg`).
 
 <!-- results:end -->
 
@@ -180,8 +186,8 @@ WebGPU and win (BC7 effort 5: 42 vs 902 ms for a 512² mip chain in Chrome). Car
 - A KTX2 writer and reader with a DFD byte-identical to the `ktx2` crate's.
 - `mipple check`, a 30-second regression check with BD-rate gates against a committed baseline (also in CI).
 - A benchmark harness, a synthetic corpus, DDS I/O, and a competitor driver (`scripts/compete.py`) that grades
-  mipple, bc7enc_rdo/bc7e, bc7f, Intel ISPC, icbc, stb_dxt, Compressonator and texconv with the same metrics
-  and reports BD-rate; `scripts/ue_oodle/` does the same against Oodle Texture through Unreal Engine.
+  mipple, bc7enc_rdo/bc7e, bc7f, Intel ISPC, icbc, stb_dxt, Compressonator, texconv and Basis UASTC / XUBC7
+  with the same metrics and reports BD-rate; `scripts/ue_oodle/` does the same against Oodle Texture through Unreal Engine.
 
 Design details are in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md); next steps are in [docs/ROADMAP.md](docs/ROADMAP.md).
 
