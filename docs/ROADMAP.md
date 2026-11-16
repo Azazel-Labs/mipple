@@ -9,8 +9,8 @@ milestone in progress; every green push to main is released as the next patch (`
 1. ~~ASTC LDR (4x4, 6x6, 8x8) output, with the same RDO pass.~~ Done (v1.0 below); next for it: a GPU kernel,
    ~~more footprints~~ (all 14 2D footprints done), a faster RDO pass.
 2. BC6H: ~~RDO with a log-space distortion~~ (done: 42% smaller Zstd files at λ 2), signed BC6H, a GPU kernel.
-3. ~~ETC2 / EAC for mobile fallbacks.~~ Done (v1.0 below); next for it: punch-through alpha (ETC2 RGB A1),
-   ~~signed EAC~~ (done), a SIMD batch encoder.
+3. ~~ETC2 / EAC for mobile fallbacks.~~ Done (v1.0 below), with ~~punch-through alpha (ETC2 RGB A1)~~ and
+   ~~signed EAC~~; next for it: a SIMD batch encoder.
 
 ## v0.1 (pre-release): encoder and container
 
@@ -197,8 +197,9 @@ Open for v0.9.x:
   Compressonator's PSNR (BENCHMARKS.md). etcpak and etc2comp were not available to grade.
   - [x] Signed EAC R11 / RG11 (`eac-r11-snorm`, `eac-rg11-snorm`; vkFormat 154/156), checked against a
     transcription of the Khronos specification.
-  - [ ] Punch-through alpha (ETC2 RGB A1, vkFormat 149/150), a SIMD batch encoder (eight blocks
-    per call, as BC1/BC6H), a GPU kernel, and a cheaper RDO candidate error than a full decode.
+  - [x] Punch-through alpha (`etc2-rgb-a1`, vkFormat 149/150): texels below alpha 128 decode transparent
+    black, checked against `texture2ddecoder`.
+  - [ ] A SIMD batch encoder (eight blocks per call, as BC1/BC6H), a GPU kernel, and a cheaper RDO candidate error than a full decode.
 
 ## v1.0+: perception and speed
 

@@ -135,7 +135,7 @@ impl Gpu {
         let _ = opts;
         match format {
             Format::Bc1 | Format::Bc3 | Format::Bc4 | Format::Bc5 | Format::Bc6h | Format::Bc7 => false,
-            Format::Etc2Rgb | Format::Etc2Rgba | Format::EacR11 | Format::EacRg11 => false,
+            Format::Etc2Rgb | Format::Etc2Rgba | Format::Etc2RgbA1 | Format::EacR11 | Format::EacRg11 => false,
             Format::EacR11Snorm | Format::EacRg11Snorm => false,
             crate::format::astc!() => false,
         }
@@ -210,7 +210,7 @@ impl Gpu {
                 Format::Bc7 => self.dev.bc7(surfaces, opts).await,
                 // No kernel: `encodes` is false.
                 Format::Bc3 | Format::Bc6h => None,
-                Format::Etc2Rgb | Format::Etc2Rgba | Format::EacR11 | Format::EacRg11 => None,
+                Format::Etc2Rgb | Format::Etc2Rgba | Format::Etc2RgbA1 | Format::EacR11 | Format::EacRg11 => None,
                 Format::EacR11Snorm | Format::EacRg11Snorm => None,
                 crate::format::astc!() => None,
             }

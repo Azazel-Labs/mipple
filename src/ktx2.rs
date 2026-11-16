@@ -32,7 +32,7 @@ fn color_model(format: Format) -> u8 {
         Format::Bc6h => 133,                                                          // KHR_DF_MODEL_BC6H
         Format::Bc7 => 134,                                                           // KHR_DF_MODEL_BC7
         Format::Etc2Rgb | Format::Etc2Rgba | Format::EacR11 | Format::EacRg11 => 161, // KHR_DF_MODEL_ETC2
-        Format::EacR11Snorm | Format::EacRg11Snorm => 161,
+        Format::Etc2RgbA1 | Format::EacR11Snorm | Format::EacRg11Snorm => 161,
         crate::format::astc!() => 162, // KHR_DF_MODEL_ASTC
     }
 }
@@ -55,6 +55,9 @@ pub fn build_dfd(format: Format, srgb: bool, supercompressed: bool) -> Vec<u8> {
         // KHR_DF_CHANNEL_ETC2_ALPHA (linear even in an sRGB texture), then color.
         Format::Etc2Rgba if srgb => &[(0, 63, 15 | 0x10), (64, 63, 2)],
         Format::Etc2Rgba => &[(0, 63, 15), (64, 63, 2)],
+        // Color and the punch-through alpha share the same 64 bits.
+        Format::Etc2RgbA1 if srgb => &[(0, 63, 2), (0, 63, 15 | 0x10)],
+        Format::Etc2RgbA1 => &[(0, 63, 2), (0, 63, 15)],
         // KHR_DF_CHANNEL_ETC2_RED and _GREEN.
         Format::EacR11 => &[(0, 63, 0)],
         Format::EacRg11 => &[(0, 63, 0), (64, 63, 1)],

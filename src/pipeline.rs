@@ -94,7 +94,10 @@ impl EncodeOptions {
     /// Whether alpha is treated as transparency ([`Self::alpha`]): only for formats that keep
     /// alpha (BC3, BC7, ETC2 RGBA8, ASTC) and never for normal maps.
     pub fn alpha_transparency(&self) -> bool {
-        (matches!(self.format, Format::Bc3 | Format::Bc7 | Format::Etc2Rgba) || self.format.is_astc())
+        (matches!(
+            self.format,
+            Format::Bc3 | Format::Bc7 | Format::Etc2Rgba | Format::Etc2RgbA1
+        ) || self.format.is_astc())
             && !self.normal_map
             && match self.alpha {
                 AlphaMode::Auto => self.srgb,
@@ -274,6 +277,7 @@ fn encode_surface_raw(surface: &Surface, format: Format, opts: BlockOpts) -> Vec
         Format::Bc5 => crate::bc4::encode_surface(surface, 2, opts.effort),
         Format::Etc2Rgb => crate::etc::encode_surface(surface, opts.effort),
         Format::Etc2Rgba => crate::etc::encode_surface_rgba(surface, opts.effort),
+        Format::Etc2RgbA1 => crate::etc::encode_surface_a1(surface, opts.effort),
         Format::EacR11 => crate::eac::encode_surface(surface, (0, 1), crate::eac::Kind::R11, opts.effort),
         Format::EacRg11 => crate::eac::encode_surface(surface, (0, 2), crate::eac::Kind::R11, opts.effort),
         Format::EacR11Snorm => crate::eac::encode_surface(surface, (0, 1), crate::eac::Kind::R11Snorm, opts.effort),

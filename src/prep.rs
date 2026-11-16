@@ -25,7 +25,7 @@ use crate::format::Format;
 /// Splits `raw` blocks of `format` into field streams.
 pub fn forward(format: Format, raw: &[u8]) -> Vec<u8> {
     let streams = match format {
-        Format::Bc1 | Format::Etc2Rgb => split_bc1(raw),
+        Format::Bc1 | Format::Etc2Rgb | Format::Etc2RgbA1 => split_bc1(raw),
         Format::Bc3 | Format::Etc2Rgba => split_bc3(raw),
         Format::Bc4 | Format::EacR11 | Format::EacR11Snorm => split_bc4(raw, 1),
         Format::Bc5 | Format::EacRg11 | Format::EacRg11Snorm => split_bc4(raw, 2),
@@ -52,7 +52,7 @@ pub fn max_len(raw_len: usize) -> usize {
 /// Restores the blocks of `forward(format, raw)`; `None` if `data` is malformed.
 pub fn inverse(format: Format, data: &[u8]) -> Option<Vec<u8>> {
     let n = match format {
-        Format::Bc1 | Format::Etc2Rgb => 5,
+        Format::Bc1 | Format::Etc2Rgb | Format::Etc2RgbA1 => 5,
         Format::Bc3 | Format::Etc2Rgba => 8,
         Format::Bc4 | Format::EacR11 | Format::EacR11Snorm => 3,
         Format::Bc5 | Format::EacRg11 | Format::EacRg11Snorm => 6,
@@ -74,7 +74,7 @@ pub fn inverse(format: Format, data: &[u8]) -> Option<Vec<u8>> {
         return None;
     }
     match format {
-        Format::Bc1 | Format::Etc2Rgb => join_bc1(&streams),
+        Format::Bc1 | Format::Etc2Rgb | Format::Etc2RgbA1 => join_bc1(&streams),
         Format::Bc3 | Format::Etc2Rgba => join_bc3(&streams),
         Format::Bc4 | Format::EacR11 | Format::EacR11Snorm => join_bc4(&streams, 1),
         Format::Bc5 | Format::EacRg11 | Format::EacRg11Snorm => join_bc4(&streams, 2),

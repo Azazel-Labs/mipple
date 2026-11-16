@@ -215,7 +215,7 @@ impl RdoParams {
     pub fn window_for(&self, format: Format) -> usize {
         self.window.unwrap_or(match format {
             Format::Bc6h | Format::Bc7 | crate::format::astc!() => 16 * 1024,
-            Format::Bc1 | Format::Bc3 | Format::Etc2Rgb | Format::Etc2Rgba => 8 * 1024,
+            Format::Bc1 | Format::Bc3 | Format::Etc2Rgb | Format::Etc2Rgba | Format::Etc2RgbA1 => 8 * 1024,
             Format::Bc5 | Format::EacRg11 | Format::EacRg11Snorm => 3072,
             Format::Bc4 | Format::EacR11 | Format::EacR11Snorm => 2048,
         })
@@ -282,7 +282,7 @@ impl RdoParams {
             Format::Bc1 | Format::Bc3 | Format::Bc4 => 256,
             Format::Etc2Rgba | Format::EacR11 | Format::EacRg11 => 256,
             Format::EacR11Snorm | Format::EacRg11Snorm => 256,
-            Format::Bc5 | Format::Bc6h | Format::Etc2Rgb => 0,
+            Format::Bc5 | Format::Bc6h | Format::Etc2Rgb | Format::Etc2RgbA1 => 0,
             crate::format::astc!() => 0,
         })
     }
@@ -1123,6 +1123,7 @@ fn candidates(
         crate::format::astc!() => unreachable!("{format} has no RDO"),
         Format::Etc2Rgb
         | Format::Etc2Rgba
+        | Format::Etc2RgbA1
         | Format::EacR11
         | Format::EacRg11
         | Format::EacR11Snorm
@@ -1132,7 +1133,7 @@ fn candidates(
             // base, multiplier and table re-indexed and prev's indices refit. Each is memoized by
             // the field's value; two-half formats also copy each half whole.
             let parts: &[(usize, Option<usize>)] = match format {
-                Format::Etc2Rgb => &[(0, None)],
+                Format::Etc2Rgb | Format::Etc2RgbA1 => &[(0, None)],
                 Format::Etc2Rgba => &[(0, Some(3)), (8, None)],
                 Format::EacR11 | Format::EacR11Snorm => &[(0, Some(0))],
                 _ => &[(0, Some(0)), (8, Some(1))],
@@ -1156,6 +1157,15 @@ fn candidates(
                     push(&prev[r.clone()]);
                 }
                 match chan {
+                    // A1 blocks are re-chosen with the punch-through rules; refits would make
+                    // individual-mode blocks, which A1 reads as punch-through.
+                    None if format == Format::Etc2RgbA1 => {
+                        if fields.endpoints.insert(tag | field_key(&prev[o..o + 4]))
+                            && let Some(v) = etc::reselect_a1(&prev[r.clone()], src, w)
+                        {
+                            push(&v);
+                        }
+                    }
                     None => {
                         if fields.endpoints.insert(tag | field_key(&prev[o..o + 4]))
                             && let Some(v) = etc::reselect(&prev[r.clone()], src, w)
@@ -2218,7 +2228,7 @@ fn optimize_chunk(
         Format::Bc4 => w[1..] == [0, 0, 0],
         Format::Bc5 => w[2..] == [0, 0],
         Format::Bc3 | Format::Bc6h | Format::Bc7 => false,
-        Format::Etc2Rgb | Format::Etc2Rgba | Format::EacR11 | Format::EacRg11 => false,
+        Format::Etc2Rgb | Format::Etc2Rgba | Format::Etc2RgbA1 | Format::EacR11 | Format::EacRg11 => false,
         Format::EacR11Snorm | Format::EacRg11Snorm => false,
         crate::format::astc!() => false,
     } && far_back > max_back;
@@ -2755,7 +2765,7 @@ fn optimize_chunk(
                 // Mode 6 (most RDO output): mode, endpoints and P0; then P1 and the indices.
                 Format::Bc7 => &[(0, 8), (8, 16)],
                 Format::Bc6h => &[(0, 16)],
-                Format::Etc2Rgb => &[(0, 4), (4, 8)],
+                Format::Etc2Rgb | Format::Etc2RgbA1 => &[(0, 4), (4, 8)],
                 Format::Etc2Rgba => &[(0, 2), (2, 8), (8, 12), (12, 16)],
                 Format::EacR11 | Format::EacR11Snorm => &[(0, 2), (2, 8)],
                 Format::EacRg11 | Format::EacRg11Snorm => &[(0, 2), (2, 8), (8, 10), (10, 16)],

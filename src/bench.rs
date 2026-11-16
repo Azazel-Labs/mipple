@@ -115,9 +115,13 @@ pub fn quality(format: Format, source: &Surface, dec: &Surface, normal: bool) ->
     let channels = format.metric_channels(source.has_alpha());
     let psnr = metrics::psnr(source, dec, &channels);
     let ssim = match format {
-        Format::Bc1 | Format::Bc3 | Format::Bc6h | Format::Bc7 | Format::Etc2Rgb | Format::Etc2Rgba => {
-            metrics::ssim_luma(source, dec)
-        }
+        Format::Bc1
+        | Format::Bc3
+        | Format::Bc6h
+        | Format::Bc7
+        | Format::Etc2Rgb
+        | Format::Etc2Rgba
+        | Format::Etc2RgbA1 => metrics::ssim_luma(source, dec),
         crate::format::astc!() => metrics::ssim_luma(source, dec),
         Format::Bc4 | Format::EacR11 | Format::EacR11Snorm => metrics::ssim_channel(source, dec, 0),
         Format::Bc5 | Format::EacRg11 | Format::EacRg11Snorm => {

@@ -103,6 +103,10 @@ pub enum Format {
     Etc2Rgb,
     /// 8 bpp RGBA for mobile: an EAC alpha block plus ETC2 RGB (the BC3 analogue).
     Etc2Rgba,
+    /// 4 bpp RGB with 1-bit alpha for mobile (punch-through: cutouts, foliage, the BC1A
+    /// analogue). Texels below alpha 128 decode transparent black.
+    #[cfg_attr(feature = "cli", value(name = "etc2-rgb-a1"))]
+    Etc2RgbA1,
     /// 4 bpp single channel for mobile, 11-bit (the BC4 analogue).
     EacR11,
     /// 8 bpp two channels for mobile, 11-bit (the BC5 analogue: normals).
@@ -178,7 +182,7 @@ macro_rules! astc {
 pub(crate) use astc;
 
 impl Format {
-    pub const ALL: [Format; 26] = [
+    pub const ALL: [Format; 27] = [
         Format::Bc1,
         Format::Bc3,
         Format::Bc4,
@@ -187,6 +191,7 @@ impl Format {
         Format::Bc7,
         Format::Etc2Rgb,
         Format::Etc2Rgba,
+        Format::Etc2RgbA1,
         Format::EacR11,
         Format::EacRg11,
         Format::EacR11Snorm,
@@ -217,6 +222,7 @@ impl Format {
             Format::Bc7 => "bc7",
             Format::Etc2Rgb => "etc2-rgb",
             Format::Etc2Rgba => "etc2-rgba",
+            Format::Etc2RgbA1 => "etc2-rgb-a1",
             Format::EacR11 => "eac-r11",
             Format::EacRg11 => "eac-rg11",
             Format::EacR11Snorm => "eac-r11-snorm",
@@ -244,6 +250,7 @@ impl Format {
             self,
             Format::Etc2Rgb
                 | Format::Etc2Rgba
+                | Format::Etc2RgbA1
                 | Format::EacR11
                 | Format::EacRg11
                 | Format::EacR11Snorm
@@ -286,7 +293,7 @@ impl Format {
     /// Bytes per block (of [`Format::block_dims`] texels).
     pub fn block_bytes(self) -> usize {
         match self {
-            Format::Bc1 | Format::Bc4 | Format::Etc2Rgb | Format::EacR11 | Format::EacR11Snorm => 8,
+            Format::Bc1 | Format::Bc4 | Format::Etc2Rgb | Format::Etc2RgbA1 | Format::EacR11 | Format::EacR11Snorm => 8,
             Format::Bc3
             | Format::Bc5
             | Format::Bc6h
@@ -322,7 +329,7 @@ impl Format {
     pub fn supports_srgb(self) -> bool {
         matches!(
             self,
-            Format::Bc1 | Format::Bc3 | Format::Bc7 | Format::Etc2Rgb | Format::Etc2Rgba
+            Format::Bc1 | Format::Bc3 | Format::Bc7 | Format::Etc2Rgb | Format::Etc2Rgba | Format::Etc2RgbA1
         ) || self.is_astc()
     }
 
@@ -340,6 +347,8 @@ impl Format {
             (Format::Bc7, true) => 146,        // VK_FORMAT_BC7_SRGB_BLOCK
             (Format::Etc2Rgb, false) => 147,   // VK_FORMAT_ETC2_R8G8B8_UNORM_BLOCK
             (Format::Etc2Rgb, true) => 148,    // VK_FORMAT_ETC2_R8G8B8_SRGB_BLOCK
+            (Format::Etc2RgbA1, false) => 149, // VK_FORMAT_ETC2_R8G8B8A1_UNORM_BLOCK
+            (Format::Etc2RgbA1, true) => 150,  // VK_FORMAT_ETC2_R8G8B8A1_SRGB_BLOCK
             (Format::Etc2Rgba, false) => 151,  // VK_FORMAT_ETC2_R8G8B8A8_UNORM_BLOCK
             (Format::Etc2Rgba, true) => 152,   // VK_FORMAT_ETC2_R8G8B8A8_SRGB_BLOCK
             (Format::EacR11, _) => 153,        // VK_FORMAT_EAC_R11_UNORM_BLOCK
@@ -391,6 +400,8 @@ impl Format {
             146 => (Format::Bc7, true),
             147 => (Format::Etc2Rgb, false),
             148 => (Format::Etc2Rgb, true),
+            149 => (Format::Etc2RgbA1, false),
+            150 => (Format::Etc2RgbA1, true),
             151 => (Format::Etc2Rgba, false),
             152 => (Format::Etc2Rgba, true),
             153 => (Format::EacR11, false),
@@ -442,7 +453,7 @@ impl Format {
             Format::Bc6h => [1, 1, 1, 0],
             Format::Bc7 => [1, 1, 1, 1],
             Format::Etc2Rgb => [1, 1, 1, 0],
-            Format::Etc2Rgba => [1, 1, 1, 1],
+            Format::Etc2Rgba | Format::Etc2RgbA1 => [1, 1, 1, 1],
             Format::EacR11 | Format::EacR11Snorm => [1, 0, 0, 0],
             Format::EacRg11 | Format::EacRg11Snorm => [1, 1, 0, 0],
             astc!() => [1, 1, 1, 1],
@@ -455,8 +466,8 @@ impl Format {
             Format::Bc1 | Format::Bc6h | Format::Etc2Rgb => vec![0, 1, 2],
             Format::Bc4 | Format::EacR11 | Format::EacR11Snorm => vec![0],
             Format::Bc5 | Format::EacRg11 | Format::EacRg11Snorm => vec![0, 1],
-            Format::Bc3 | Format::Bc7 | Format::Etc2Rgba if has_alpha => vec![0, 1, 2, 3],
-            Format::Bc3 | Format::Bc7 | Format::Etc2Rgba => vec![0, 1, 2],
+            Format::Bc3 | Format::Bc7 | Format::Etc2Rgba | Format::Etc2RgbA1 if has_alpha => vec![0, 1, 2, 3],
+            Format::Bc3 | Format::Bc7 | Format::Etc2Rgba | Format::Etc2RgbA1 => vec![0, 1, 2],
             astc!() if has_alpha => vec![0, 1, 2, 3],
             astc!() => vec![0, 1, 2],
         }
@@ -483,6 +494,7 @@ impl Format {
             Format::Bc7 => out = bc7::encode(px, w, opts.searched()),
             Format::Etc2Rgb => out[..8].copy_from_slice(&etc::encode_block(px, effort)),
             Format::Etc2Rgba => out = etc::encode_block_rgba(px, effort),
+            Format::Etc2RgbA1 => out[..8].copy_from_slice(&etc::encode_block_a1(px, effort)),
             Format::EacR11 | Format::EacRg11 | Format::EacR11Snorm | Format::EacRg11Snorm => {
                 let kind = if self.is_signed() {
                     eac::Kind::R11Snorm
@@ -513,6 +525,7 @@ impl Format {
             Format::Bc7 => bc7::decode(raw, out),
             Format::Etc2Rgb => etc::decode(raw, out),
             Format::Etc2Rgba => etc::decode_rgba(raw, out),
+            Format::Etc2RgbA1 => etc::decode_a1(raw, out),
             Format::EacR11 | Format::EacR11Snorm => eac::decode_r11_block(raw, out, self.is_signed()),
             Format::EacRg11 | Format::EacRg11Snorm => eac::decode_rg11_block(raw, out, self.is_signed()),
             astc!() => panic!("{self}: {NOT_4X4}"),

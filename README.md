@@ -159,8 +159,8 @@ WebGPU and win (BC7 effort 5: 42 vs 902 ms for a 512² mip chain in Chrome). Car
   and log2 RMSE in linear light; `scripts/compete_bc6h.py` grades it against ISPC, texconv and
   Compressonator. `--lambda` runs an RDO pass for it with a log-space distortion (about 42% smaller Zstd
   files at λ 2). No GPU kernel for it yet.
-- ETC2 RGB (individual, differential, T, H and planar modes), ETC2 RGBA8, and EAC R11 / RG11 (unsigned and
-  signed) encoders and decoders, KTX2 only, with the same RDO pass; `scripts/compete_etc.py` grades them against
+- ETC2 RGB (individual, differential, T, H and planar modes), ETC2 RGB A1 (punch-through alpha), ETC2 RGBA8,
+  and EAC R11 / RG11 (unsigned and signed) encoders and decoders, KTX2 only, with the same RDO pass; `scripts/compete_etc.py` grades them against
   Compressonator. CPU only.
 - ASTC LDR encoders and decoders for all 14 2D footprints, 4x4 to 12x12 (1-3 partitions, dual plane, every
   weight grid of the footprint), to KTX2 or `.astc`, encoded for sRGB or linear decoding;

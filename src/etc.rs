@@ -15,6 +15,14 @@
 //!   distance, then alternating reassignment and refit, and (higher efforts) a ±1 descent.
 //! - Planar: a least-squares plane per channel, then a search of its quantized neighborhood.
 //!   Channels are independent, so each is searched on its own.
+//!
+//! ETC2 RGB A1 ([`decode_a1`], [`encode_block_a1`]) reuses the layout with bit 33 as an opaque
+//! flag instead of the individual/differential bit (so there is no individual mode). Opaque
+//! blocks decode as ETC2; in a punch-through block, selector 2 is transparent black (in
+//! differential mode selector 0 also loses its modifier, leaving the base color and ±b), and
+//! planar blocks are always opaque. Blocks with any texel below alpha 128 are punch-through:
+//! differential with the transparent texels on selector 2 and the rest scored on the other
+//! three, then T and H with the same mask.
 
 use crate::surface::{Block, Surface};
 
@@ -153,10 +161,13 @@ fn selector(lo: u32, p: usize) -> usize {
     ((lo >> (16 + p) & 1) << 1 | (lo >> p & 1)) as usize
 }
 
+/// Unclamped paint colors by subblock and selector.
+type Paints = [[[i32; 3]; 4]; 2];
+
 /// The four colors (unclamped) a texel can take in each subblock, by selector, and the flip bit, for
 /// individual, differential, T and H blocks (T and H give both subblocks the same paint colors).
 /// `None` for planar blocks, which have no selectors.
-fn paints(raw: &[u8]) -> Option<([[[i32; 3]; 4]; 2], bool)> {
+fn paints(raw: &[u8]) -> Option<(Paints, bool)> {
     let hi = u32::from_be_bytes([raw[0], raw[1], raw[2], raw[3]]);
     let field = |shift: u32, bits: u32| (hi >> shift & ((1 << bits) - 1)) as i32;
     let etc1 = |c1: [i32; 3], c2: [i32; 3]| {
@@ -557,7 +568,7 @@ struct Pick {
 }
 
 /// The ETC1 half of the search for one flip: best individual and differential encodings.
-fn etc1_flip(px: &Px, flip: bool, cfg: &Cfg, best: &mut Best) {
+fn etc1_flip(px: &Px, flip: bool, cfg: &Cfg, best: &mut Best, individual: bool) {
     let subs = [subblock(px, flip, false), subblock(px, flip, true)];
     let mut ranks = [Ranker::new(&subs[0]), Ranker::new(&subs[1])];
     let exact = |s: &Sub, q: [i32; 3], bits: u32| {
@@ -572,7 +583,7 @@ fn etc1_flip(px: &Px, flip: bool, cfg: &Cfg, best: &mut Best) {
         err: u32::MAX,
         table: 0,
     }; 2];
-    for k in 0..2 {
+    for k in (0..2).filter(|_| individual) {
         let list = shortlist(&mut ranks[k], 4, cfg);
         for i in 0..list.len {
             let p = exact(&subs[k], list.q[i], 4);
@@ -594,7 +605,7 @@ fn etc1_flip(px: &Px, flip: bool, cfg: &Cfg, best: &mut Best) {
         }
     }
     let err = u64::from(ind[0].err) + u64::from(ind[1].err);
-    if err < best.err {
+    if individual && err < best.err {
         best.set(err, pack_etc1(&subs, flip, false, ind));
     }
 
@@ -762,6 +773,39 @@ fn paint_selectors(px: &Px, paint: &[[i32; 3]; 4]) -> [u8; 16] {
     })
 }
 
+/// [`paint_error`] for an A1 punch-through block: paint color 2 is transparent, so opaque texels
+/// take one of the other three and transparent texels cost nothing.
+fn punch_paint_error(px: &Px, paint: &[[i32; 3]; 4], opaque: u16) -> u32 {
+    let mut e = [i32::MAX; 16];
+    for c in [paint[0], paint[1], paint[3]] {
+        let c = c.map(|v| v.clamp(0, 255));
+        for p in 0..16 {
+            let (dr, dg, db) = (px[0][p] - c[0], px[1][p] - c[1], px[2][p] - c[2]);
+            e[p] = e[p].min(dr * dr + dg * dg + db * db);
+        }
+    }
+    (0..16).filter(|&p| opaque >> p & 1 != 0).map(|p| e[p]).sum::<i32>() as u32
+}
+
+/// [`paint_selectors`] for an A1 punch-through block: 2 for transparent texels, otherwise the
+/// nearest of paint colors 0, 1 and 3.
+fn punch_selectors(px: &Px, paint: &[[i32; 3]; 4], opaque: u16) -> [u8; 16] {
+    std::array::from_fn(|p| {
+        if opaque >> p & 1 == 0 {
+            return 2;
+        }
+        let mut best = (i32::MAX, 0u8);
+        for k in [0u8, 1, 3] {
+            let c = paint[k as usize];
+            let e: i32 = (0..3).map(|ch| (px[ch][p] - c[ch].clamp(0, 255)).pow(2)).sum();
+            if e < best.0 {
+                best = (e, k);
+            }
+        }
+        best.1
+    })
+}
+
 /// T or H mode colors (444) and distance index.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Th {
@@ -769,6 +813,8 @@ struct Th {
     c1: [i32; 3],
     c2: [i32; 3],
     d: usize,
+    /// ETC2 A1 punch-through: the opaque texels (bit p for texel p); paint color 2 is transparent.
+    punch: Option<u16>,
 }
 
 impl Th {
@@ -787,22 +833,35 @@ impl Th {
     }
 
     /// H mode stores the distance's low bit in the color order, so equal colors need an odd one.
+    /// Punch-through H blocks cannot swap the colors to match (which one loses its +d color to
+    /// transparency depends on the order), so the order must already match.
     fn valid(&self) -> bool {
+        if self.h && self.punch.is_some() {
+            return usize::from(pack444(self.c1) >= pack444(self.c2)) == self.d & 1;
+        }
         !(self.h && self.c1 == self.c2 && self.d & 1 == 0)
     }
 
     fn error(&self, px: &Px) -> u32 {
-        if self.valid() {
-            paint_error(px, &self.paint())
-        } else {
-            u32::MAX
+        if !self.valid() {
+            return u32::MAX;
+        }
+        match self.punch {
+            None => paint_error(px, &self.paint()),
+            Some(opaque) => punch_paint_error(px, &self.paint(), opaque),
+        }
+    }
+
+    fn selectors(&self, px: &Px) -> [u8; 16] {
+        match self.punch {
+            None => paint_selectors(px, &self.paint()),
+            Some(opaque) => punch_selectors(px, &self.paint(), opaque),
         }
     }
 
     /// Refits both colors to the texels each paint color won.
     fn refit(&self, px: &Px) -> Th {
-        let paint = self.paint();
-        let sels = paint_selectors(px, &paint);
+        let sels = self.selectors(px);
         let d = DISTANCES[self.d];
         // Offset of each paint color from its group's base color, and the group.
         let (off, group): ([i32; 4], [usize; 4]) = if self.h {
@@ -813,6 +872,9 @@ impl Th {
         let mut sum = [[0i32; 3]; 2];
         let mut n = [0i32; 2];
         for p in 0..16 {
+            if self.punch.is_some_and(|o| o >> p & 1 == 0) {
+                continue;
+            }
             let s = sels[p] as usize;
             let g = group[s];
             n[g] += 1;
@@ -837,7 +899,8 @@ impl Th {
     fn pack(&self, px: &Px) -> u64 {
         let mut s = *self;
         let mut flip_sel = 0u8;
-        let mut hi: u32 = 2;
+        // Bit 33: differential for ETC2, opaque for A1.
+        let mut hi: u32 = if s.punch.is_some() { 0 } else { 2 };
         if s.h {
             let order = usize::from(pack444(s.c1) >= pack444(s.c2));
             if order != s.d & 1 {
@@ -863,7 +926,7 @@ impl Th {
             let (t, u) = (c1[0] >> 2, c1[0] & 3);
             hi |= if t + u >= 4 { 7 << 29 } else { 1 << 26 };
         }
-        let sels = paint_selectors(px, &self.paint());
+        let sels = self.selectors(px);
         let mut lo = 0;
         for (p, &k) in sels.iter().enumerate() {
             lo |= set_selector(p, k ^ flip_sel);
@@ -932,11 +995,12 @@ fn splits(px: &Px, n: usize) -> ([u16; 8], usize) {
     (out, n)
 }
 
-fn group_mean444(px: &Px, mask: u16, second: bool) -> [i32; 3] {
+/// Mean (444) of the texels in `include` on one side of `mask`.
+fn group_mean444(px: &Px, mask: u16, second: bool, include: u16) -> [i32; 3] {
     let mut sum = [0i32; 3];
     let mut n = 0;
     for p in 0..16 {
-        if (mask >> p & 1 != 0) == second {
+        if (mask >> p & 1 != 0) == second && include >> p & 1 != 0 {
             n += 1;
             for c in 0..3 {
                 sum[c] += px[c][p];
@@ -949,8 +1013,19 @@ fn group_mean444(px: &Px, mask: u16, second: bool) -> [i32; 3] {
     sum.map(|s| ((s * 2 + n * 17) / (n * 34)).clamp(0, 15))
 }
 
-fn th_search(px: &Px, cfg: &Cfg, best: &mut Best) {
-    let (masks, n) = splits(px, cfg.splits);
+/// T and H search; `punch` (the opaque texels) for an A1 punch-through block.
+fn th_search(px: &Px, cfg: &Cfg, best: &mut Best, punch: Option<u16>) {
+    let include = punch.unwrap_or(u16::MAX);
+    // Transparent texels take the opaque mean, so they do not steer the split.
+    let filled;
+    let split_px = match punch {
+        None => px,
+        Some(opaque) => {
+            filled = fill_transparent(px, opaque);
+            &filled
+        }
+    };
+    let (masks, n) = splits(split_px, cfg.splits);
     for h in [false, true] {
         let mut top = (
             u32::MAX,
@@ -959,14 +1034,20 @@ fn th_search(px: &Px, cfg: &Cfg, best: &mut Best) {
                 c1: [0; 3],
                 c2: [0; 3],
                 d: 0,
+                punch,
             },
         );
         for &mask in &masks[..n] {
-            let (ga, gb) = (group_mean444(px, mask, false), group_mean444(px, mask, true));
-            let orders: &[([i32; 3], [i32; 3])] = if h { &[(ga, gb)] } else { &[(ga, gb), (gb, ga)] };
+            let (ga, gb) = (
+                group_mean444(px, mask, false, include),
+                group_mean444(px, mask, true, include),
+            );
+            // H's color order is free (packing swaps), except in punch-through blocks.
+            let both = [(ga, gb), (gb, ga)];
+            let orders = if h && punch.is_none() { &both[..1] } else { &both[..] };
             for &(c1, c2) in orders {
                 for d in 0..8 {
-                    let mut th = Th { h, c1, c2, d };
+                    let mut th = Th { h, c1, c2, d, punch };
                     let mut e = th.error(px);
                     for _ in 0..cfg.rounds {
                         let next = th.refit(px);
@@ -1013,6 +1094,19 @@ fn th_search(px: &Px, cfg: &Cfg, best: &mut Best) {
             best.set(u64::from(top.0), top.1.pack(px));
         }
     }
+}
+
+/// `px` with each transparent texel (not in `opaque`) set to the mean of the opaque ones.
+fn fill_transparent(px: &Px, opaque: u16) -> Px {
+    let n = opaque.count_ones().max(1) as i32;
+    let mut out = *px;
+    for c in 0..3 {
+        let mean = (0..16).filter(|&p| opaque >> p & 1 != 0).map(|p| px[c][p]).sum::<i32>() / n;
+        for p in (0..16).filter(|&p| opaque >> p & 1 == 0) {
+            out[c][p] = mean;
+        }
+    }
+    out
 }
 
 /// Least-squares plane weights: [O, H, V] = W · texels, for the basis (1 − x/4 − y/4, x/4, y/4).
@@ -1119,13 +1213,13 @@ fn encode_px(px: &Px, cfg: &Cfg) -> [u8; 8] {
     let mut best = Best { err: u64::MAX, bits: 0 };
     planar_search(px, cfg, &mut best);
     if best.err > 0 {
-        etc1_flip(px, false, cfg, &mut best);
+        etc1_flip(px, false, cfg, &mut best, true);
     }
     if best.err > 0 {
-        etc1_flip(px, true, cfg, &mut best);
+        etc1_flip(px, true, cfg, &mut best, true);
     }
     if cfg.th && best.err > 0 {
-        th_search(px, cfg, &mut best);
+        th_search(px, cfg, &mut best, None);
     }
     best.bits.to_be_bytes()
 }
@@ -1176,24 +1270,27 @@ pub fn encode_surface_rgba(surface: &Surface, effort: u8) -> Vec<u8> {
     out
 }
 
-fn encode_span(surface: &Surface, first: usize, out: &mut [u8], effort: u8) {
+fn encode_span(surface: &Surface, first: usize, out: &mut [u8], effort: u8, a1: bool) {
     let cfg = cfg(effort);
     let bw = surface.blocks_x() as usize;
     for (k, o) in out.as_chunks_mut::<8>().0.iter_mut().enumerate() {
         let i = first + k;
         let px = surface.read_block((i % bw) as u32, (i / bw) as u32);
-        *o = encode_px(&texels(&px), &cfg);
+        *o = if a1 {
+            encode_a1_px(&texels(&px), opaque_mask(&px), &cfg)
+        } else {
+            encode_px(&texels(&px), &cfg)
+        };
     }
 }
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma")]
-fn encode_span_avx2(surface: &Surface, first: usize, out: &mut [u8], effort: u8) {
-    encode_span(surface, first, out, effort);
+fn encode_span_avx2(surface: &Surface, first: usize, out: &mut [u8], effort: u8, a1: bool) {
+    encode_span(surface, first, out, effort, a1);
 }
 
-/// Encodes a whole surface; returns raw 8-byte blocks in raster order.
-pub fn encode_surface(surface: &Surface, effort: u8) -> Vec<u8> {
+fn encode_surface_with(surface: &Surface, effort: u8, a1: bool) -> Vec<u8> {
     use rayon::prelude::*;
     const SPAN: usize = 256;
     let mut out = vec![0u8; surface.block_count() * 8];
@@ -1201,10 +1298,318 @@ pub fn encode_surface(surface: &Surface, effort: u8) -> Vec<u8> {
     out.par_chunks_mut(SPAN * 8).enumerate().for_each(|(ci, o)| match lvl {
         #[cfg(target_arch = "x86_64")]
         // SAFETY: `level()` returns Avx2 only when the CPU reports AVX2 and FMA.
-        crate::simd::Level::Avx2 => unsafe { encode_span_avx2(surface, ci * SPAN, o, effort) },
-        _ => encode_span(surface, ci * SPAN, o, effort),
+        crate::simd::Level::Avx2 => unsafe { encode_span_avx2(surface, ci * SPAN, o, effort, a1) },
+        _ => encode_span(surface, ci * SPAN, o, effort, a1),
     });
     out
+}
+
+/// Encodes a whole surface; returns raw 8-byte blocks in raster order.
+pub fn encode_surface(surface: &Surface, effort: u8) -> Vec<u8> {
+    encode_surface_with(surface, effort, false)
+}
+
+/// Encodes a whole surface as ETC2 RGB A1; returns raw 8-byte blocks in raster order.
+pub fn encode_surface_a1(surface: &Surface, effort: u8) -> Vec<u8> {
+    encode_surface_with(surface, effort, true)
+}
+
+/// The opaque texels of a block for ETC2 RGB A1 (alpha 128 and up): bit p for column-major
+/// texel p.
+fn opaque_mask(px: &Block) -> u16 {
+    (0..16).filter(|&p| px[raster(p)][3] >= 128).fold(0, |m, p| m | 1 << p)
+}
+
+/// `raw` with bit 33 set: the ETC2 block whose mode an A1 block decodes in.
+fn as_differential(raw: &[u8]) -> [u8; 8] {
+    let mut r = [0u8; 8];
+    r.copy_from_slice(&raw[..8]);
+    r[3] |= 2;
+    r
+}
+
+/// The paint colors of an A1 block by subblock and selector, its flip, and whether it is
+/// punch-through (selector 2 then transparent). `None` for planar blocks.
+fn a1_paints(raw: &[u8]) -> Option<(Paints, bool, bool)> {
+    let r = as_differential(raw);
+    let (mut pal, flip) = paints(&r)?;
+    let punch = raw[3] & 2 == 0;
+    if punch && mode(&r) == Mode::Differential {
+        // Selector 0 loses its modifier: the base color, midway between +a and -a.
+        for s in &mut pal {
+            s[0] = std::array::from_fn(|c| (s[0][c] + s[2][c]) / 2);
+        }
+    }
+    Some((pal, flip, punch))
+}
+
+/// Decodes one 8-byte ETC2 RGB A1 block: transparent texels are (0, 0, 0, 0), the rest opaque.
+pub fn decode_a1(raw: &[u8], out: &mut Block) {
+    let Some((pal, flip, punch)) = a1_paints(raw) else {
+        return decode(&as_differential(raw), out);
+    };
+    let lo = u32::from_be_bytes([raw[4], raw[5], raw[6], raw[7]]);
+    for p in 0..16 {
+        let sel = selector(lo, p);
+        out[raster(p)] = if punch && sel == 2 {
+            [0; 4]
+        } else {
+            let c = pal[usize::from(second(p, flip))][sel];
+            [
+                c[0].clamp(0, 255) as u8,
+                c[1].clamp(0, 255) as u8,
+                c[2].clamp(0, 255) as u8,
+                255,
+            ]
+        };
+    }
+}
+
+/// [`reselect`] for ETC2 RGB A1: transparent texels of `px` take selector 2 in a punch-through
+/// block. `None` for planar blocks, and for opaque ones when `px` has transparent texels.
+pub fn reselect_a1(raw: &[u8], px: &Block, w: &[u32; 4]) -> Option<[u8; 8]> {
+    let (pal, flip, punch) = a1_paints(raw)?;
+    let opaque = opaque_mask(px);
+    if !punch && opaque != u16::MAX {
+        return None;
+    }
+    let pal = pal.map(|s| s.map(|c| c.map(|v| v.clamp(0, 255))));
+    let mut lo = 0u32;
+    for p in 0..16 {
+        if opaque >> p & 1 == 0 {
+            lo |= set_selector(p, 2);
+            continue;
+        }
+        let t = px[raster(p)];
+        let mut best = (u32::MAX, 0u8);
+        for (k, c) in pal[usize::from(second(p, flip))].iter().enumerate() {
+            if punch && k == 2 {
+                continue;
+            }
+            let e: u32 = (0..3)
+                .map(|ch| (i32::from(t[ch]) - c[ch]).unsigned_abs().pow(2) * w[ch])
+                .sum();
+            if e < best.0 {
+                best = (e, k as u8);
+            }
+        }
+        lo |= set_selector(p, best.1);
+    }
+    let mut out = [0u8; 8];
+    out[..4].copy_from_slice(&raw[..4]);
+    out[4..].copy_from_slice(&lo.to_be_bytes());
+    Some(out)
+}
+
+/// Encodes one ETC2 RGB A1 block: texels below alpha 128 become transparent.
+pub fn encode_block_a1(px: &Block, effort: u8) -> [u8; 8] {
+    encode_a1_px(&texels(px), opaque_mask(px), &cfg(effort))
+}
+
+fn encode_a1_px(px: &Px, opaque: u16, cfg: &Cfg) -> [u8; 8] {
+    let mut best = Best { err: u64::MAX, bits: 0 };
+    if opaque == u16::MAX {
+        // ETC2 without the individual mode.
+        planar_search(px, cfg, &mut best);
+        for flip in [false, true] {
+            if best.err > 0 {
+                etc1_flip(px, flip, cfg, &mut best, false);
+            }
+        }
+        if cfg.th && best.err > 0 {
+            th_search(px, cfg, &mut best, None);
+        }
+    } else if opaque == 0 {
+        // Punch-through differential, every selector 2.
+        best.bits = 0xffff_0000;
+    } else {
+        for flip in [false, true] {
+            if best.err > 0 {
+                punch_flip(px, opaque, flip, cfg, &mut best);
+            }
+        }
+        if cfg.th && best.err > 0 {
+            th_search(px, cfg, &mut best, Some(opaque));
+        }
+    }
+    best.bits.to_be_bytes()
+}
+
+/// The opaque texels of one subblock, compacted, and their count.
+fn opaque_sub(px: &Px, opaque: u16, flip: bool, s: bool) -> (Sub, usize) {
+    let mut out = [[0; 8]; 3];
+    let mut n = 0;
+    for p in 0..16 {
+        if second(p, flip) == s && opaque >> p & 1 != 0 {
+            for c in 0..3 {
+                out[c][n] = px[c][p];
+            }
+            n += 1;
+        }
+    }
+    (out, n)
+}
+
+/// Punch-through differential palette offset by selector (2, transparent, has none).
+#[inline(always)]
+fn punch_modifier(table: usize, sel: usize) -> i32 {
+    if sel & 1 == 0 { 0 } else { modifier(table, sel) }
+}
+
+/// Exact error of the first `n` texels of a punch-through differential subblock with base `c`
+/// (8-bit) for every table: (best error, its table).
+fn punch_sub_error(s: &Sub, n: usize, c: [i32; 3]) -> (u32, u8) {
+    let mut best = (u32::MAX, 0u8);
+    for t in 0..8 {
+        let mut total = 0u32;
+        for i in 0..n {
+            let mut e = i32::MAX;
+            for sel in [0, 1, 3] {
+                let m = punch_modifier(t, sel);
+                let d: i32 = (0..3).map(|k| (s[k][i] - (c[k] + m).clamp(0, 255)).pow(2)).sum();
+                e = e.min(d);
+            }
+            total += e as u32;
+        }
+        if total < best.0 {
+            best = (total, t as u8);
+        }
+    }
+    best
+}
+
+/// The punch-through differential half of the A1 search for one flip: candidate bases on the 555
+/// lattice around each subblock's opaque mean, scored exactly, paired within the delta window
+/// and refit. A subblock with no opaque texel takes the other's base.
+fn punch_flip(px: &Px, opaque: u16, flip: bool, cfg: &Cfg, best: &mut Best) {
+    let subs = [opaque_sub(px, opaque, flip, false), opaque_sub(px, opaque, flip, true)];
+    let exact = |k: usize, q: [i32; 3]| {
+        let (err, table) = punch_sub_error(&subs[k].0, subs[k].1, q.map(ext5));
+        Pick { q, err, table }
+    };
+    let r = cfg.luma.min(3);
+    let lists: [Vec<Pick>; 2] = std::array::from_fn(|k| {
+        let (s, n) = (&subs[k].0, subs[k].1 as i32);
+        if n == 0 {
+            return Vec::new();
+        }
+        let q0: [i32; 3] = std::array::from_fn(|c| {
+            let sum: i32 = s[c][..n as usize].iter().sum();
+            ((sum * 62 + n * 255) / (n * 510)).clamp(0, 31)
+        });
+        let mut list = Vec::new();
+        for dr in -r..=r {
+            for dg in -r..=r {
+                for db in -r..=r {
+                    let q = [q0[0] + dr, q0[1] + dg, q0[2] + db];
+                    if q.iter().all(|v| (0..32).contains(v)) {
+                        list.push(exact(k, q));
+                    }
+                }
+            }
+        }
+        list.sort_by_key(|p| p.err);
+        list.truncate(cfg.short.max(1));
+        list
+    });
+    let ok = |a: [i32; 3], b: [i32; 3]| (0..3).all(|c| (-4..=3).contains(&(b[c] - a[c])));
+    let free = |q: [i32; 3]| Pick { q, err: 0, table: 0 };
+    let mut pair = match (lists[0].first(), lists[1].first()) {
+        (None, None) => return,
+        (Some(&a), None) => [a, free(a.q)],
+        (None, Some(&b)) => [free(b.q), b],
+        (Some(_), Some(_)) => {
+            let mut pair: Option<[Pick; 2]> = None;
+            let mut pair_err = u64::MAX;
+            let mut consider = |a: Pick, b: Pick| {
+                let e = u64::from(a.err) + u64::from(b.err);
+                if e < pair_err && ok(a.q, b.q) {
+                    pair_err = e;
+                    pair = Some([a, b]);
+                }
+            };
+            for &a in &lists[0] {
+                for &b in &lists[1] {
+                    consider(a, b);
+                }
+            }
+            // Projections of each side's best few into the other side's window.
+            let proj = lists[0].len().min(lists[1].len()).min(3);
+            for i in 0..proj {
+                let a = lists[0][i];
+                for b in &lists[1][..proj] {
+                    let qb: [i32; 3] = std::array::from_fn(|c| b.q[c].clamp(a.q[c] - 4, a.q[c] + 3));
+                    consider(a, exact(1, qb));
+                }
+                let b = lists[1][i];
+                for a in &lists[0][..proj] {
+                    let qa: [i32; 3] = std::array::from_fn(|c| a.q[c].clamp(b.q[c] - 3, b.q[c] + 4));
+                    consider(exact(0, qa), b);
+                }
+            }
+            pair.expect("projections give a pair in the window")
+        }
+    };
+    // Least-squares refits of each subblock with opaque texels, kept inside the delta window.
+    for _ in 0..cfg.refits {
+        let mut improved = false;
+        for k in 0..2 {
+            let (s, n) = (&subs[k].0, subs[k].1);
+            if n == 0 {
+                continue;
+            }
+            let (c, t) = (pair[k].q.map(ext5), pair[k].table as usize);
+            let mut sum = [0i32; 3];
+            for i in 0..n {
+                let mut sel = (i32::MAX, 0);
+                for q in [0, 1, 3] {
+                    let m = punch_modifier(t, q);
+                    let d: i32 = (0..3).map(|ch| (s[ch][i] - (c[ch] + m).clamp(0, 255)).pow(2)).sum();
+                    if d < sel.0 {
+                        sel = (d, m);
+                    }
+                }
+                for ch in 0..3 {
+                    sum[ch] += s[ch][i] - sel.1;
+                }
+            }
+            let n = n as i32;
+            let other = pair[1 - k].q;
+            let q: [i32; 3] = std::array::from_fn(|ch| {
+                let q = ((sum[ch] * 62 + n * 255) / (n * 510)).clamp(0, 31);
+                if k == 0 {
+                    q.clamp(other[ch] - 3, other[ch] + 4)
+                } else {
+                    q.clamp(other[ch] - 4, other[ch] + 3)
+                }
+            });
+            if q != pair[k].q {
+                let p = exact(k, q);
+                if p.err < pair[k].err {
+                    pair[k] = p;
+                    improved = true;
+                }
+            }
+        }
+        if !improved {
+            break;
+        }
+    }
+    let err = u64::from(pair[0].err) + u64::from(pair[1].err);
+    if err >= best.err {
+        return;
+    }
+    let hi = etc1_header(flip, true, pair) & !2;
+    let mut lo = 0u32;
+    for k in 0..2 {
+        let (c, t) = (pair[k].q.map(ext5), pair[k].table as usize);
+        let paint: [[i32; 3]; 4] = std::array::from_fn(|sel| c.map(|v| v + punch_modifier(t, sel)));
+        let sels = punch_selectors(px, &paint, opaque);
+        for p in (0..16).filter(|&p| second(p, flip) == (k == 1)) {
+            lo |= set_selector(p, sels[p]);
+        }
+    }
+    best.set(err, u64::from(hi) << 32 | u64::from(lo));
 }
 
 #[cfg(test)]
@@ -1271,6 +1676,7 @@ mod tests {
             c1: [13, 2, 9],
             c2: [4, 8, 15],
             d: 5,
+            punch: None,
         };
         let px: Px = [[0; 16]; 3];
         let mut bits = th.pack(&px);
@@ -1291,7 +1697,13 @@ mod tests {
             ([2, 9, 13], [7, 1, 0], 3),
             ([7, 1, 0], [2, 9, 13], 6),
         ] {
-            let th = Th { h: true, c1, c2, d };
+            let th = Th {
+                h: true,
+                c1,
+                c2,
+                d,
+                punch: None,
+            };
             let px: Px = [[0; 16]; 3];
             let bits = th.pack(&px) & !0xffff_ffff | u64::from(sels([0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3]));
             assert_eq!(mode(&bits.to_be_bytes()), Mode::H);
@@ -1355,6 +1767,7 @@ mod tests {
                 c1: c,
                 c2: [1, 2, 3],
                 d: 0,
+                punch: None,
             };
             assert_eq!(mode(&t.pack(&px).to_be_bytes()), Mode::T);
             for d in [0, 1] {
@@ -1363,6 +1776,7 @@ mod tests {
                     c1: c,
                     c2: [5, 9, 1],
                     d,
+                    punch: None,
                 };
                 if h.valid() {
                     assert_eq!(mode(&h.pack(&px).to_be_bytes()), Mode::H);
@@ -1483,6 +1897,149 @@ mod tests {
             for (k, b) in raw.as_chunks::<8>().0.iter().enumerate() {
                 let px = s.read_block(k as u32 % bw, k as u32 / bw);
                 assert_eq!(*b, encode_block(&px, effort));
+            }
+        }
+    }
+
+    fn decoded_a1(raw: &[u8]) -> Block {
+        let mut out = [[0u8; 4]; 16];
+        decode_a1(raw, &mut out);
+        out
+    }
+
+    /// `sample_block` with texels below alpha 128 at random (none for `holes` 0, all for 16).
+    fn holed_block(seed: &mut u32, kind: u32, holes: u32) -> Block {
+        let mut b = sample_block(seed, kind);
+        for t in &mut b {
+            t[3] = if rng(seed) % 16 < holes {
+                (rng(seed) % 128) as u8
+            } else {
+                128 + (rng(seed) % 128) as u8
+            };
+        }
+        b
+    }
+
+    /// An A1 block's alpha mismatches against its source's 1-bit alpha, and its RGB error over
+    /// the source's opaque texels.
+    fn a1_error(raw: &[u8], px: &Block) -> (usize, u32) {
+        let out = decoded_a1(raw);
+        let mut miss = 0;
+        let mut err = 0;
+        for (a, b) in px.iter().zip(&out) {
+            let opaque = a[3] >= 128;
+            miss += usize::from(b[3] != if opaque { 255 } else { 0 });
+            if opaque {
+                err += (0..3).map(|c| u32::from(a[c].abs_diff(b[c])).pow(2)).sum::<u32>();
+            } else {
+                assert_eq!(*b, [0; 4]);
+            }
+        }
+        (miss, err)
+    }
+
+    #[test]
+    fn a1_punch_through_decode() {
+        // The differential block of `differential_mode_with_flip` (tables 0 and 1, flip), with
+        // selector y on texel (x, y) so the top half takes 0 and 1, the bottom 2 and 3.
+        let hi: u32 = 20 << 27
+            | (-4i32 as u32 & 7) << 24
+            | 3 << 19
+            | 3 << 16
+            | 31 << 11
+            | (-1i32 as u32 & 7) << 8
+            | 1 << 2
+            | 2
+            | 1;
+        let lo = sels(std::array::from_fn(|p| (p % 4) as u8));
+        let opaque = (u64::from(hi) << 32 | u64::from(lo)).to_be_bytes();
+        // Bit 33 set: opaque, decoded as ETC2.
+        assert_eq!(decoded_a1(&opaque), decoded(u64::from_be_bytes(opaque)));
+        let punch = (u64::from(hi & !2) << 32 | u64::from(lo)).to_be_bytes();
+        let b = decoded_a1(&punch);
+        // Top half: base (165, 24, 255) with no modifier, then +8.
+        assert_eq!(b[1], [165, 24, 255, 255]);
+        assert_eq!(b[4 + 1], [173, 32, 255, 255]);
+        // Bottom half: transparent, then (132, 49, 247) − 17.
+        assert_eq!(b[8 + 1], [0; 4]);
+        assert_eq!(b[12 + 1], [115, 32, 230, 255]);
+        // Planar blocks ignore the opaque flag.
+        let planar = [0x00, 0x00, 0x04, 0x00, 0x12, 0x34, 0x56, 0x78];
+        assert_eq!(mode(&as_differential(&planar)), Mode::Planar);
+        assert!(decoded_a1(&planar).iter().all(|t| t[3] == 255));
+    }
+
+    /// Encoded A1 blocks keep the source's 1-bit alpha exactly, reach every punch-through mode,
+    /// and stay near ETC2 on opaque blocks (A1 has no individual mode).
+    #[test]
+    fn a1_encode_alpha_and_modes() {
+        let mut seed = 0x5eed_a1a1;
+        let mut punch_modes = std::collections::HashSet::new();
+        let (mut a1, mut etc2) = (0u64, 0u64);
+        for k in 0..600 {
+            let holes = [0, 1, 4, 8, 15, 16][k % 6];
+            let b = holed_block(&mut seed, (k / 6 % 4) as u32, holes);
+            for effort in [0, 5, 9] {
+                let raw = encode_block_a1(&b, effort);
+                let (miss, err) = a1_error(&raw, &b);
+                assert_eq!(miss, 0, "{k} effort {effort} raw {raw:02x?}");
+                if opaque_mask(&b) == u16::MAX {
+                    if effort == 5 {
+                        a1 += u64::from(err);
+                        etc2 += u64::from(block_error(&encode_block(&b, 5), &b));
+                    }
+                } else if raw[3] & 2 == 0 {
+                    punch_modes.insert(mode(&as_differential(&raw)));
+                }
+            }
+        }
+        assert!(a1 * 100 <= etc2 * 115, "{a1} vs {etc2}");
+        assert_eq!(punch_modes.len(), 3, "{punch_modes:?}");
+    }
+
+    /// Re-chosen A1 selectors keep the alpha and never lose against the block's own.
+    #[test]
+    fn a1_reselect() {
+        let mut seed = 0x0a1_5e1;
+        let w = [1, 1, 1, 0];
+        for k in 0..400 {
+            let b = holed_block(&mut seed, (k % 4) as u32, [0, 2, 8][k % 3]);
+            let raw = encode_block_a1(&b, 3);
+            let (_, e) = a1_error(&raw, &b);
+            match reselect_a1(&raw, &b, &w) {
+                None => assert!(
+                    mode(&as_differential(&raw)) == Mode::Planar || (raw[3] & 2 != 0 && opaque_mask(&b) != u16::MAX)
+                ),
+                Some(r) => {
+                    assert_eq!(r[..4], raw[..4]);
+                    let (miss, er) = a1_error(&r, &b);
+                    assert_eq!(miss, 0, "{k}");
+                    assert!(er <= e, "{k}: {er} vs {e}");
+                }
+            }
+            // Another block's head: alpha still holds when it is accepted.
+            let other = holed_block(&mut seed, (k % 4) as u32, [0, 2, 8][k % 3]);
+            if let Some(r) = reselect_a1(&raw, &other, &w) {
+                assert_eq!(a1_error(&r, &other).0, 0, "{k}");
+            }
+        }
+    }
+
+    #[test]
+    fn a1_surface_matches_blocks() {
+        let mut s = Surface::new(20, 12);
+        let mut seed = 11u32;
+        for (i, p) in s.pixels.iter_mut().enumerate() {
+            let (x, y) = ((i % 20) as u32, (i / 20) as u32);
+            let a = if (x + 2 * y) % 7 < 3 { 0 } else { 255 };
+            *p = [(x * 13) as u8, (y * 17) as u8, (rng(&mut seed) % 32) as u8, a];
+        }
+        for effort in [0, 5] {
+            let raw = encode_surface_a1(&s, effort);
+            let bw = s.blocks_x();
+            for (k, b) in raw.as_chunks::<8>().0.iter().enumerate() {
+                let px = s.read_block(k as u32 % bw, k as u32 / bw);
+                assert_eq!(*b, encode_block_a1(&px, effort), "block {k} effort {effort}");
             }
         }
     }

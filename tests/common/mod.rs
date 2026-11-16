@@ -34,6 +34,16 @@ pub fn reference_decode(format: Format, raw: &[u8]) -> [[u8; 4]; 16] {
         Format::Bc6h => panic!("no independent BC6H reference decoder here"),
         Format::Etc2Rgb => texture2ddecoder::decode_etc2_rgb_block(raw, &mut buf),
         Format::Etc2Rgba => texture2ddecoder::decode_etc2_rgba8_block(raw, &mut buf),
+        Format::Etc2RgbA1 => {
+            texture2ddecoder::decode_etc2_rgba1_block(raw, &mut buf);
+            // That decoder clears only alpha on punch-through texels; the Khronos specification
+            // decodes them as (0, 0, 0, 0).
+            for p in &mut buf {
+                if *p >> 24 == 0 {
+                    *p = 0;
+                }
+            }
+        }
         // texture2ddecoder's EAC R11 decoder departs from the Khronos specification, so these go
         // through the spec transcription below.
         Format::EacR11 => {

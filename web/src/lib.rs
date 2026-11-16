@@ -500,7 +500,7 @@ fn view(format: Format, s: &Surface, normal: bool) -> Vec<u8> {
                 [r, g, ((normal_from_rg(r, g)[2] + 1.0) * 127.5 + 0.5) as u8, 255]
             }
             Format::Bc5 | Format::EacRg11 | Format::EacRg11Snorm => [r, g, 0, 255],
-            Format::Bc3 | Format::Bc7 | Format::Etc2Rgba => [r, g, b, a],
+            Format::Bc3 | Format::Bc7 | Format::Etc2Rgba | Format::Etc2RgbA1 => [r, g, b, a],
             Format::Astc4x4
             | Format::Astc5x4
             | Format::Astc5x5
