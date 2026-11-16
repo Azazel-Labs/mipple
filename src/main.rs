@@ -205,7 +205,8 @@ struct EncodeArgs {
     effort: u8,
     /// RDO lambda; 0 disables RDO. Try 0.5 – 4. Default 0, except for ASTC, which gets a light
     /// pass looking one block back (`--max-back 1 --refine-back 1` unless given) at 0.03 (4x4),
-    /// 0.3 (6x6) or 0.5 (8x8). An explicit λ for ASTC searches 256 blocks back unless limited.
+    /// 0.3 (6x6), 0.5 (8x8), 2 (10x8), 3.5 (10x10), 4.5 (12x10) or 6 (12x12), other footprints
+    /// between by texel count. An explicit λ for ASTC searches 256 blocks back unless limited.
     #[arg(short, long)]
     lambda: Option<f32>,
     /// Treat the input as linear data (default for BC4/BC5; for BC6H, 8-bit input as linear 0-1

@@ -25,11 +25,22 @@ use crate::ranker::bc7::{RankBlock7, RankSrc7};
 use crate::surface::{Block, block_sse};
 use rayon::prelude::*;
 
-/// λ of ASTC's default light RDO pass at 4x4, 6x6 and 8x8 ([`RdoParams::default_for`]); other
-/// footprints interpolate by texel count ([`RdoParams::astc_default_lambda`]).
-/// At effort 5 on Kodak-24 these cost 0.005 / 0.021 / 0.007 dB PSNR for Zstd-19 files 0.7% / 2.8% / 2.3%
-/// smaller than no RDO (λ 0.06 / 0.5 / 1: 0.028 / 0.062 / 0.032 dB for 1.6% / 5.4% / 5.9%).
-const ASTC_DEFAULT_LAMBDA: [f32; 3] = [0.03, 0.3, 0.5];
+/// λ of ASTC's default light RDO pass by footprint texel count ([`RdoParams::default_for`]);
+/// footprints between interpolate linearly ([`RdoParams::astc_default_lambda`]).
+/// At effort 5 on Kodak-24, 4x4 / 6x6 / 8x8 cost 0.005 / 0.021 / 0.007 dB PSNR for Zstd-19 files
+/// 0.7% / 2.8% / 2.3% smaller than no RDO (λ 0.06 / 0.5 / 1: 0.028 / 0.062 / 0.032 dB for 1.6% /
+/// 5.4% / 5.9%). Block SSE grows with the footprint, so a given λ weighs rate less in large blocks:
+/// past 8x8 the knots (10x8, 10x10, 12x10, 12x12) are where an effort-0 λ step costs about 0.007 dB
+/// per 1% of Zstd size, as the smaller footprints' do (λ 0.5 there cost 0.003-0.009 dB for 2.5-4.4%).
+const ASTC_DEFAULT_LAMBDA: [(f32, f32); 7] = [
+    (16.0, 0.03),
+    (36.0, 0.3),
+    (64.0, 0.5),
+    (80.0, 2.0),
+    (100.0, 3.5),
+    (120.0, 4.5),
+    (144.0, 6.0),
+];
 
 /// RDO tuning knobs.
 #[derive(Clone, Copy, Debug)]
@@ -156,19 +167,16 @@ impl RdoParams {
     pub fn astc_default_lambda(format: Format) -> f32 {
         match format {
             crate::format::astc!() => {
-                // Piecewise linear in the texel count between the tuned footprints; 8x8's beyond.
+                // Piecewise linear in the texel count between the tuned footprints.
                 let (bw, bh) = format.block_dims();
                 let n = (bw * bh) as f32;
-                let [l4, l6, l8] = ASTC_DEFAULT_LAMBDA;
-                if n <= 16.0 {
-                    l4
-                } else if n <= 36.0 {
-                    l4 + (l6 - l4) * (n - 16.0) / 20.0
-                } else if n <= 64.0 {
-                    l6 + (l8 - l6) * (n - 36.0) / 28.0
-                } else {
-                    l8
+                let k = ASTC_DEFAULT_LAMBDA;
+                if n <= k[0].0 {
+                    return k[0].1;
                 }
+                k.windows(2).find(|w| n <= w[1].0).map_or(k[k.len() - 1].1, |w| {
+                    w[0].1 + (w[1].1 - w[0].1) * (n - w[0].0) / (w[1].0 - w[0].0)
+                })
             }
             _ => 0.0,
         }
@@ -3635,5 +3643,29 @@ mod tests {
         let (a, _) = m.cost(&twice);
         let (b, _) = m.cost(&distinct);
         assert!(a < b * 0.75, "repeated {a} vs distinct {b}");
+    }
+
+    /// The default ASTC λ hits the tuned knots and grows with the footprint.
+    #[test]
+    fn astc_default_lambda_knots() {
+        let l = RdoParams::astc_default_lambda;
+        for (f, want) in [
+            (Format::Astc4x4, 0.03),
+            (Format::Astc6x6, 0.3),
+            (Format::Astc8x8, 0.5),
+            (Format::Astc10x8, 2.0),
+            (Format::Astc10x10, 3.5),
+            (Format::Astc12x10, 4.5),
+            (Format::Astc12x12, 6.0),
+        ] {
+            assert!((l(f) - want).abs() < 1e-6, "{f}: {}", l(f));
+        }
+        let mut astc: Vec<Format> = Format::ALL.into_iter().filter(|f| f.is_astc()).collect();
+        astc.sort_by_key(|f| {
+            let (w, h) = f.block_dims();
+            w * h
+        });
+        assert!(astc.windows(2).all(|w| l(w[0]) <= l(w[1])));
+        assert_eq!(l(Format::Bc7), 0.0);
     }
 }

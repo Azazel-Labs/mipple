@@ -167,8 +167,9 @@ WebGPU and win (BC7 effort 5: 42 vs 902 ms for a 512² mip chain in Chrome). Car
   `scripts/compete_astc.py` grades them against Intel ISPC and Arm's astcenc (on the 24 Kodak images, effort 0
   beats ISPC fast in PSNR and SSIM in less time, and with a light RDO pass some setting beats each astcenc
   preset, fast to exhaustive, in PSNR, SSIM, Zstd and Deflate size and time at once, at all three footprints).
-  `encode` runs that light pass by default for ASTC (λ 0.03 / 0.3 / 0.5 at 4x4 / 6x6 / 8x8; `-l 0` turns it
-  off): at effort 5 it costs 0.005-0.021 dB PSNR for Zstd files 0.7-2.8% smaller.
+  `encode` runs that light pass by default for ASTC (λ 0.03 / 0.3 / 0.5 at 4x4 / 6x6 / 8x8, rising to 6 at
+  12x12; `-l 0` turns it off): at effort 5 it costs 0.005-0.021 dB PSNR for Zstd files 0.7-2.8% smaller at
+  4x4 to 8x8.
   CPU only; its RDO pass reads the surface itself (blocks are not 4x4).
 - An RDO pass shared by all formats, with an LZ rate model, smooth-block protection, a per-block error cap,
   and a real-Zstd check that reverts any chunk RDO didn't shrink.
