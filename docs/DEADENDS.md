@@ -172,6 +172,11 @@ CPU times come from paired runs on the same core.
   entry whose distortion reaches the threshold, are both exact. They removed only 3-4% of the
   rate-model work at their sites: the early exit on the remaining bits already stops most losers
   within a few positions.
+- **The far mode-6 re-index compiled for AVX2.** Its segment and per-texel lower bounds and the
+  palette search ran in an AVX2 copy (no FMA, so byte-identical) instead of the SSE2 build, so the
+  bounds' 16-texel `f32` loops could run eight lanes wide (a570dcf). Cloud A/B: 0.999× at λ 1 and
+  10, 24/24 identical. The bounds are 6% of a profile, but their time is in the scalar `f64`
+  segment tests and the call overhead, not the texel loop.
 
 ## Field split (`--prep`)
 

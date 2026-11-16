@@ -135,10 +135,9 @@ Open for v0.9.x:
     integers (96b5d77, 1.004× / 1.005×), an O(1) per-channel bound in refinement that skips the 16-texel decode
     of a borrowed mode-6 head (280a075, 1.025× / 1.024×), and those refit sums taken with AVX2 (8c520ae,
     1.018× / 1.015×). Together about 1.05× since 5b90602.
-  - Estimate: from 941af16 (31.2-31.6 CPU-seconds on the pinned P-core) to 5b90602 is 1.43× × 1.05× less time
-    at λ 1 on the cloud, and 8c520ae another 1.05×, which puts λ 1 at about 20 CPU-seconds, level with
-    Oodle's 20-22. Not yet re-timed side by side on the dev machine, whose timings swing ±20% under its current
-    load.
+  - Measured: a cloud A/B of 7c3c514 against 941af16 (31.2-31.6 CPU-seconds on the pinned P-core) is 1.557× /
+    1.662× less time at λ 1 / 10, which puts λ 1 at about 20 CPU-seconds, level with Oodle's 20-22. Not yet
+    re-timed side by side on the dev machine, whose timings swing ±20% under its current load.
   - Next: structural cuts to the far re-indexing and the second base, using the cross-domain research
     sweep's ideas (hash-based block matching from screen-content video coding, lower-bound cascades).
 - [ ] BC7 mode 4 in the fast encoder, p-bit search in quantization, and a faster uber step.

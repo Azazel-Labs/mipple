@@ -1543,31 +1543,10 @@ pub fn reindex_bounded_with(
         Some(p) => {
             debug_assert!(is_mode6(raw));
             let v = u128::from_le_bytes(*raw);
-            let lp = &p.0[(v >> 64) as usize & 1];
-            #[cfg(target_arch = "x86_64")]
-            if crate::simd::level() == crate::simd::Level::Avx2 {
-                // SAFETY: AVX2 was detected.
-                return unsafe { reindex_bounded6_avx2(v, px, w, bound, seg, lp) };
-            }
-            reindex_bounded_mode::<6>(v, px, w, bound, seg, Some(lp))
+            reindex_bounded_mode::<6>(v, px, w, bound, seg, Some(&p.0[(v >> 64) as usize & 1]))
         }
         None => reindex_bounded(raw, px, w, bound, seg),
     }
-}
-
-/// [`reindex_bounded_mode`] for a cached mode-6 palette, compiled for AVX2 so the bound's
-/// per-texel loop runs eight lanes wide. No FMA: the `f32` results match the generic build's.
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2")]
-unsafe fn reindex_bounded6_avx2(
-    v: u128,
-    px: &Block,
-    w: &[u32; 4],
-    bound: u64,
-    seg: &mut SegBound,
-    lp: &LinePal,
-) -> Option<([u8; 16], u64)> {
-    reindex_bounded_mode::<6>(v, px, w, bound, seg, Some(lp))
 }
 
 #[inline(always)]
@@ -1738,7 +1717,7 @@ impl SegBound {
     /// 16 times the mean's), each texel's error is at least `(d_i - s)+^2 >= d_i^2 - 2 s d_i`, so
     /// the block's is at least `D - 8 s sqrt(D)` (Cauchy-Schwarz on the sum of `d_i`), above
     /// `bound / 0.999` iff `D > (4 s + sqrt(16 s^2 + bound / 0.999))^2`.
-    #[inline(always)]
+    #[inline]
     fn rejects(&mut self, ends: impl Fn(usize) -> [[u32; 4]; 2], ns: u8, ib: u8, partition: u8, bound: u64) -> bool {
         if ns != 1 {
             return self.lower_bound(ends, ns, partition, bound);
@@ -1802,7 +1781,7 @@ impl SegBound {
     /// than the line bound when texels lie beyond the endpoints, fall between palette colors, or
     /// sit at uneven distances. In `f32` over the texels' lanes; `slack_f32` and the 0.999 cover
     /// its rounding.
-    #[inline(always)]
+    #[inline]
     fn texels_far(&self, a: [u32; 4], b: [u32; 4], ib: u8, bound: u64) -> bool {
         // Adding and subtracting 1.5 * 2^23 rounds to an integer (|x| < 2^22) and vectorizes.
         const ROUND: f32 = 12_582_912.0;
