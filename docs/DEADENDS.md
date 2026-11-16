@@ -166,6 +166,12 @@ CPU times come from paired runs on the same core.
   position's bucket before the parse (71363be) was byte-identical but 1.002× / 0.999× at λ 1 / 10
   in a cloud A/B: the out-of-order core already overlaps those loads, and calls that stop early
   pay for prefetches they never use.
+- **Tighter exact rate-model budgets at the alternative bases and the fast pool.** Costing each
+  alternative base with `cost_until` under the deferral threshold (skipping it when its
+  distortion alone is above), and sorting the fast pool by error so the scan stops at the first
+  entry whose distortion reaches the threshold, are both exact. They removed only 3-4% of the
+  rate-model work at their sites: the early exit on the remaining bits already stops most losers
+  within a few positions.
 
 ## Field split (`--prep`)
 
