@@ -352,6 +352,14 @@ Measured on Kodak images 1-3, single thread, effort 0, unless noted. ISPC fast t
   and the shortlist insert by hand instead of `copy_within`, and the re-rank table kept in scratch and
   filled only for the texel groups used. Byte-identical; 19.92 s against 19.35 s CPU on Kodak 1-8 4x4
   effort 5 (6 interleaved rounds, one pinned core), within noise.
+- **A cheaper light RDO at effort 0 with `--refine-back 0`.** The goal was to keep the default light pass's
+  smaller files at effort 0 but skip its reweight / refit candidates, so it would take less time than astcenc
+  fast. The cloud run at 75123bb (EPYC 7763, Kodak 24, one pinned thread) gave Zstd bpt, with the default
+  light pass, `-l 0`, and refine-back 0 in that order: 7.044 / 7.094 / 7.092 at 4x4, 4.562 / 4.645 / 4.638
+  at 5x5, and 3.837 / 3.911 / 3.903 at 6x5. Refine-back 0 keeps only 0.1-0.3% of the 1-2% the light pass
+  saves, in 1.26-1.34x the time of `-l 0`. With `-l 0.15` added it is still behind at 5x5 (4.628) and
+  6x5 (3.899), and takes 3.2-4.5 s per run. Whole-block copies alone barely help: the reweight and refit
+  candidates carry the size win.
 
 ## ETC2 / EAC
 
