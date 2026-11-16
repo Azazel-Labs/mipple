@@ -138,6 +138,12 @@ Open for v0.9.x:
   - Measured: a cloud A/B of 7c3c514 against 941af16 (31.2-31.6 CPU-seconds on the pinned P-core) is 1.557× /
     1.662× less time at λ 1 / 10, which puts λ 1 at about 20 CPU-seconds, level with Oodle's 20-22. Not yet
     re-timed side by side on the dev machine, whose timings swing ±20% under its current load.
+  - Kept: refinement 64 deep instead of 128 for BC7 (cloud A/B, Kodak-24): 1.080× / 1.098× less time at λ 1 /
+    10, which puts λ 1 at about 18.5 CPU-seconds by the same estimate, under Oodle's 20-22. Every cell stays
+    ahead: equal RMSE λ 10-40 −1.6% / −1.0% / −1.6% / −2.3% (was −1.6% / −1.2% / −1.8% / −2.5%), equal SSIM
+    −3.6% / −2.2% / −1.7% / −1.2% (was −3.7% / −2.3% / −1.9% / −1.4%); λ 0 and 1 unchanged. 96 deep was 1.034×
+    / 1.045× for 0.1 point in the same cells, the same rate. A shallower depth for the endpoint half alone
+    gained 1.02-1.07× (noisy local timing; see DEADENDS).
   - Next: structural cuts to the far re-indexing and the second base, using the cross-domain research
     sweep's ideas (hash-based block matching from screen-content video coding, lower-bound cascades).
 - [ ] BC7 mode 4 in the fast encoder, p-bit search in quantization, and a faster uber step.

@@ -293,10 +293,11 @@ impl RdoParams {
     /// λ 10-40, for 1.07× the time), off for BC5 (−0.2% at depth 32, −0.3% at 256, but BC5 RDO
     /// has no time to spare against bc7enc_rdo). For EAC 256 (RG11 Kodak-8: 2-4% smaller at
     /// λ 0.5-2 for 0.04-0.16 dB), off for ETC2 RGB (Kodak-8: even, so not worth its time).
-    /// BC7 refines 128 deep: 256 is 11-13% slower for 0.1-0.2 points of each lead over Oodle.
+    /// BC7 refines 64 deep: 128 is 1.08-1.10× slower (cloud A/B, Kodak-24, λ 1 / 10) for 0.1-0.2
+    /// points of the λ 20-40 leads over Oodle, 256 another 11-13% for 0.1-0.2 more.
     pub fn refine_back_for(&self, format: Format) -> usize {
         self.refine_back.unwrap_or(match format {
-            Format::Bc7 => 128,
+            Format::Bc7 => 64,
             Format::Bc1 | Format::Bc3 | Format::Bc4 => 256,
             Format::Etc2Rgba | Format::EacR11 | Format::EacRg11 => 256,
             Format::EacR11Snorm | Format::EacRg11Snorm => 256,

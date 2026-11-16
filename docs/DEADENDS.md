@@ -47,7 +47,7 @@ CPU times come from paired runs on the same core.
 - **Cutting refinement or the ranker's picks to save CPU.** `--refine-back 0` saves 16% CPU,
   `64` saves 12% and `--local 0` saves 26%, but each puts λ 40 SSIM behind Oodle (+0.2% to
   +1.0%). Refinement and the ranker carry real quality. (Measured when the λ 40 SSIM lead was −0.3%; with today's wider lead
-  BC7 refines 128 deep by default, see the ROADMAP's BC7 speed item.)
+  BC7 refines 64 deep by default, see the ROADMAP's BC7 speed item.)
 - **A shorter far search or fewer ranker picks (cloud A/B and Oodle table, Kodak-24, at 5ab6183's
   defaults).** `--far-back 512` saved 6% at λ 1 but only 1% at λ 10, for 0.2-0.4 points of every
   λ 10-40 lead. `--local 6` saved 2% for 0.1-0.2 points. A shorter ranker reach buys far more
@@ -70,7 +70,10 @@ CPU times come from paired runs on the same core.
   from 1024 or 512.)
 - **Per-field refinement depth.** Refining only 64 blocks back for the endpoint half saves about 2% of
   λ 1 time, and for the index half about 4%, but each shrinks the lead over Oodle by 0.1-0.3 points
-  (λ 40 SSIM −1.5% to −1.3% / −1.2%).
+  (λ 40 SSIM −1.5% to −1.3% / −1.2%). Re-checked at 2bb3f8f (128 deep): 16 or 32 deep for the endpoint
+  half, 128 for the index half, gained only 1.02-1.07× (noisy local timing, 8 Kodak images). Most of
+  refinement's wins borrow the index half, from every distance back, and endpoint-half wins cluster within
+  16 blocks but still come from further back.
 - **Starting from the plain base instead of the entropy-reduced one (`--entropy off`).** Slower (36.9 s
   vs 32.9 s for Kodak-24 at λ 1 on one pinned core) and 2% larger at λ 1, and the SSIM lead over Oodle at
   λ 30 / 40 falls from −1.8% / −1.5% to −1.0% / −0.6%.

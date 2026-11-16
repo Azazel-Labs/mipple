@@ -70,7 +70,7 @@ search width and the span distance leave the output byte-identical. BC7 spends t
 context: an 8 KiB window and 64 KiB chunks (6 per Kodak image) instead of 2 KiB and 16 KiB took BC7 from
 −23.7% / −20.8% to −28.4% / −26.7% at about 1.5× the time (12.2-18.9 s before).
 
-Field-swap refinement (`--refine-back`, default 256 for BC1/BC4, 128 for BC7): after the search picks a block, try replacing
+Field-swap refinement (`--refine-back`, default 256 for BC1/BC4, 64 for BC7): after the search picks a block, try replacing
 one of its fields (endpoints or indices) with that field of each of the previous 256 blocks, so a block can
 take its endpoints from one earlier block and its indices from another. Kodak-24 BD-rate (`mipple check`): BC1
 −0.98%, BC4 −0.39%; vs bc7enc_rdo BC1 −19.2% → −19.8%, BC4 −16.8% → −17.0%. It is off for BC5, where it gains
@@ -450,6 +450,11 @@ copy, so files shrink and the quality table gains (λ 20-40 at SSIM −2.5%, −
 at λ 1 on one pinned P-core (interleaved, per-image best of five) the bases took 1.04 s instead of 2.71 and the
 whole encode 10.48 s instead of 12.00 (−12.6%), with 2.3% smaller files. Kodak-24 at λ 1 (`encode`, one
 process per image) now takes 31.2-31.6 CPU-seconds on one pinned P-core, about 1.5× Oodle's share.
+Later byte-identical speedups and cheaper defaults have not been re-timed side by side (the UE install is
+gone and the dev machine is under load), but paired cloud A/Bs on Kodak-24 put them at 1.557× less time
+than that build at λ 1 (7c3c514 against 941af16), and refinement 64 deep instead of 128 at another 1.080×.
+Scaled from the 31.2-31.6 CPU-seconds, λ 1 is about 18.5 CPU-seconds against Oodle's 20-22: an estimate,
+not a side-by-side measurement.
 
 mipple is now smaller at both of Oodle's quality measures at every λ in every format. Per image it is not a
 sweep: BC1 loses 1 of 288 image/λ/metric cells (kodim05 at λ 40 on SSIM, +0.3%); BC7 at λ 10-40 is behind on
