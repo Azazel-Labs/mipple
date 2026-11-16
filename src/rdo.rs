@@ -42,6 +42,33 @@ const ASTC_DEFAULT_LAMBDA: [(f32, f32); 7] = [
     (144.0, 6.0),
 ];
 
+/// Effort 0's floor on [`ASTC_DEFAULT_LAMBDA`], by texel count (0 below 36: 4x4-6x6 keep the base λ).
+/// Effort 0's plain encode is coarser, so the light pass can trade more rate before PSNR drops
+/// below astcenc's fast preset. On Kodak-24 (cloud, one thread) these λ beat fast on PSNR, SSIM,
+/// Zstd-19 and Deflate-9 size and time at 8x5-10x8; the base λ there left files larger than fast's.
+/// Effort 1 and up keep the base table, which already beats astcenc's thorough preset.
+const ASTC_E0_LAMBDA: [(f32, f32); 6] = [
+    (36.0, 0.0),
+    (40.0, 0.85),
+    (48.0, 1.5),
+    (50.0, 2.0),
+    (60.0, 3.0),
+    (80.0, 3.0),
+];
+
+/// Piecewise linear through `knots` (sorted by x), flat beyond the ends.
+fn knot_interp(knots: &[(f32, f32)], x: f32) -> f32 {
+    if x <= knots[0].0 {
+        return knots[0].1;
+    }
+    knots
+        .windows(2)
+        .find(|w| x <= w[1].0)
+        .map_or(knots[knots.len() - 1].1, |w| {
+            w[0].1 + (w[1].1 - w[0].1) * (x - w[0].0) / (w[1].0 - w[0].0)
+        })
+}
+
 /// RDO tuning knobs.
 #[derive(Clone, Copy, Debug)]
 pub struct RdoParams {
@@ -173,39 +200,40 @@ impl RdoParams {
         }
     }
 
-    /// The λ of ASTC's default light RDO pass ([`RdoParams::default_for`]); 0 for other formats.
-    pub fn astc_default_lambda(format: Format) -> f32 {
+    /// The λ of ASTC's default light RDO pass at `effort` ([`RdoParams::default_for`]); 0 for
+    /// other formats.
+    pub fn astc_default_lambda(format: Format, effort: u8) -> f32 {
         match format {
             crate::format::astc!() => {
                 // Piecewise linear in the texel count between the tuned footprints.
                 let (bw, bh) = format.block_dims();
                 let n = (bw * bh) as f32;
-                let k = ASTC_DEFAULT_LAMBDA;
-                if n <= k[0].0 {
-                    return k[0].1;
+                let base = knot_interp(&ASTC_DEFAULT_LAMBDA, n);
+                if effort == 0 {
+                    base.max(knot_interp(&ASTC_E0_LAMBDA, n))
+                } else {
+                    base
                 }
-                k.windows(2).find(|w| n <= w[1].0).map_or(k[k.len() - 1].1, |w| {
-                    w[0].1 + (w[1].1 - w[0].1) * (n - w[0].0) / (w[1].0 - w[0].0)
-                })
             }
             _ => 0.0,
         }
     }
 
-    /// Default settings for `format`: RDO off, except for ASTC, which gets a light pass that
-    /// looks one block back (`max_back` and `refine_back` 1) at [`RdoParams::astc_default_lambda`].
+    /// Default settings for `format` at the default effort: RDO off, except for ASTC, which gets
+    /// a light pass that looks one block back (`max_back` and `refine_back` 1) at
+    /// [`RdoParams::astc_default_lambda`].
     pub fn default_for(format: Format) -> Self {
-        Self::default().light_astc(format)
+        Self::default().light_astc(format, crate::format::DEFAULT_EFFORT)
     }
 
-    /// For ASTC formats, the default λ, and `max_back` and `refine_back` 1 where unset.
-    /// Other formats are returned unchanged.
-    pub fn light_astc(self, format: Format) -> Self {
+    /// For ASTC formats, the default λ at `effort`, and `max_back` and `refine_back` 1 where
+    /// unset. Other formats are returned unchanged.
+    pub fn light_astc(self, format: Format, effort: u8) -> Self {
         if !format.is_astc() {
             return self;
         }
         Self {
-            lambda: Self::astc_default_lambda(format),
+            lambda: Self::astc_default_lambda(format, effort),
             max_back: self.max_back.or(Some(1)),
             refine_back: self.refine_back.or(Some(1)),
             ..self
@@ -3703,24 +3731,32 @@ mod tests {
     /// The default ASTC λ hits the tuned knots and grows with the footprint.
     #[test]
     fn astc_default_lambda_knots() {
-        let l = RdoParams::astc_default_lambda;
-        for (f, want) in [
-            (Format::Astc4x4, 0.03),
-            (Format::Astc6x6, 0.3),
-            (Format::Astc8x8, 0.5),
-            (Format::Astc10x8, 2.0),
-            (Format::Astc10x10, 3.5),
-            (Format::Astc12x10, 4.5),
-            (Format::Astc12x12, 6.0),
+        let l = |f| RdoParams::astc_default_lambda(f, 5);
+        let l0 = |f| RdoParams::astc_default_lambda(f, 0);
+        for (f, want, want0) in [
+            (Format::Astc4x4, 0.03, 0.03),
+            (Format::Astc6x6, 0.3, 0.3),
+            (Format::Astc8x5, 0.3 + 0.2 * 4.0 / 28.0, 0.85),
+            (Format::Astc8x6, 0.3 + 0.2 * 12.0 / 28.0, 1.5),
+            (Format::Astc10x5, 0.3 + 0.2 * 14.0 / 28.0, 2.0),
+            (Format::Astc10x6, 0.3 + 0.2 * 24.0 / 28.0, 3.0),
+            (Format::Astc8x8, 0.5, 3.0),
+            (Format::Astc10x8, 2.0, 3.0),
+            (Format::Astc10x10, 3.5, 3.5),
+            (Format::Astc12x10, 4.5, 4.5),
+            (Format::Astc12x12, 6.0, 6.0),
         ] {
             assert!((l(f) - want).abs() < 1e-6, "{f}: {}", l(f));
+            assert!((l0(f) - want0).abs() < 1e-6, "{f} effort 0: {}", l0(f));
         }
         let mut astc: Vec<Format> = Format::ALL.into_iter().filter(|f| f.is_astc()).collect();
         astc.sort_by_key(|f| {
             let (w, h) = f.block_dims();
             w * h
         });
-        assert!(astc.windows(2).all(|w| l(w[0]) <= l(w[1])));
+        assert!(astc.windows(2).all(|w| l(w[0]) <= l(w[1]) && l0(w[0]) <= l0(w[1])));
+        assert!(astc.iter().all(|&f| l0(f) >= l(f)));
         assert_eq!(l(Format::Bc7), 0.0);
+        assert_eq!(l0(Format::Bc7), 0.0);
     }
 }

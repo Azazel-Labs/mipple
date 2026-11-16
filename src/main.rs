@@ -785,7 +785,7 @@ fn encode(a: EncodeArgs) -> Result<()> {
     };
     opts.rdo = match a.lambda {
         Some(lambda) => a.rdo.params(lambda),
-        None => a.rdo.params(0.0).light_astc(a.format),
+        None => a.rdo.params(0.0).light_astc(a.format, a.effort),
     };
     opts.rdo.verify_zstd_level = (a.zstd > 0).then_some(a.zstd);
 
