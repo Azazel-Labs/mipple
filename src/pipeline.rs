@@ -274,8 +274,10 @@ fn encode_surface_raw(surface: &Surface, format: Format, opts: BlockOpts) -> Vec
         Format::Bc5 => crate::bc4::encode_surface(surface, 2, opts.effort),
         Format::Etc2Rgb => crate::etc::encode_surface(surface, opts.effort),
         Format::Etc2Rgba => crate::etc::encode_surface_rgba(surface, opts.effort),
-        Format::EacR11 => crate::eac::encode_surface(surface, (0, 1), true, opts.effort),
-        Format::EacRg11 => crate::eac::encode_surface(surface, (0, 2), true, opts.effort),
+        Format::EacR11 => crate::eac::encode_surface(surface, (0, 1), crate::eac::Kind::R11, opts.effort),
+        Format::EacRg11 => crate::eac::encode_surface(surface, (0, 2), crate::eac::Kind::R11, opts.effort),
+        Format::EacR11Snorm => crate::eac::encode_surface(surface, (0, 1), crate::eac::Kind::R11Snorm, opts.effort),
+        Format::EacRg11Snorm => crate::eac::encode_surface(surface, (0, 2), crate::eac::Kind::R11Snorm, opts.effort),
         crate::format::astc!() => {
             let (bw, bh) = format.block_dims();
             crate::astc::encode::encode_surface(surface, bw, bh, opts.srgb, opts.effort)

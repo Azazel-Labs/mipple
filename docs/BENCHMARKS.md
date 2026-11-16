@@ -808,6 +808,37 @@ At the fast end, a re-run at cfb4cc1 (EPYC 7763, after the cheaper per-process s
 At 4x4 the light pass costs more than effort 0 and 1 save: by default they take 3.26 / 3.73 s against
 astcenc fast's 3.04 s, so the 4x4 fast row stays at `-l 0` (1.94 s).
 
+### The other footprints
+
+Every other 2D LDR footprint at a419177, same setup (Kodak 24, one pinned thread, best of three, default
+light RDO), against astcenc 5.7.1 fast / medium / thorough. Each group of rows is one cloud run: 5x4-6x5 on a
+Xeon Platinum 8573C, 8x5-10x6 on an EPYC 9V74, 10x8-12x12 on an EPYC 9V45. Each cell is PSNR dB / SSIM /
+Zstd-19 bpt / Deflate-9 bpt / time s:
+
+| footprint | astcenc fast | astcenc medium | astcenc thorough | mipple effort 0 | mipple effort 5 |
+| --- | --- | --- | --- | --- | --- |
+| 5x4 | 42.679 / .99577 / 5.853 / 5.974 / 2.26 | 43.291 / .99614 / 5.967 / 6.058 / 10.52 | 43.497 / .99619 / 6.020 / 6.093 / 32.39 | 42.507 / .99594 / 5.634 / 5.751 / 2.46 | 43.696 / .99659 / 5.940 / 6.001 / 40.27 |
+| 5x5 | 40.697 / .99290 / 4.625 / 4.719 / 2.07 | 41.320 / .99372 / 4.764 / 4.830 / 9.21 | 41.499 / .99379 / 4.827 / 4.879 / 32.81 | 40.640 / .99326 / 4.553 / 4.632 / 2.37 | 41.646 / .99420 / 4.745 / 4.786 / 36.60 |
+| 6x5 | 39.080 / .98912 / 3.825 / 3.902 / 2.08 | 39.725 / .99059 / 3.953 / 4.007 / 8.06 | 39.915 / .99081 / 4.040 / 4.077 / 32.42 | 39.109 / .98992 / 3.831 / 3.892 / 2.30 | 40.030 / .99121 / 3.967 / 3.996 / 33.15 |
+| 8x5 | 36.807 / .97961 / 2.772 / 2.826 / 2.00 | 37.440 / .98302 / 2.919 / 2.959 / 6.50 | 37.674 / .98389 / 3.049 / 3.069 / 30.29 | 36.900 / .98224 / 2.905 / 2.942 / 1.90 | 37.760 / .98434 / 2.996 / 3.012 / 25.64 |
+| 8x6 | 35.525 / .96978 / 2.343 / 2.380 / 2.27 | 36.187 / .97616 / 2.456 / 2.484 / 7.23 | 36.420 / .97794 / 2.548 / 2.564 / 31.17 | 35.668 / .97554 / 2.434 / 2.460 / 1.84 | 36.472 / .97840 / 2.505 / 2.517 / 24.08 |
+| 10x5 | 35.144 / .96202 / 2.162 / 2.200 / 2.53 | 35.863 / .97266 / 2.301 / 2.329 / 7.73 | 36.128 / .97600 / 2.457 / 2.470 / 32.15 | 35.364 / .97331 / 2.355 / 2.380 / 1.83 | 36.170 / .97647 / 2.422 / 2.433 / 24.04 |
+| 10x6 | 34.021 / .95117 / 1.838 / 1.866 / 2.68 | 34.772 / .96451 / 1.942 / 1.961 / 8.33 | 35.032 / .96854 / 2.054 / 2.063 / 33.35 | 34.307 / .96512 / 1.968 / 1.985 / 1.76 | 35.043 / .96894 / 2.021 / 2.030 / 22.52 |
+| 10x8 | 32.455 / .93851 / 1.399 / 1.421 / 1.63 | 33.175 / .95003 / 1.477 / 1.492 / 6.29 | 33.438 / .95402 / 1.543 / 1.550 / 24.53 | 32.778 / .94947 / 1.486 / 1.497 / 1.20 | 33.421 / .95432 / 1.523 / 1.529 / 14.11 |
+| 10x10 | 31.339 / .91944 / 1.097 / 1.114 / 1.52 | 32.094 / .93418 / 1.172 / 1.183 / 6.51 | 32.361 / .93992 / 1.239 / 1.243 / 25.96 | 31.763 / .93425 / 1.197 / 1.203 / 1.12 | 32.328 / .93999 / 1.226 / 1.229 / 13.01 |
+| 12x10 | 30.460 / .90286 / 0.907 / 0.920 / 1.35 | 31.264 / .91985 / 0.969 / 0.977 / 6.25 | 31.565 / .92737 / 1.030 / 1.032 / 26.47 | 30.983 / .92061 / 1.001 / 1.005 / 1.05 | 31.519 / .92719 / 1.025 / 1.026 / 12.07 |
+| 12x12 | 29.581 / .88273 / 0.744 / 0.755 / 1.22 | 30.450 / .90310 / 0.797 / 0.804 / 6.13 | 30.796 / .91305 / 0.853 / 0.856 / 27.37 | 30.219 / .90504 / 0.835 / 0.837 / 1.02 | 30.742 / .91260 / 0.855 / 0.856 / 11.57 |
+
+- **8x5 to 10x6:** the default effort 5 beats thorough on all five columns (+0.01 to +0.09 dB, files 1.4-1.7%
+  smaller after Zstd, in 68-85% of its time).
+- **5x4 to 6x5:** effort 5 is 0.12-0.20 dB ahead of thorough with files 1.3-1.8% smaller, but 2-24% slower.
+- **10x8 to 12x12:** effort 5 is 0.02-0.05 dB behind thorough in 42-58% of its time, with SSIM ahead at
+  10x8 and 10x10 and files smaller except at 12x12 (0.855 against 0.853 bpt).
+- **Effort 0 against fast:** from 8x5 up it is 0.09-0.64 dB ahead with higher SSIM in 66-95% of the time,
+  but its files are 4-12% larger: the default λ (8x8's 0.5 for every footprint past 8x8) is too light there.
+  At 5x4 and 5x5 it has smaller files and higher SSIM but lower PSNR; at 6x5 it is level. At all three it is
+  9-14% slower.
+
 Scoring astcenc's files exposed a decoder bug, fixed: a 2- or 3-partition block may spell equal CEMs the long
 way (with the extra CEM bits below the weights), and the decoder read those blocks with the short form's
 endpoint range. mipple's own files never use the long form, so earlier mipple scores are unchanged.

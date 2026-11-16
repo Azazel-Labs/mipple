@@ -107,6 +107,11 @@ pub enum Format {
     EacR11,
     /// 8 bpp two channels for mobile, 11-bit (the BC5 analogue: normals).
     EacRg11,
+    /// [`Format::EacR11`] signed (`R11_SNORM`): 8-bit `u` stored as `(2u - 255) / 255`.
+    EacR11Snorm,
+    /// [`Format::EacRg11`] signed (`R11G11_SNORM`, tangent-space normals): 8-bit `u` stored as
+    /// `(2u - 255) / 255`.
+    EacRg11Snorm,
     /// ASTC LDR with a 4x4 footprint: 8 bpp RGB/RGBA (mobile and Apple GPUs; the BC7 analogue).
     #[cfg_attr(feature = "cli", value(name = "astc-4x4"))]
     Astc4x4,
@@ -173,7 +178,7 @@ macro_rules! astc {
 pub(crate) use astc;
 
 impl Format {
-    pub const ALL: [Format; 24] = [
+    pub const ALL: [Format; 26] = [
         Format::Bc1,
         Format::Bc3,
         Format::Bc4,
@@ -184,6 +189,8 @@ impl Format {
         Format::Etc2Rgba,
         Format::EacR11,
         Format::EacRg11,
+        Format::EacR11Snorm,
+        Format::EacRg11Snorm,
         Format::Astc4x4,
         Format::Astc5x4,
         Format::Astc5x5,
@@ -212,6 +219,8 @@ impl Format {
             Format::Etc2Rgba => "etc2-rgba",
             Format::EacR11 => "eac-r11",
             Format::EacRg11 => "eac-rg11",
+            Format::EacR11Snorm => "eac-r11-snorm",
+            Format::EacRg11Snorm => "eac-rg11-snorm",
             Format::Astc4x4 => "astc-4x4",
             Format::Astc5x4 => "astc-5x4",
             Format::Astc5x5 => "astc-5x5",
@@ -233,8 +242,18 @@ impl Format {
     pub fn is_etc(self) -> bool {
         matches!(
             self,
-            Format::Etc2Rgb | Format::Etc2Rgba | Format::EacR11 | Format::EacRg11
+            Format::Etc2Rgb
+                | Format::Etc2Rgba
+                | Format::EacR11
+                | Format::EacRg11
+                | Format::EacR11Snorm
+                | Format::EacRg11Snorm
         )
+    }
+
+    /// Whether the format stores signed values (8-bit `u` as `(2u - 255) / 255`).
+    pub fn is_signed(self) -> bool {
+        matches!(self, Format::EacR11Snorm | Format::EacRg11Snorm)
     }
 
     /// Whether this is an ASTC format. Its blocks cover [`Format::block_dims`] texels, which is
@@ -267,8 +286,14 @@ impl Format {
     /// Bytes per block (of [`Format::block_dims`] texels).
     pub fn block_bytes(self) -> usize {
         match self {
-            Format::Bc1 | Format::Bc4 | Format::Etc2Rgb | Format::EacR11 => 8,
-            Format::Bc3 | Format::Bc5 | Format::Bc6h | Format::Bc7 | Format::Etc2Rgba | Format::EacRg11 => 16,
+            Format::Bc1 | Format::Bc4 | Format::Etc2Rgb | Format::EacR11 | Format::EacR11Snorm => 8,
+            Format::Bc3
+            | Format::Bc5
+            | Format::Bc6h
+            | Format::Bc7
+            | Format::Etc2Rgba
+            | Format::EacRg11
+            | Format::EacRg11Snorm => 16,
             astc!() => 16,
         }
     }
@@ -319,6 +344,8 @@ impl Format {
             (Format::Etc2Rgba, true) => 152,   // VK_FORMAT_ETC2_R8G8B8A8_SRGB_BLOCK
             (Format::EacR11, _) => 153,        // VK_FORMAT_EAC_R11_UNORM_BLOCK
             (Format::EacRg11, _) => 155,       // VK_FORMAT_EAC_R11G11_UNORM_BLOCK
+            (Format::EacR11Snorm, _) => 154,   // VK_FORMAT_EAC_R11_SNORM_BLOCK
+            (Format::EacRg11Snorm, _) => 156,  // VK_FORMAT_EAC_R11G11_SNORM_BLOCK
             (Format::Astc4x4, false) => 157,   // VK_FORMAT_ASTC_4x4_UNORM_BLOCK
             (Format::Astc4x4, true) => 158,    // VK_FORMAT_ASTC_4x4_SRGB_BLOCK
             (Format::Astc5x4, false) => 159,   // VK_FORMAT_ASTC_5x4_UNORM_BLOCK
@@ -367,7 +394,9 @@ impl Format {
             151 => (Format::Etc2Rgba, false),
             152 => (Format::Etc2Rgba, true),
             153 => (Format::EacR11, false),
+            154 => (Format::EacR11Snorm, false),
             155 => (Format::EacRg11, false),
+            156 => (Format::EacRg11Snorm, false),
             157 => (Format::Astc4x4, false),
             158 => (Format::Astc4x4, true),
             159 => (Format::Astc5x4, false),
@@ -414,8 +443,8 @@ impl Format {
             Format::Bc7 => [1, 1, 1, 1],
             Format::Etc2Rgb => [1, 1, 1, 0],
             Format::Etc2Rgba => [1, 1, 1, 1],
-            Format::EacR11 => [1, 0, 0, 0],
-            Format::EacRg11 => [1, 1, 0, 0],
+            Format::EacR11 | Format::EacR11Snorm => [1, 0, 0, 0],
+            Format::EacRg11 | Format::EacRg11Snorm => [1, 1, 0, 0],
             astc!() => [1, 1, 1, 1],
         }
     }
@@ -424,8 +453,8 @@ impl Format {
     pub fn metric_channels(self, has_alpha: bool) -> Vec<usize> {
         match self {
             Format::Bc1 | Format::Bc6h | Format::Etc2Rgb => vec![0, 1, 2],
-            Format::Bc4 | Format::EacR11 => vec![0],
-            Format::Bc5 | Format::EacRg11 => vec![0, 1],
+            Format::Bc4 | Format::EacR11 | Format::EacR11Snorm => vec![0],
+            Format::Bc5 | Format::EacRg11 | Format::EacRg11Snorm => vec![0, 1],
             Format::Bc3 | Format::Bc7 | Format::Etc2Rgba if has_alpha => vec![0, 1, 2, 3],
             Format::Bc3 | Format::Bc7 | Format::Etc2Rgba => vec![0, 1, 2],
             astc!() if has_alpha => vec![0, 1, 2, 3],
@@ -454,10 +483,15 @@ impl Format {
             Format::Bc7 => out = bc7::encode(px, w, opts.searched()),
             Format::Etc2Rgb => out[..8].copy_from_slice(&etc::encode_block(px, effort)),
             Format::Etc2Rgba => out = etc::encode_block_rgba(px, effort),
-            Format::EacR11 => out[..8].copy_from_slice(&eac::encode_r11(&bc4::channel(px, 0), effort)),
-            Format::EacRg11 => {
-                out[..8].copy_from_slice(&eac::encode_r11(&bc4::channel(px, 0), effort));
-                out[8..].copy_from_slice(&eac::encode_r11(&bc4::channel(px, 1), effort));
+            Format::EacR11 | Format::EacRg11 | Format::EacR11Snorm | Format::EacRg11Snorm => {
+                let kind = if self.is_signed() {
+                    eac::Kind::R11Snorm
+                } else {
+                    eac::Kind::R11
+                };
+                for c in 0..self.block_bytes() / 8 {
+                    out[c * 8..c * 8 + 8].copy_from_slice(&eac::encode_kind(&bc4::channel(px, c), kind, effort));
+                }
             }
             astc!() => panic!("{self}: {NOT_4X4}"),
         }
@@ -479,8 +513,8 @@ impl Format {
             Format::Bc7 => bc7::decode(raw, out),
             Format::Etc2Rgb => etc::decode(raw, out),
             Format::Etc2Rgba => etc::decode_rgba(raw, out),
-            Format::EacR11 => eac::decode_r11_block(raw, out),
-            Format::EacRg11 => eac::decode_rg11_block(raw, out),
+            Format::EacR11 | Format::EacR11Snorm => eac::decode_r11_block(raw, out, self.is_signed()),
+            Format::EacRg11 | Format::EacRg11Snorm => eac::decode_rg11_block(raw, out, self.is_signed()),
             astc!() => panic!("{self}: {NOT_4X4}"),
         }
     }
@@ -498,6 +532,6 @@ impl std::str::FromStr for Format {
         Format::ALL
             .into_iter()
             .find(|f| f.name().eq_ignore_ascii_case(s))
-            .ok_or_else(|| format!("unknown format '{s}' (expected bc1, bc3, bc4, bc5, bc6h, bc7, etc2-rgb, etc2-rgba, eac-r11, eac-rg11, astc-4x4 ... astc-12x12)"))
+            .ok_or_else(|| format!("unknown format '{s}' (expected bc1, bc3, bc4, bc5, bc6h, bc7, etc2-rgb, etc2-rgba, eac-r11, eac-rg11, eac-r11-snorm, eac-rg11-snorm, astc-4x4 ... astc-12x12)"))
     }
 }

@@ -32,7 +32,8 @@ fn color_model(format: Format) -> u8 {
         Format::Bc6h => 133,                                                          // KHR_DF_MODEL_BC6H
         Format::Bc7 => 134,                                                           // KHR_DF_MODEL_BC7
         Format::Etc2Rgb | Format::Etc2Rgba | Format::EacR11 | Format::EacRg11 => 161, // KHR_DF_MODEL_ETC2
-        crate::format::astc!() => 162,                                                // KHR_DF_MODEL_ASTC
+        Format::EacR11Snorm | Format::EacRg11Snorm => 161,
+        crate::format::astc!() => 162, // KHR_DF_MODEL_ASTC
     }
 }
 
@@ -57,6 +58,9 @@ pub fn build_dfd(format: Format, srgb: bool, supercompressed: bool) -> Vec<u8> {
         // KHR_DF_CHANNEL_ETC2_RED and _GREEN.
         Format::EacR11 => &[(0, 63, 0)],
         Format::EacRg11 => &[(0, 63, 0), (64, 63, 1)],
+        // KHR_DF_SAMPLE_DATATYPE_SIGNED.
+        Format::EacR11Snorm => &[(0, 63, 0x40)],
+        Format::EacRg11Snorm => &[(0, 63, 0x40), (64, 63, 1 | 0x40)],
         // KHR_DF_CHANNEL_ASTC_DATA; LDR, so not float.
         crate::format::astc!() => &[(0, 127, 0)],
     };
@@ -86,9 +90,12 @@ pub fn build_dfd(format: Format, srgb: bool, supercompressed: bool) -> Vec<u8> {
         v.push(len);
         v.push(channel);
         v.extend_from_slice(&[0, 0, 0, 0]); // samplePosition
-        // sampleLower and sampleUpper: the full integer range, or 0.0 to 1.0 for float data.
+        // sampleLower and sampleUpper: the full integer range (signed: -max to max, as
+        // KTX-Software writes SNORM), or 0.0 to 1.0 for float data.
         let (lower, upper) = if channel & 0x80 != 0 {
             (0u32, 1f32.to_bits())
+        } else if channel & 0x40 != 0 {
+            (0x8000_0000, 0x7FFF_FFFF)
         } else {
             (0, u32::MAX)
         };

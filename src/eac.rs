@@ -1,9 +1,14 @@
 //! EAC single-channel block codec (8 bytes per 4x4 block): the 8-bit alpha half of ETC2 RGBA8
-//! and the 11-bit EAC R11 / RG11 formats (unsigned).
+//! and the 11-bit EAC R11 / RG11 formats, unsigned and signed.
 //!
 //! A block is a base value, a multiplier and one of 16 modifier tables; each texel picks one of
-//! the table's eight entries (3 bits, column-major). 8-bit: `clamp(base + entry × mult)`; 11-bit:
-//! `clamp(base × 8 + 4 + entry × mult × 8)`, with multiplier 0 meaning `entry` unscaled.
+//! the table's eight entries (3 bits, column-major). 8-bit: `clamp(base + entry × mult)`; 11-bit
+//! unsigned: `clamp(base × 8 + 4 + entry × mult × 8, 0, 2047)`; 11-bit signed (the base a signed
+//! byte, -128 read as -127): `clamp(base × 8 + entry × mult × 8, -1023, 1023)`. In 11-bit blocks
+//! multiplier 0 means `entry` unscaled.
+//!
+//! Signed blocks take 8-bit values `u` as `(2u - 255) / 255` (0 is -1, 255 is +1: the usual
+//! normal-map convention) and decode back the same way.
 //!
 //! The encoder starts each table at the base and multiplier that span the block's range, scores
 //! a window around them, then alternates least-squares refits of (base, multiplier) to the
@@ -11,6 +16,25 @@
 //! source scaled to 11 bits, with two fractional bits.
 
 use crate::surface::{Block, Surface};
+
+/// Which EAC variant a block is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kind {
+    /// 8-bit (ETC2 RGBA8 alpha).
+    A8,
+    /// 11-bit unsigned (EAC R11 / RG11 UNORM).
+    R11,
+    /// 11-bit signed (EAC R11 / RG11 SNORM).
+    R11Snorm,
+}
+
+impl Kind {
+    /// Allowed base values.
+    #[inline(always)]
+    fn bases(self) -> (i32, i32) {
+        if self == Kind::R11Snorm { (-127, 127) } else { (0, 255) }
+    }
+}
 
 /// EAC modifier tables.
 pub const TABLES: [[i32; 8]; 16] = [
@@ -38,14 +62,14 @@ fn raster(p: usize) -> usize {
     (p & 3) * 4 + (p >> 2)
 }
 
-fn fields(raw: &[u8]) -> (i32, i32, usize, u64) {
+fn fields(raw: &[u8], kind: Kind) -> (i32, i32, usize, u64) {
     let bits = u64::from_be_bytes([0, 0, raw[2], raw[3], raw[4], raw[5], raw[6], raw[7]]);
-    (
-        i32::from(raw[0]),
-        i32::from(raw[1] >> 4),
-        usize::from(raw[1] & 15),
-        bits,
-    )
+    let base = if kind == Kind::R11Snorm {
+        i32::from(raw[0].cast_signed()).max(-127)
+    } else {
+        i32::from(raw[0])
+    };
+    (base, i32::from(raw[1] >> 4), usize::from(raw[1] & 15), bits)
 }
 
 #[inline(always)]
@@ -55,7 +79,7 @@ fn index(bits: u64, p: usize) -> usize {
 
 /// Decodes an 8-bit EAC block (ETC2 RGBA8 alpha) to 16 values in raster order.
 pub fn decode_a8(raw: &[u8]) -> [u8; 16] {
-    let (base, mult, table, bits) = fields(raw);
+    let (base, mult, table, bits) = fields(raw, Kind::A8);
     let mut out = [0u8; 16];
     for p in 0..16 {
         out[raster(p)] = (base + TABLES[table][index(bits, p)] * mult).clamp(0, 255) as u8;
@@ -72,10 +96,27 @@ fn r11_value(base: i32, mult: i32, entry: i32) -> i32 {
 
 /// Decodes an unsigned 11-bit EAC block to 16 values (0..=2047) in raster order.
 pub fn decode_r11(raw: &[u8]) -> [u16; 16] {
-    let (base, mult, table, bits) = fields(raw);
+    let (base, mult, table, bits) = fields(raw, Kind::R11);
     let mut out = [0u16; 16];
     for p in 0..16 {
         out[raster(p)] = r11_value(base, mult, TABLES[table][index(bits, p)]) as u16;
+    }
+    out
+}
+
+/// 11-bit value of a signed R11 block's entry.
+#[inline(always)]
+fn r11s_value(base: i32, mult: i32, entry: i32) -> i32 {
+    let m = if mult == 0 { entry } else { entry * mult * 8 };
+    (base * 8 + m).clamp(-1023, 1023)
+}
+
+/// Decodes a signed 11-bit EAC block to 16 values (-1023..=1023, for -1.0..=1.0) in raster order.
+pub fn decode_r11_snorm(raw: &[u8]) -> [i16; 16] {
+    let (base, mult, table, bits) = fields(raw, Kind::R11Snorm);
+    let mut out = [0i16; 16];
+    for p in 0..16 {
+        out[raster(p)] = r11s_value(base, mult, TABLES[table][index(bits, p)]) as i16;
     }
     out
 }
@@ -86,22 +127,41 @@ pub fn r11_to_u8(v: u16) -> u8 {
     ((u32::from(v) * 255 + 1023) / 2047) as u8
 }
 
-fn decode_r11_u8(raw: &[u8]) -> [u8; 16] {
-    decode_r11(raw).map(r11_to_u8)
+/// Signed 11-bit value to the nearest 8-bit one under `u = (s + 1) × 255 / 2`.
+#[inline]
+pub fn r11_snorm_to_u8(v: i16) -> u8 {
+    let s = (i32::from(v).clamp(-1023, 1023) + 1023) as u32;
+    ((s * 255 + 1023) / 2046) as u8
 }
 
-/// EAC R11 block decode: value replicated to RGB, opaque alpha (like BC4).
-pub fn decode_r11_block(raw: &[u8], out: &mut Block) {
-    let r = decode_r11_u8(&raw[..8]);
+/// One channel decoded to 8 bits.
+fn decode_u8(raw: &[u8], kind: Kind) -> [u8; 16] {
+    match kind {
+        Kind::A8 => decode_a8(raw),
+        Kind::R11 => decode_r11(raw).map(r11_to_u8),
+        Kind::R11Snorm => decode_r11_snorm(raw).map(r11_snorm_to_u8),
+    }
+}
+
+/// The 11-bit kind: signed or not.
+fn kind11(signed: bool) -> Kind {
+    if signed { Kind::R11Snorm } else { Kind::R11 }
+}
+
+/// EAC R11 block decode (signed blocks mapped to 8 bits as above): value replicated to RGB,
+/// opaque alpha (like BC4).
+pub fn decode_r11_block(raw: &[u8], out: &mut Block, signed: bool) {
+    let r = decode_u8(&raw[..8], kind11(signed));
     for (t, r) in out.iter_mut().zip(r) {
         *t = [r, r, r, 255];
     }
 }
 
-/// EAC RG11 block decode: R and G, blue 0, opaque alpha (like BC5).
-pub fn decode_rg11_block(raw: &[u8], out: &mut Block) {
-    let r = decode_r11_u8(&raw[..8]);
-    let g = decode_r11_u8(&raw[8..16]);
+/// EAC RG11 block decode (signed blocks mapped to 8 bits as above): R and G, blue 0, opaque alpha
+/// (like BC5).
+pub fn decode_rg11_block(raw: &[u8], out: &mut Block, signed: bool) {
+    let r = decode_u8(&raw[..8], kind11(signed));
+    let g = decode_u8(&raw[8..16], kind11(signed));
     for (t, (r, g)) in out.iter_mut().zip(r.into_iter().zip(g)) {
         *t = [r, g, 0, 255];
     }
@@ -131,28 +191,36 @@ fn cfg(effort: u8) -> Cfg {
 
 /// One channel of a block in column-major order, with its targets in palette units.
 struct Target {
-    eleven: bool,
-    /// 8-bit: the values; 11-bit: the values scaled to 11 bits, times 4.
+    kind: Kind,
+    /// 8-bit: the values; 11-bit: the values scaled to 11 bits (signed: -1023..=1023), times 4.
     t: [i32; 16],
 }
 
 impl Target {
-    fn new(v: &[u8; 16], eleven: bool) -> Self {
+    fn new(v: &[u8; 16], kind: Kind) -> Self {
         let t = std::array::from_fn(|p| {
             let x = i32::from(v[raster(p)]);
-            if eleven { (x * 8188 + 127) / 255 } else { x }
+            match kind {
+                Kind::A8 => x,
+                Kind::R11 => (x * 8188 + 127) / 255,
+                Kind::R11Snorm => {
+                    // (2x - 255) / 255 × 1023 × 4, rounded half away from zero.
+                    let n = (2 * x - 255) * 4092;
+                    (n + if n < 0 { -127 } else { 127 }) / 255
+                }
+            }
         });
-        Self { eleven, t }
+        Self { kind, t }
     }
 
     /// The table's eight values in target units.
     #[inline(always)]
     fn palette(&self, base: i32, mult: i32, table: usize) -> [i32; 8] {
         let tab = &TABLES[table];
-        if self.eleven {
-            std::array::from_fn(|k| r11_value(base, mult, tab[k]) * 4)
-        } else {
-            std::array::from_fn(|k| (base + tab[k] * mult).clamp(0, 255))
+        match self.kind {
+            Kind::A8 => std::array::from_fn(|k| (base + tab[k] * mult).clamp(0, 255)),
+            Kind::R11 => std::array::from_fn(|k| r11_value(base, mult, tab[k]) * 4),
+            Kind::R11Snorm => std::array::from_fn(|k| r11s_value(base, mult, tab[k]) * 4),
         }
     }
 
@@ -183,7 +251,7 @@ impl Target {
 
     /// Smallest allowed multiplier: 11-bit blocks have the unscaled multiplier 0.
     fn min_mult(&self) -> i32 {
-        i32::from(!self.eleven)
+        i32::from(self.kind == Kind::A8)
     }
 
     /// Base and multiplier that put the table's extremes at `lo` and `hi` (target units).
@@ -191,7 +259,13 @@ impl Target {
         let tab = &TABLES[table];
         let (tmin, tmax) = (tab[3], tab[7]);
         let span = tmax - tmin;
-        if self.eleven {
+        if self.kind == Kind::R11Snorm {
+            // Value units are 11-bit × 4; no +4 bias.
+            let m = ((hi - lo + 16 * span) / (32 * span)).clamp(0, 15);
+            let scale = if m == 0 { 1 } else { m * 8 };
+            let mid = (lo + hi).div_euclid(8) - scale * (tmin + tmax) / 2;
+            ((mid + 4).div_euclid(8).clamp(-127, 127), m)
+        } else if self.kind == Kind::R11 {
             // Value units are 11-bit × 4.
             let m = ((hi - lo + 16 * span) / (32 * span)).clamp(0, 15);
             let scale = if m == 0 { 1 } else { m * 8 };
@@ -223,10 +297,12 @@ impl Target {
         // v ≈ a + slope · entry.
         let slope = (16 * stv - st * sv) as f32 / den as f32;
         let a = (sv as f32 - slope * st as f32) / 16.0;
-        if self.eleven {
-            // v/4 ≈ base·8 + 4 + entry·mult·8.
+        if self.kind != Kind::A8 {
+            // v/4 ≈ base·8 (+ 4 unsigned) + entry·mult·8.
+            let bias = if self.kind == Kind::R11 { 4.0 } else { 0.0 };
+            let (bmin, bmax) = self.kind.bases();
             let m = (slope / 32.0).round().clamp(0.0, 15.0) as i32;
-            let b = ((a / 4.0 - 4.0) / 8.0).round().clamp(0.0, 255.0) as i32;
+            let b = ((a / 4.0 - bias) / 8.0).round().clamp(bmin as f32, bmax as f32) as i32;
             (b, m)
         } else {
             let m = slope.round().clamp(1.0, 15.0) as i32;
@@ -252,7 +328,7 @@ fn search(tg: &Target, cfg: &Cfg) -> Fit {
         mult: 0,
         table: 0,
     };
-    if !tg.eleven && lo == hi {
+    if tg.kind == Kind::A8 && lo == hi {
         // Multiplier 0: every texel is the base.
         return Fit {
             err: 0,
@@ -262,6 +338,7 @@ fn search(tg: &Target, cfg: &Cfg) -> Fit {
         };
     }
     let mmin = tg.min_mult();
+    let (bmin, bmax) = tg.kind.bases();
     for table in 0..16 {
         let mut top = Fit {
             err: i32::MAX,
@@ -271,7 +348,7 @@ fn search(tg: &Target, cfg: &Cfg) -> Fit {
         };
         let try_window = |top: &mut Fit, (b0, m0): (i32, i32), dm: i32, db: i32| {
             for m in (m0 - dm).max(mmin)..=(m0 + dm).min(15) {
-                for b in (b0 - db).max(0)..=(b0 + db).min(255) {
+                for b in (b0 - db).max(bmin)..=(b0 + db).min(bmax) {
                     let e = tg.error(&tg.palette(b, m, table));
                     if e < top.err {
                         *top = Fit {
@@ -321,22 +398,27 @@ fn pack(tg: &Target, f: Fit) -> [u8; 8] {
 }
 
 #[inline(always)]
-fn encode(v: &[u8; 16], eleven: bool, cfg: &Cfg) -> [u8; 8] {
-    let tg = Target::new(v, eleven);
+fn encode(v: &[u8; 16], kind: Kind, cfg: &Cfg) -> [u8; 8] {
+    let tg = Target::new(v, kind);
     pack(&tg, search(&tg, cfg))
+}
+
+/// Encodes 16 raster-order 8-bit values as an EAC block of `kind`.
+pub fn encode_kind(v: &[u8; 16], kind: Kind, effort: u8) -> [u8; 8] {
+    encode(v, kind, &cfg(effort))
 }
 
 /// Encodes 16 raster-order values as an 8-bit EAC block (ETC2 RGBA8 alpha).
 pub fn encode_a8(v: &[u8; 16], effort: u8) -> [u8; 8] {
-    encode(v, false, &cfg(effort))
+    encode_kind(v, Kind::A8, effort)
 }
 
 /// Encodes 16 raster-order 8-bit values as an unsigned 11-bit EAC block.
 pub fn encode_r11(v: &[u8; 16], effort: u8) -> [u8; 8] {
-    encode(v, true, &cfg(effort))
+    encode_kind(v, Kind::R11, effort)
 }
 
-fn encode_span(surface: &Surface, first: usize, out: &mut [u8], chans: (usize, usize), eleven: bool, effort: u8) {
+fn encode_span(surface: &Surface, first: usize, out: &mut [u8], chans: (usize, usize), kind: Kind, effort: u8) {
     let cfg = cfg(effort);
     let bw = surface.blocks_x() as usize;
     let bb = 8 * chans.1;
@@ -344,20 +426,20 @@ fn encode_span(surface: &Surface, first: usize, out: &mut [u8], chans: (usize, u
         let i = first + k;
         let (bx, by) = ((i % bw) as u32, (i / bw) as u32);
         for (c, o) in o.as_chunks_mut::<8>().0.iter_mut().enumerate() {
-            *o = encode(&surface.read_block_channel(bx, by, chans.0 + c), eleven, &cfg);
+            *o = encode(&surface.read_block_channel(bx, by, chans.0 + c), kind, &cfg);
         }
     }
 }
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma")]
-fn encode_span_avx2(surface: &Surface, first: usize, out: &mut [u8], chans: (usize, usize), eleven: bool, effort: u8) {
-    encode_span(surface, first, out, chans, eleven, effort);
+fn encode_span_avx2(surface: &Surface, first: usize, out: &mut [u8], chans: (usize, usize), kind: Kind, effort: u8) {
+    encode_span(surface, first, out, chans, kind, effort);
 }
 
-/// Encodes channels `chans.0 .. chans.0 + chans.1` of every block (one EAC block each, in
-/// order), 11-bit when `eleven`, else 8-bit. Returns raw blocks in raster order.
-pub fn encode_surface(surface: &Surface, chans: (usize, usize), eleven: bool, effort: u8) -> Vec<u8> {
+/// Encodes channels `chans.0 .. chans.0 + chans.1` of every block (one EAC block of `kind` each,
+/// in order). Returns raw blocks in raster order.
+pub fn encode_surface(surface: &Surface, chans: (usize, usize), kind: Kind, effort: u8) -> Vec<u8> {
     use rayon::prelude::*;
     const SPAN: usize = 512;
     let bb = 8 * chans.1;
@@ -366,17 +448,17 @@ pub fn encode_surface(surface: &Surface, chans: (usize, usize), eleven: bool, ef
     out.par_chunks_mut(SPAN * bb).enumerate().for_each(|(ci, o)| match lvl {
         #[cfg(target_arch = "x86_64")]
         // SAFETY: `level()` returns Avx2 only when the CPU reports AVX2 and FMA.
-        crate::simd::Level::Avx2 => unsafe { encode_span_avx2(surface, ci * SPAN, o, chans, eleven, effort) },
-        _ => encode_span(surface, ci * SPAN, o, chans, eleven, effort),
+        crate::simd::Level::Avx2 => unsafe { encode_span_avx2(surface, ci * SPAN, o, chans, kind, effort) },
+        _ => encode_span(surface, ci * SPAN, o, chans, kind, effort),
     });
     out
 }
 
 /// `raw`'s base, multiplier and table with every index re-chosen for the 16 raster-order values `v`
 /// (for RDO: a copy of another block's first two bytes).
-pub fn reindex(raw: &[u8], v: &[u8; 16], eleven: bool) -> [u8; 8] {
-    let tg = Target::new(v, eleven);
-    let (base, mult, table, _) = fields(raw);
+pub fn reindex(raw: &[u8], v: &[u8; 16], kind: Kind) -> [u8; 8] {
+    let tg = Target::new(v, kind);
+    let (base, mult, table, _) = fields(raw, kind);
     pack(
         &tg,
         Fit {
@@ -391,18 +473,19 @@ pub fn reindex(raw: &[u8], v: &[u8; 16], eleven: bool) -> [u8; 8] {
 /// The indices in `idx` (the last six bytes of another block) with the base, multiplier and table
 /// fit to the 16 raster-order values `v`: a least-squares fit per table and its ±1 neighbors (for
 /// RDO: a copy of another block's indices).
-pub fn refit(idx: &[u8], v: &[u8; 16], eleven: bool) -> [u8; 8] {
-    let tg = Target::new(v, eleven);
+pub fn refit(idx: &[u8], v: &[u8; 16], kind: Kind) -> [u8; 8] {
+    let tg = Target::new(v, kind);
     let bits = u64::from_be_bytes([0, 0, idx[0], idx[1], idx[2], idx[3], idx[4], idx[5]]);
     let ix: [u8; 16] = std::array::from_fn(|p| index(bits, p) as u8);
     let lo = *tg.t.iter().min().unwrap();
     let hi = *tg.t.iter().max().unwrap();
     let mmin = tg.min_mult();
+    let (bmin, bmax) = kind.bases();
     let mut best = (i32::MAX, 0, 0, 0);
     for table in 0..16 {
         let (b0, m0) = tg.refit(&ix, table, tg.range_fit(lo, hi, table));
         for m in (m0 - 1).max(mmin)..=(m0 + 1).min(15) {
-            for b in (b0 - 1).max(0)..=(b0 + 1).min(255) {
+            for b in (b0 - 1).max(bmin)..=(b0 + 1).min(bmax) {
                 let pal = tg.palette(b, m, table);
                 let e: i32 = (0..16).map(|p| (tg.t[p] - pal[ix[p] as usize]).pow(2)).sum();
                 if e < best.0 {
@@ -425,9 +508,12 @@ pub fn refit(idx: &[u8], v: &[u8; 16], eleven: bool) -> [u8; 8] {
 }
 
 /// Squared error of an encoded channel against its 8-bit source, after decoding to 8 bits.
-pub fn channel_error(raw: &[u8], v: &[u8; 16], eleven: bool) -> u32 {
-    let d = if eleven { decode_r11_u8(raw) } else { decode_a8(raw) };
-    d.iter().zip(v).map(|(a, b)| u32::from(a.abs_diff(*b)).pow(2)).sum()
+pub fn channel_error(raw: &[u8], v: &[u8; 16], kind: Kind) -> u32 {
+    decode_u8(raw, kind)
+        .iter()
+        .zip(v)
+        .map(|(a, b)| u32::from(a.abs_diff(*b)).pow(2))
+        .sum()
 }
 
 #[cfg(test)]
@@ -489,6 +575,24 @@ mod tests {
         assert_eq!(r11_to_u8(1024), 128);
     }
 
+    #[test]
+    fn r11_signed() {
+        // base·8 + entry·mult·8, base a signed byte.
+        let v = decode_r11_snorm(&block((-50i8).cast_unsigned(), 2, 1, WALK));
+        assert_eq!(v[0], -400 - 48);
+        assert_eq!(v[13], -400 + 192);
+        // -128 reads as -127; multiplier 0 adds the entry unscaled; clamps to -1023..=1023.
+        let v = decode_r11_snorm(&block(0x80, 0, 13, WALK));
+        assert_eq!(v[0], -1016 - 1);
+        assert_eq!(v[12], -1023);
+        let v = decode_r11_snorm(&block(127, 15, 0, WALK));
+        assert_eq!(v[13], 1023);
+        assert_eq!(r11_snorm_to_u8(1023), 255);
+        assert_eq!(r11_snorm_to_u8(-1023), 0);
+        assert_eq!(r11_snorm_to_u8(0), 128);
+        assert_eq!(r11_snorm_to_u8(-4), 127);
+    }
+
     fn rng(seed: &mut u32) -> u32 {
         *seed ^= *seed << 13;
         *seed ^= *seed >> 17;
@@ -499,23 +603,20 @@ mod tests {
     #[test]
     fn encoders_are_close_and_improve_with_effort() {
         let mut seed = 0x51ed_270b;
-        for eleven in [false, true] {
+        for kind in [Kind::A8, Kind::R11, Kind::R11Snorm] {
             let mut totals = [0u64; 10];
             for k in 0..500 {
                 let lo = rng(&mut seed) % 256;
                 let span = [4, 20, 80, 256][k % 4];
                 let v: [u8; 16] = std::array::from_fn(|_| (lo + rng(&mut seed) % span).min(255) as u8);
                 for e in 0..10u8 {
-                    let raw = if eleven { encode_r11(&v, e) } else { encode_a8(&v, e) };
-                    totals[e as usize] += u64::from(channel_error(&raw, &v, eleven));
+                    let raw = encode_kind(&v, kind, e);
+                    totals[e as usize] += u64::from(channel_error(&raw, &v, kind));
                 }
             }
-            assert!(
-                totals[9] <= totals[4] && totals[4] <= totals[0],
-                "eleven {eleven}: {totals:?}"
-            );
+            assert!(totals[9] <= totals[4] && totals[4] <= totals[0], "{kind:?}: {totals:?}");
             // Under ~2.5 per texel RMS on this mix.
-            assert!(totals[5] < 500 * 16 * 7, "eleven {eleven}: {totals:?}");
+            assert!(totals[5] < 500 * 16 * 7, "{kind:?}: {totals:?}");
         }
     }
 
@@ -535,15 +636,15 @@ mod tests {
                     (i * 9 + (seed % 20) as usize) as u8
                 }
             });
-            for eleven in [false, true] {
-                let raw = encode(&v, eleven, &cfg(2));
-                let e = channel_error(&raw, &v, eleven);
-                let r = reindex(&raw, &v, eleven);
+            for kind in [Kind::A8, Kind::R11, Kind::R11Snorm] {
+                let raw = encode(&v, kind, &cfg(2));
+                let e = channel_error(&raw, &v, kind);
+                let r = reindex(&raw, &v, kind);
                 assert_eq!(r[..2], raw[..2]);
-                assert!(channel_error(&r, &v, eleven) <= e + 16, "{k} {eleven}");
-                let f = refit(&raw[2..], &v, eleven);
+                assert!(channel_error(&r, &v, kind) <= e + 16, "{k} {kind:?}");
+                let f = refit(&raw[2..], &v, kind);
                 assert_eq!(f[2..], raw[2..]);
-                assert!(channel_error(&f, &v, eleven) <= e * 2 + 32, "{k} {eleven}");
+                assert!(channel_error(&f, &v, kind) <= e * 2 + 32, "{k} {kind:?}");
             }
         }
     }
@@ -551,8 +652,13 @@ mod tests {
     #[test]
     fn flat_blocks_are_exact() {
         for x in [0u8, 1, 77, 128, 254, 255] {
-            assert_eq!(channel_error(&encode_a8(&[x; 16], 0), &[x; 16], false), 0);
-            assert_eq!(channel_error(&encode_r11(&[x; 16], 0), &[x; 16], true), 0);
+            for kind in [Kind::A8, Kind::R11, Kind::R11Snorm] {
+                assert_eq!(
+                    channel_error(&encode_kind(&[x; 16], kind, 0), &[x; 16], kind),
+                    0,
+                    "{x} {kind:?}"
+                );
+            }
         }
     }
 }

@@ -216,8 +216,8 @@ impl RdoParams {
         self.window.unwrap_or(match format {
             Format::Bc6h | Format::Bc7 | crate::format::astc!() => 16 * 1024,
             Format::Bc1 | Format::Bc3 | Format::Etc2Rgb | Format::Etc2Rgba => 8 * 1024,
-            Format::Bc5 | Format::EacRg11 => 3072,
-            Format::Bc4 | Format::EacR11 => 2048,
+            Format::Bc5 | Format::EacRg11 | Format::EacRg11Snorm => 3072,
+            Format::Bc4 | Format::EacR11 | Format::EacR11Snorm => 2048,
         })
     }
 
@@ -281,6 +281,7 @@ impl RdoParams {
             Format::Bc7 => 128,
             Format::Bc1 | Format::Bc3 | Format::Bc4 => 256,
             Format::Etc2Rgba | Format::EacR11 | Format::EacRg11 => 256,
+            Format::EacR11Snorm | Format::EacRg11Snorm => 256,
             Format::Bc5 | Format::Bc6h | Format::Etc2Rgb => 0,
             crate::format::astc!() => 0,
         })
@@ -1120,7 +1121,12 @@ fn candidates(
         Format::Bc6h => {}
         // `optimize_with_alt` refuses ASTC: its blocks are not 4x4.
         crate::format::astc!() => unreachable!("{format} has no RDO"),
-        Format::Etc2Rgb | Format::Etc2Rgba | Format::EacR11 | Format::EacRg11 => {
+        Format::Etc2Rgb
+        | Format::Etc2Rgba
+        | Format::EacR11
+        | Format::EacRg11
+        | Format::EacR11Snorm
+        | Format::EacRg11Snorm => {
             // Per 8-byte half, with base's other half: ETC2 color takes prev's colors with the
             // selectors re-chosen and prev's selectors with base's mode refit; EAC takes prev's
             // base, multiplier and table re-indexed and prev's indices refit. Each is memoized by
@@ -1128,10 +1134,14 @@ fn candidates(
             let parts: &[(usize, Option<usize>)] = match format {
                 Format::Etc2Rgb => &[(0, None)],
                 Format::Etc2Rgba => &[(0, Some(3)), (8, None)],
-                Format::EacR11 => &[(0, Some(0))],
+                Format::EacR11 | Format::EacR11Snorm => &[(0, Some(0))],
                 _ => &[(0, Some(0)), (8, Some(1))],
             };
-            let eleven = matches!(format, Format::EacR11 | Format::EacRg11);
+            let kind = match format {
+                Format::EacR11Snorm | Format::EacRg11Snorm => eac::Kind::R11Snorm,
+                Format::EacR11 | Format::EacRg11 => eac::Kind::R11,
+                _ => eac::Kind::A8,
+            };
             for (h, &(o, chan)) in parts.iter().enumerate() {
                 let r = o..o + 8;
                 let tag = (h as u64) << 56;
@@ -1162,10 +1172,10 @@ fn candidates(
                     Some(c) => {
                         let v = bc4::channel(src, c);
                         if fields.endpoints.insert(tag | field_key(&prev[o..o + 2])) {
-                            push(&eac::reindex(&prev[r.clone()], &v, eleven));
+                            push(&eac::reindex(&prev[r.clone()], &v, kind));
                         }
                         if fields.indices.insert(tag | field_key(&prev[o + 2..o + 8])) {
-                            push(&eac::refit(&prev[o + 2..o + 8], &v, eleven));
+                            push(&eac::refit(&prev[o + 2..o + 8], &v, kind));
                         }
                     }
                 }
@@ -2209,6 +2219,7 @@ fn optimize_chunk(
         Format::Bc5 => w[2..] == [0, 0],
         Format::Bc3 | Format::Bc6h | Format::Bc7 => false,
         Format::Etc2Rgb | Format::Etc2Rgba | Format::EacR11 | Format::EacRg11 => false,
+        Format::EacR11Snorm | Format::EacRg11Snorm => false,
         crate::format::astc!() => false,
     } && far_back > max_back;
     let mut far = FarEndpoints::new(format, if far_on { blocks.len() } else { 0 }, w);
@@ -2746,8 +2757,8 @@ fn optimize_chunk(
                 Format::Bc6h => &[(0, 16)],
                 Format::Etc2Rgb => &[(0, 4), (4, 8)],
                 Format::Etc2Rgba => &[(0, 2), (2, 8), (8, 12), (12, 16)],
-                Format::EacR11 => &[(0, 2), (2, 8)],
-                Format::EacRg11 => &[(0, 2), (2, 8), (8, 10), (10, 16)],
+                Format::EacR11 | Format::EacR11Snorm => &[(0, 2), (2, 8)],
+                Format::EacRg11 | Format::EacRg11Snorm => &[(0, 2), (2, 8), (8, 10), (10, 16)],
                 crate::format::astc!() => &[(0, 16)],
             };
             let cur = best.1;

@@ -495,11 +495,11 @@ fn view(format: Format, s: &Surface, normal: bool) -> Vec<u8> {
     for &[r, g, b, a] in &s.pixels {
         out.extend_from_slice(&match format {
             Format::Bc1 | Format::Etc2Rgb => [r, g, b, 255],
-            Format::Bc4 | Format::EacR11 => [r, r, r, 255],
-            Format::Bc5 | Format::EacRg11 if normal => {
+            Format::Bc4 | Format::EacR11 | Format::EacR11Snorm => [r, r, r, 255],
+            Format::Bc5 | Format::EacRg11 | Format::EacRg11Snorm if normal => {
                 [r, g, ((normal_from_rg(r, g)[2] + 1.0) * 127.5 + 0.5) as u8, 255]
             }
-            Format::Bc5 | Format::EacRg11 => [r, g, 0, 255],
+            Format::Bc5 | Format::EacRg11 | Format::EacRg11Snorm => [r, g, 0, 255],
             Format::Bc3 | Format::Bc7 | Format::Etc2Rgba => [r, g, b, a],
             Format::Astc4x4
             | Format::Astc5x4

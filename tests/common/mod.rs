@@ -44,6 +44,14 @@ pub fn reference_decode(format: Format, raw: &[u8]) -> [[u8; 4]; 16] {
             let (r, g) = (eac_r11(&raw[..8]), eac_r11(&raw[8..16]));
             return std::array::from_fn(|i| [r[i], g[i], 0, 255]);
         }
+        Format::EacR11Snorm => {
+            let r = eac_r11_snorm(&raw[..8]);
+            return std::array::from_fn(|i| [r[i], r[i], r[i], 255]);
+        }
+        Format::EacRg11Snorm => {
+            let (r, g) = (eac_r11_snorm(&raw[..8]), eac_r11_snorm(&raw[8..16]));
+            return std::array::from_fn(|i| [r[i], g[i], 0, 255]);
+        }
         Format::Astc4x4
         | Format::Astc5x4
         | Format::Astc5x5
@@ -85,6 +93,16 @@ pub fn reference_decode_astc(raw: &[u8], bw: u32, bh: u32) -> Vec<[u8; 4]> {
 /// EAC R11 (unsigned) per the Khronos Data Format Specification, section 21.3, rounded to 8 bits
 /// as `(v * 255 + 1023) / 2047`, in raster order.
 pub fn eac_r11(raw: &[u8]) -> [u8; 16] {
+    eac_r11_any(raw, false)
+}
+
+/// Signed EAC R11 per the same section (base a two's-complement byte, -128 read as -127, no +4
+/// bias, clamped to -1023..=1023), mapped to 8 bits as `((v + 1023) * 255 + 1023) / 2046`.
+pub fn eac_r11_snorm(raw: &[u8]) -> [u8; 16] {
+    eac_r11_any(raw, true)
+}
+
+fn eac_r11_any(raw: &[u8], signed: bool) -> [u8; 16] {
     const T: [[i32; 8]; 16] = [
         [-3, -6, -9, -15, 2, 5, 8, 14],
         [-3, -7, -10, -13, 2, 6, 9, 12],
@@ -103,7 +121,11 @@ pub fn eac_r11(raw: &[u8]) -> [u8; 16] {
         [-4, -6, -8, -9, 3, 5, 7, 8],
         [-3, -5, -7, -9, 2, 4, 6, 8],
     ];
-    let base = i32::from(raw[0]);
+    let base = if signed {
+        i32::from(raw[0] as i8).max(-127)
+    } else {
+        i32::from(raw[0])
+    };
     let mult = i32::from(raw[1] >> 4);
     let table = &T[usize::from(raw[1] & 15)];
     let bits = raw[2..8].iter().fold(0u64, |a, &b| a << 8 | u64::from(b));
@@ -111,12 +133,14 @@ pub fn eac_r11(raw: &[u8]) -> [u8; 16] {
     for x in 0..4 {
         for y in 0..4 {
             let m = table[((bits >> (45 - 3 * (x * 4 + y))) & 7) as usize];
-            let v = if mult == 0 {
-                base * 8 + 4 + m
+            let m = if mult == 0 { m } else { m * mult * 8 };
+            out[y * 4 + x] = if signed {
+                let v = (base * 8 + m).clamp(-1023, 1023);
+                (((v + 1023) * 255 + 1023) / 2046) as u8
             } else {
-                base * 8 + 4 + m * mult * 8
+                let v = (base * 8 + 4 + m).clamp(0, 2047);
+                ((v * 255 + 1023) / 2047) as u8
             };
-            out[y * 4 + x] = ((v.clamp(0, 2047) * 255 + 1023) / 2047) as u8;
         }
     }
     out

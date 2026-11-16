@@ -16,8 +16,8 @@ fn channels(format: Format) -> &'static [usize] {
         Format::Bc3 | Format::Bc7 => &[0, 1, 2, 3],
         Format::Etc2Rgb => &[0, 1, 2],
         Format::Etc2Rgba => &[0, 1, 2, 3],
-        Format::EacR11 => &[0],
-        Format::EacRg11 => &[0, 1],
+        Format::EacR11 | Format::EacR11Snorm => &[0],
+        Format::EacRg11 | Format::EacRg11Snorm => &[0, 1],
         Format::Astc4x4
         | Format::Astc5x4
         | Format::Astc5x5
@@ -132,7 +132,14 @@ fn etc2_and_eac_decoders_match_reference_on_random_blocks() {
             raw[1] &= 0x0f; // EAC multiplier 0
         }
         modes.insert(format!("{:?}", mipple::etc::mode(&raw[8..])));
-        for format in [Format::Etc2Rgb, Format::Etc2Rgba, Format::EacR11, Format::EacRg11] {
+        for format in [
+            Format::Etc2Rgb,
+            Format::Etc2Rgba,
+            Format::EacR11,
+            Format::EacRg11,
+            Format::EacR11Snorm,
+            Format::EacRg11Snorm,
+        ] {
             let n = format.block_bytes();
             let raw = if format == Format::Etc2Rgb {
                 &raw[8..]

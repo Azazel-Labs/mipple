@@ -1165,7 +1165,7 @@ pub fn decode_rgba(raw: &[u8], out: &mut Block) {
 /// Encodes a whole surface as ETC2 RGBA8; returns raw 16-byte blocks in raster order.
 pub fn encode_surface_rgba(surface: &Surface, effort: u8) -> Vec<u8> {
     let (alpha, color) = rayon::join(
-        || crate::eac::encode_surface(surface, (3, 1), false, effort),
+        || crate::eac::encode_surface(surface, (3, 1), crate::eac::Kind::A8, effort),
         || encode_surface(surface, effort),
     );
     let mut out = Vec::with_capacity(alpha.len() * 2);

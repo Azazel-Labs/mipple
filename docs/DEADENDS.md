@@ -339,6 +339,13 @@ Measured on the first 8 Kodak images (ETC2 RGBA: the twelve RGBA images of BENCH
 - **Field-swap refinement for ETC2 RGB.** `--refine-back 256` against 0 is even: sizes within 0.2% and
   PSNR within 0.02 dB at each λ, so it is off by default. It stays on for ETC2 RGBA, where the alpha half
   gains (1.2-1.7% smaller for 0.02-0.05 dB), and for EAC (RG11 2-4% smaller for 0.04-0.16 dB).
+- **Scoring 11-bit EAC with an 8-bit rounding term.** Signed EAC trails unsigned in 8-bit PSNR on smooth
+  mid-range blocks (blocks spanning 4-5 levels: about twice the error) because its palette steps sit half
+  an 8-bit step off those values. Adding `W × (8-bit error)²` to each texel's 11-bit squared error (W in
+  11-bit × 4 units², random blocks, effort 5) only trades one error for the other: at a 4-level span, W 1024
+  cuts the 8-bit error 88% but raises the 11-bit error 64%. W 64 gives −11% for +1%. Even an exhaustive
+  search scored in 8 bits leaves signed blocks some error there, so this is the format, not the search. The
+  11-bit error is what a shader samples, so the encoder keeps it.
 
 ## Engineering
 

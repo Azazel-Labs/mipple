@@ -10,7 +10,7 @@ milestone in progress; every green push to main is released as the next patch (`
    ~~more footprints~~ (all 14 2D footprints done), a faster RDO pass.
 2. BC6H: ~~RDO with a log-space distortion~~ (done: 42% smaller Zstd files at λ 2), signed BC6H, a GPU kernel.
 3. ~~ETC2 / EAC for mobile fallbacks.~~ Done (v1.0 below); next for it: punch-through alpha (ETC2 RGB A1),
-   signed EAC, a SIMD batch encoder.
+   ~~signed EAC~~ (done), a SIMD batch encoder.
 
 ## v0.1 (pre-release): encoder and container
 
@@ -195,7 +195,9 @@ Open for v0.9.x:
   KTX2 only, with the RDO pass. On Kodak, one thread, effort 0 is 0.37 dB ahead of Compressonator in an
   eighth of its time and effort 1 0.94 dB ahead in half; with RDO, files are about 25% smaller at
   Compressonator's PSNR (BENCHMARKS.md). etcpak and etc2comp were not available to grade.
-  - [ ] Punch-through alpha (ETC2 RGB A1, vkFormat 149/150), signed EAC, a SIMD batch encoder (eight blocks
+  - [x] Signed EAC R11 / RG11 (`eac-r11-snorm`, `eac-rg11-snorm`; vkFormat 154/156), checked against a
+    transcription of the Khronos specification.
+  - [ ] Punch-through alpha (ETC2 RGB A1, vkFormat 149/150), a SIMD batch encoder (eight blocks
     per call, as BC1/BC6H), a GPU kernel, and a cheaper RDO candidate error than a full decode.
 
 ## v1.0+: perception and speed

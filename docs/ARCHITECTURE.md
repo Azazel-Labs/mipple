@@ -30,7 +30,7 @@ image ─► mips ─► base encode (parallel) ─► RDO (per 16/64 KiB chunk,
 | `src/bc7/partition.rs` | Line fits of 8 partitions per SIMD step (one block), for partition ranking and pruning |
 | `src/bc7/batch.rs` | Batch encoder for entropy-reduced (RDO base) search levels 0-1, 8 opaque blocks at once, one per lane |
 | `src/etc.rs` | ETC2 RGB decoder and encoder (individual, differential, T, H and planar modes), RDO helpers (re-select, selector refit) |
-| `src/eac.rs` | EAC decoder and encoder: the ETC2 RGBA8 alpha half and EAC R11 / RG11 (unsigned), RDO helpers (re-index, refit) |
+| `src/eac.rs` | EAC decoder and encoder: the ETC2 RGBA8 alpha half and EAC R11 / RG11 (unsigned and signed), RDO helpers (re-index, refit) |
 | `src/astc/` | ASTC LDR: block layout, integer sequence encoding and unquantization (`mod.rs`), decoder for every 2D footprint (`decode.rs`), whole-surface encoder for every 2D footprint (`encode.rs`), the `.astc` container (`file.rs`) |
 | `src/format.rs` | `Format` enum (block footprint and size, vkFormat, error weights, 4x4 encode/decode dispatch) and `BlockOpts` |
 | `src/rdo.rs` | The RDO pass and `LzModel` rate estimator |
@@ -98,7 +98,12 @@ refit and, from effort 4, a ±1 descent on the 444 colors. Planar: a least-squar
 search of its quantized neighborhood, each channel on its own. **EAC** (`eac.rs`, the ETC2 RGBA8 alpha half
 and R11/RG11): per table, the base and multiplier that span the block's range, a window around them, then
 least-squares refits of (base, multiplier) to the chosen entries; 11-bit blocks are scored against the
-8-bit source scaled to 11 bits with two fractional bits. No GPU kernel and no DDS (DXGI has no ETC formats).
+8-bit source scaled to 11 bits with two fractional bits (signed: byte u as (2u − 255) / 255 of
+1023, so 0 and 255 land on −1023 and 1023 exactly, and the base is a two's-complement byte with no +4
+bias). The encoder minimizes this 11-bit error, the value a shader samples, not the error after rounding
+back to 8 bits. Without the bias, mid-range bytes fall about half an 8-bit step between multiplier-1 palette
+steps, so smooth signed blocks near 0 round back to 8 bits less exactly than unsigned ones (the gradient in
+`mipple check`: 69.9 dB against 75.5). No GPU kernel and no DDS (DXGI has no ETC formats).
 
 **ASTC LDR** (`astc/encode.rs`, every 2D footprint from 4x4 to 12x12): the only formats whose blocks are not 4x4 texels, so they
 bypass the 4x4 `Block` path entirely: `pipeline` hands each mip level to `astc::encode::encode_surface` (one

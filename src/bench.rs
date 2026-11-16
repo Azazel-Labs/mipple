@@ -119,8 +119,8 @@ pub fn quality(format: Format, source: &Surface, dec: &Surface, normal: bool) ->
             metrics::ssim_luma(source, dec)
         }
         crate::format::astc!() => metrics::ssim_luma(source, dec),
-        Format::Bc4 | Format::EacR11 => metrics::ssim_channel(source, dec, 0),
-        Format::Bc5 | Format::EacRg11 => {
+        Format::Bc4 | Format::EacR11 | Format::EacR11Snorm => metrics::ssim_channel(source, dec, 0),
+        Format::Bc5 | Format::EacRg11 | Format::EacRg11Snorm => {
             (metrics::ssim_channel(source, dec, 0) + metrics::ssim_channel(source, dec, 1)) / 2.0
         }
     };

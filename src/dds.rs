@@ -28,6 +28,7 @@ fn dxgi(format: Format, srgb: bool) -> Option<u32> {
         (Format::Bc7, false) => 98,
         (Format::Bc7, true) => 99,
         (Format::Etc2Rgb | Format::Etc2Rgba | Format::EacR11 | Format::EacRg11, _) => return None,
+        (Format::EacR11Snorm | Format::EacRg11Snorm, _) => return None,
         (crate::format::astc!(), _) => return None,
     })
 }
