@@ -487,7 +487,7 @@ async fn run(surface: &Surface, s: &Settings, gpu: Option<&'static Gpu>) -> Resu
     })
 }
 
-/// What a format stores, as RGBA8 for display: BC1, ETC2 RGB and BC6H opaque RGB, BC4 and EAC R11 their
+/// What a format stores, as RGBA8 for display: BC1, ETC2 RGB and BC6H (both) opaque RGB, BC4 and EAC R11 their
 /// R channel as gray, BC5 and EAC RG11 R and G (with Z rebuilt into blue for normal maps, as
 /// `mipple decode --normal` does), BC3, ETC2 RGBA, BC7 and ASTC RGBA.
 fn view(format: Format, s: &Surface, normal: bool) -> Vec<u8> {
@@ -515,7 +515,7 @@ fn view(format: Format, s: &Surface, normal: bool) -> Vec<u8> {
             | Format::Astc10x10
             | Format::Astc12x10
             | Format::Astc12x12 => [r, g, b, a],
-            Format::Bc6h => [r, g, b, 255],
+            Format::Bc6h | Format::Bc6hSf16 => [r, g, b, 255],
         });
     }
     out

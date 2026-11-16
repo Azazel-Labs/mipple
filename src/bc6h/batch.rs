@@ -6,11 +6,16 @@
 //! (every intermediate is an integer below 2^24), so the half-bit palette is the format's own;
 //! squared errors are summed in `f32`.
 //!
+//! Signed blocks (BC6H_SF16) run the same kernels with `S` set: texels are signed magnitudes
+//! ([`super::half_key`]), endpoints quantize and unquantize by magnitude with their sign kept, and
+//! finishing scales by 31/32 instead of 31/64. `S` rides on [`Params`] and [`Target`], so every
+//! kernel that takes one infers it.
+//!
 //! Kernels are generic over [`SimdF32`] and fully inlined into [`encode8`]; the AVX2 entry point
 //! instantiates them with the target feature enabled. No closures inside kernels: they don't
 //! inherit the caller's target features (see docs/DEADENDS.md).
 
-use super::{Bc6hBlock, HALF_MAX, HdrBlock, MODES, ONE_ORDER, Search, TWO_ORDER, W3, W4, pack};
+use super::{Bc6hBlock, HdrBlock, MODES, ONE_ORDER, Search, TWO_ORDER, W3, W4, pack};
 use crate::bc7::tables::{ANCHOR2, PART2};
 #[cfg(target_arch = "x86_64")]
 use crate::simd::Level;
@@ -61,18 +66,17 @@ fn abs<V: SimdF32>(x: V) -> V {
     x.simd_max(V::splat(0.0) - x)
 }
 
-/// Eight blocks' texels, `[texel * 3 + channel][lane]`: half bits as `f32` (each at most
-/// [`HALF_MAX`]; negative values and NaN already 0). Lanes are innermost so each vector loads
-/// directly.
+/// Eight blocks' texels, `[texel * 3 + channel][lane]`: [`super::half_key`] as `f32` (half bits
+/// at most [`super::HALF_MAX`]: unsigned, negative values and NaN already 0; signed, negative
+/// values negated). Lanes are innermost so each vector loads directly.
 pub(super) type Texels = [[f32; LANES]; 48];
 
-/// Lane `l` of `x` from a block of half floats (negative values and NaN as 0).
+/// Lane `l` of `x` from a block of half floats, as [`super::half_key`] (signed when `signed`).
 #[inline(always)]
-pub(super) fn set_lane(x: &mut Texels, l: usize, px: &HdrBlock) {
+pub(super) fn set_lane(x: &mut Texels, l: usize, px: &HdrBlock, signed: bool) {
     for i in 0..16 {
         for c in 0..3 {
-            let v = px[i][c];
-            x[i * 3 + c][l] = f32::from(if v & 0x8000 != 0 { 0 } else { v.min(HALF_MAX) });
+            x[i * 3 + c][l] = super::half_key(px[i][c], signed) as f32;
         }
     }
 }
@@ -86,33 +90,41 @@ pub(super) fn pad_lanes(x: &mut Texels, k: usize) {
     }
 }
 
-/// The eight blocks' texels as half bits (`h`) and on the 16-bit interpolation scale (`t`).
-struct Target<V> {
+/// The eight blocks' texels as half bits (`h`) and on the 16-bit interpolation scale (`t`);
+/// signed when `S`.
+struct Target<V, const S: bool> {
     h: [[V; 3]; 16],
     t: [[V; 3]; 16],
 }
 
 #[inline(always)]
-fn target<V: SimdF32>(x: &Texels) -> Target<V> {
+fn target<V: SimdF32, const S: bool>(x: &Texels) -> Target<V, S> {
     let mut h = [[zero::<V>(); 3]; 16];
     let mut t = [[zero::<V>(); 3]; 16];
     for i in 0..16 {
         for c in 0..3 {
             h[i][c] = V::from_slice(&x[i * 3 + c]);
-            t[i][c] = h[i][c] * V::splat(64.0 / 31.0);
+            // Signed, each half step owns a 32/31-wide window of the 16-bit scale, so aim at its
+            // middle: rounding the window's start lands one step low about half the time.
+            t[i][c] = if S {
+                with_sign((abs(h[i][c]) + V::splat(0.5)) * V::splat(32.0 / 31.0), h[i][c])
+            } else {
+                h[i][c] * V::splat(64.0 / 31.0)
+            };
         }
     }
     Target { h, t }
 }
 
-/// Per-lane mode settings.
+/// Per-lane mode settings, for signed blocks when `S`.
 #[derive(Clone, Copy)]
-struct Params<V: SimdF32> {
-    /// 2^(16 - eb): unquantized values are `(q + 1/2) * scale` between the ends.
+struct Params<V: SimdF32, const S: bool> {
+    /// 2^(16 - eb): unquantized values (magnitudes, if signed) are `(q + 1/2) * scale` between
+    /// the ends.
     scale: V,
     /// 2^(eb - 16).
     inv: V,
-    /// 2^eb - 1.
+    /// The largest quantized value (magnitude): 2^eb - 1, or 2^(eb - 1) - 1 signed.
     max: V,
     /// 16-bit endpoints (stored as is).
     is16: Mask<V>,
@@ -128,6 +140,7 @@ struct ModeConsts {
     scale: f32,
     inv: f32,
     max: f32,
+    smax: f32,
     is16: bool,
     lo: [f32; 3],
     hi: [f32; 3],
@@ -139,6 +152,7 @@ const MODE_CONSTS: [ModeConsts; 14] = {
         scale: 0.0,
         inv: 0.0,
         max: 0.0,
+        smax: 0.0,
         is16: false,
         lo: [0.0; 3],
         hi: [0.0; 3],
@@ -151,6 +165,7 @@ const MODE_CONSTS: [ModeConsts; 14] = {
         t[i].scale = s;
         t[i].inv = 1.0 / s;
         t[i].max = ((1u32 << m.eb) - 1) as f32;
+        t[i].smax = ((1u32 << (m.eb - 1)) - 1) as f32;
         t[i].is16 = m.eb >= 16;
         let mut c = 0;
         while c < 3 {
@@ -167,13 +182,13 @@ const MODE_CONSTS: [ModeConsts; 14] = {
 
 /// [`Params`] with mode `mi` in every lane.
 #[inline(always)]
-fn params1<V: SimdF32>(mi: usize) -> Params<V> {
+fn params1<V: SimdF32, const S: bool>(mi: usize) -> Params<V, S> {
     let m = MODE_CONSTS[mi];
     let mask = |b: bool| V::mask_from_bools([b; LANES]);
     Params {
         scale: V::splat(m.scale),
         inv: V::splat(m.inv),
-        max: V::splat(m.max),
+        max: V::splat(if S { m.smax } else { m.max }),
         is16: mask(m.is16),
         lo: [V::splat(m.lo[0]), V::splat(m.lo[1]), V::splat(m.lo[2])],
         hi: [V::splat(m.hi[0]), V::splat(m.hi[1]), V::splat(m.hi[2])],
@@ -182,7 +197,7 @@ fn params1<V: SimdF32>(mi: usize) -> Params<V> {
 }
 
 #[inline(always)]
-fn params<V: SimdF32>(modes: &[usize; LANES]) -> Params<V> {
+fn params<V: SimdF32, const S: bool>(modes: &[usize; LANES]) -> Params<V, S> {
     if modes.iter().all(|&m| m == modes[0]) {
         return params1(modes[0]);
     }
@@ -197,7 +212,7 @@ fn params<V: SimdF32>(modes: &[usize; LANES]) -> Params<V> {
         let m = &MODE_CONSTS[modes[l]];
         scale[l] = m.scale;
         inv[l] = m.inv;
-        max[l] = m.max;
+        max[l] = if S { m.smax } else { m.max };
         is16[l] = m.is16;
         for c in 0..3 {
             lo[c][l] = m.lo[c];
@@ -216,18 +231,49 @@ fn params<V: SimdF32>(modes: &[usize; LANES]) -> Params<V> {
     }
 }
 
-/// An endpoint component back on the 16-bit scale (unsigned).
+/// `x` with the sign of `s` (`x` non-negative).
 #[inline(always)]
-fn unquantize<V: SimdF32>(q: V, p: &Params<V>) -> V {
+fn with_sign<V: SimdF32>(x: V, s: V) -> V {
+    V::select(s.simd_lt(zero()), zero::<V>() - x, x)
+}
+
+/// The largest unquantized magnitude: 65535, or 32767 signed.
+const fn top(signed: bool) -> f32 {
+    if signed { 32767.0 } else { 65535.0 }
+}
+
+/// An endpoint component back on the 16-bit scale: 0..=65535, or -32767..=32767 signed (the
+/// magnitude unquantized, the sign kept).
+#[inline(always)]
+fn unquantize<V: SimdF32, const S: bool>(q: V, p: &Params<V, S>) -> V {
+    if S {
+        with_sign(unquantize_mag(abs(q), p), q)
+    } else {
+        unquantize_mag(q, p)
+    }
+}
+
+#[inline(always)]
+fn unquantize_mag<V: SimdF32, const S: bool>(q: V, p: &Params<V, S>) -> V {
     let half = V::splat(0.5);
     let r = ((q + half) * p.scale).floor();
     let r = V::select(q.simd_lt(half), zero(), r);
-    V::select(p.max.simd_lt(q + half), V::splat(65535.0), r)
+    V::select(p.max.simd_lt(q + half), V::splat(top(S)), r)
 }
 
-/// The quantized value whose unquantized value is nearest `x` (`x` in 0..=65535).
+/// The quantized value whose unquantized value is nearest `x` (`x` in 0..=65535, or
+/// -32767..=32767 signed: the magnitude quantized, the sign kept).
 #[inline(always)]
-fn quantize<V: SimdF32>(x: V, p: &Params<V>) -> V {
+fn quantize<V: SimdF32, const S: bool>(x: V, p: &Params<V, S>) -> V {
+    if S {
+        with_sign(quantize_mag(abs(x), p), x)
+    } else {
+        quantize_mag(x, p)
+    }
+}
+
+#[inline(always)]
+fn quantize_mag<V: SimdF32, const S: bool>(x: V, p: &Params<V, S>) -> V {
     let one = V::splat(1.0);
     let q0 = (x * p.inv).floor().simd_clamp(zero(), p.max);
     // Between the ends the grid is even, so the floor is nearest; at the ends compare q0's
@@ -235,16 +281,16 @@ fn quantize<V: SimdF32>(x: V, p: &Params<V>) -> V {
     let a = (q0 - one).simd_max(zero());
     let c = (q0 + one).simd_min(p.max);
     let mut best = a;
-    let mut bd = abs(unquantize(a, p) - x);
-    let d = abs(unquantize(q0, p) - x);
+    let mut bd = abs(unquantize_mag(a, p) - x);
+    let d = abs(unquantize_mag(q0, p) - x);
     let lt = d.simd_lt(bd);
     best = V::select(lt, q0, best);
     bd = V::select(lt, d, bd);
-    let d = abs(unquantize(c, p) - x);
+    let d = abs(unquantize_mag(c, p) - x);
     best = V::select(d.simd_lt(bd), c, best);
     let interior = one.simd_lt(q0) & q0.simd_lt(p.max - one);
     let q = V::select(interior, q0, best);
-    let r16 = (x + V::splat(0.5)).floor().simd_min(V::splat(65535.0));
+    let r16 = (x + V::splat(0.5)).floor().simd_min(V::splat(top(S)));
     V::select(p.is16, r16, q)
 }
 
@@ -263,20 +309,30 @@ fn line<V: SimdF32>(u0: &[V; 3], u1: &[V; 3]) -> Line<V> {
     (b, d)
 }
 
-/// The palette entry with weight `w` (of 64), as half bits: `(u0 (64 - w) + u1 w + 32) / 64`
-/// floored, then scaled by 31/64 and floored. Every intermediate is an integer below 2^24, so
-/// `d w + b` is exact.
+/// A value on the 16-bit scale as half bits (as the decoder's `finish`): scaled by 31/64 and
+/// floored, or signed, its magnitude scaled by 31/32 and floored with the sign kept.
 #[inline(always)]
-fn entry<V: SimdF32>(b: V, d: V, w: V) -> V {
-    let v = (d.mul_add(w, b) * V::splat(1.0 / 64.0)).floor();
-    (v * V::splat(31.0 / 64.0)).floor()
+fn finish<V: SimdF32, const S: bool>(v: V) -> V {
+    if S {
+        with_sign((abs(v) * V::splat(31.0 / 32.0)).floor(), v)
+    } else {
+        (v * V::splat(31.0 / 64.0)).floor()
+    }
+}
+
+/// The palette entry with weight `w` (of 64), as half bits: `(u0 (64 - w) + u1 w + 32) / 64`
+/// floored, then finished. Every intermediate is an integer of magnitude below 2^24, so `d w + b`
+/// is exact.
+#[inline(always)]
+fn entry<V: SimdF32, const S: bool>(b: V, d: V, w: V) -> V {
+    finish::<V, S>((d.mul_add(w, b) * V::splat(1.0 / 64.0)).floor())
 }
 
 #[inline(always)]
-fn sq_err<V: SimdF32>(x: &[V; 3], l: &Line<V>, w: V) -> V {
+fn sq_err<V: SimdF32, const S: bool>(x: &[V; 3], l: &Line<V>, w: V) -> V {
     let mut e = zero::<V>();
     for c in 0..3 {
-        let d = x[c] - entry(l.0[c], l.1[c], w);
+        let d = x[c] - entry::<V, S>(l.0[c], l.1[c], w);
         e += d * d;
     }
     e
@@ -340,7 +396,7 @@ fn two_regions<V: SimdF32>(parts: &[u8; LANES]) -> Regions<V> {
 /// the axis and the texel count. Weighted zeros add nothing, so this is the scalar fit of the
 /// region's texels.
 #[inline(always)]
-fn line_fit<V: SimdF32>(tg: &Target<V>, w: &[V; 16]) -> ([[V; 3]; 2], [V; 3], [V; 3], V) {
+fn line_fit<V: SimdF32, const S: bool>(tg: &Target<V, S>, w: &[V; 16]) -> ([[V; 3]; 2], [V; 3], [V; 3], V) {
     let mut n = zero::<V>();
     let mut s = [zero::<V>(); 3];
     for i in 0..16 {
@@ -379,10 +435,16 @@ fn line_fit<V: SimdF32>(tg: &Target<V>, w: &[V; 16]) -> ([[V; 3]; 2], [V; 3], [V
     }
     let mut e = [[zero::<V>(); 3]; 2];
     for c in 0..3 {
-        e[0][c] = (m[c] + axis[c] * lo).simd_clamp(zero(), V::splat(65535.0));
-        e[1][c] = (m[c] + axis[c] * hi).simd_clamp(zero(), V::splat(65535.0));
+        e[0][c] = (m[c] + axis[c] * lo).simd_clamp(bottom::<V, S>(), V::splat(top(S)));
+        e[1][c] = (m[c] + axis[c] * hi).simd_clamp(bottom::<V, S>(), V::splat(top(S)));
     }
     (e, m, axis, n)
+}
+
+/// The least endpoint on the 16-bit scale: 0, or -32767 signed.
+#[inline(always)]
+fn bottom<V: SimdF32, const S: bool>() -> V {
+    V::splat(if S { -32767.0 } else { 0.0 })
 }
 
 /// Principal axis of a covariance (rr, rg, rb, gg, gb, bb) by power iteration, as a unit vector
@@ -423,22 +485,26 @@ fn axis3<V: SimdF32>(c: &[V; 6]) -> [V; 3] {
 /// line from the first palette entry to the last, and the nearest weight and its neighbour on the
 /// projection's side are compared exactly.
 #[inline(always)]
-fn index<V: SimdF32>(tg: &Target<V>, rg: &Regions<V>, p: &Params<V>, q: &Ends<V>) -> ([Int<V>; 16], V) {
+fn index<V: SimdF32, const S: bool>(
+    tg: &Target<V, S>,
+    rg: &Regions<V>,
+    p: &Params<V, S>,
+    q: &Ends<V>,
+) -> ([Int<V>; 16], V) {
     let (n, wt) = if rg.two { (8, &W3_16) } else { (16, &W4_16) };
     let nr = if rg.two { 2 } else { 1 };
     let mut ln = [([zero::<V>(); 3], [zero::<V>(); 3]); 2];
     let mut p0 = [[zero::<V>(); 3]; 2];
     let mut d = [[zero::<V>(); 3]; 2];
     let mut s = [zero::<V>(); 2];
-    let fin = V::splat(31.0 / 64.0);
     for r in 0..nr {
         let mut dd = zero::<V>();
         let mut u = [[zero::<V>(); 3]; 2];
         for c in 0..3 {
             u[0][c] = unquantize(q[r][0][c], p);
             u[1][c] = unquantize(q[r][1][c], p);
-            p0[r][c] = (u[0][c] * fin).floor();
-            d[r][c] = (u[1][c] * fin).floor() - p0[r][c];
+            p0[r][c] = finish::<V, S>(u[0][c]);
+            d[r][c] = finish::<V, S>(u[1][c]) - p0[r][c];
             dd += d[r][c] * d[r][c];
         }
         ln[r] = line(&u[0], &u[1]);
@@ -475,8 +541,8 @@ fn index<V: SimdF32>(tg: &Target<V>, rg: &Regions<V>, p: &Params<V>, q: &Ends<V>
         let valid = V::splat(-0.5).simd_lt(j1) & j1.simd_lt(V::splat(n as f32 - 0.5));
         let j1i = j1.simd_clamp(zero(), V::splat(15.0)).to_int_trunc();
         let w1 = Int::<V>::lookup16(wt, j1i).to_float();
-        let e0 = sq_err(x, &lv, w0);
-        let e1 = V::select(valid, sq_err(x, &lv, w1), V::splat(f32::MAX));
+        let e0 = sq_err::<V, S>(x, &lv, w0);
+        let e1 = V::select(valid, sq_err::<V, S>(x, &lv, w1), V::splat(f32::MAX));
         let take1 = e1.simd_lt(e0);
         idx[i] = Int::<V>::select(take1, j1i, j0i);
         total += e0.simd_min(e1);
@@ -487,7 +553,7 @@ fn index<V: SimdF32>(tg: &Target<V>, rg: &Regions<V>, p: &Params<V>, q: &Ends<V>
 /// Least-squares ends for the indices, per region (the region's mean where its indices are all
 /// equal).
 #[inline(always)]
-fn refit<V: SimdF32>(tg: &Target<V>, rg: &Regions<V>, idx: &[Int<V>; 16]) -> Ends<V> {
+fn refit<V: SimdF32, const S: bool>(tg: &Target<V, S>, rg: &Regions<V>, idx: &[Int<V>; 16]) -> Ends<V> {
     let wt = if rg.two { &W3_16 } else { &W4_16 };
     // Sums over all texels ([0]) and over region 1 ([1]); region 0 is the difference.
     let mut aa = [zero::<V>(); 2];
@@ -542,8 +608,8 @@ fn refit<V: SimdF32>(tg: &Target<V>, rg: &Regions<V>, idx: &[Int<V>; 16]) -> End
             let mean = pick(r, rg.two, sum[0][c], sum[1][c]) / n.simd_max(V::splat(1.0));
             let e0 = V::select(ok, (x0 * c2 - x1 * b2) / det, mean);
             let e1 = V::select(ok, (x1 * a2 - x0 * b2) / det, mean);
-            ends[r][0][c] = e0.simd_clamp(zero(), V::splat(65535.0));
-            ends[r][1][c] = e1.simd_clamp(zero(), V::splat(65535.0));
+            ends[r][0][c] = e0.simd_clamp(bottom::<V, S>(), V::splat(top(S)));
+            ends[r][1][c] = e1.simd_clamp(bottom::<V, S>(), V::splat(top(S)));
         }
     }
     ends
@@ -594,7 +660,7 @@ fn in_range<V: SimdF32>(d: V, lo: V, hi: V) -> Mask<V> {
 
 /// Quantizes `ends` for each lane's mode, with the deltas from the first end clamped to their bits.
 #[inline(always)]
-fn quantize_ends<V: SimdF32>(rg: &Regions<V>, p: &Params<V>, ends: &Ends<V>) -> Ends<V> {
+fn quantize_ends<V: SimdF32, const S: bool>(rg: &Regions<V>, p: &Params<V, S>, ends: &Ends<V>) -> Ends<V> {
     let nr = if rg.two { 2 } else { 1 };
     let mut q = [[[zero::<V>(); 3]; 2]; 2];
     for r in 0..nr {
@@ -616,7 +682,12 @@ fn quantize_ends<V: SimdF32>(rg: &Regions<V>, p: &Params<V>, ends: &Ends<V>) -> 
 
 /// Quantizes each lane's mode, indexes every texel and fixes the anchors.
 #[inline(always)]
-fn quantize_and_index<V: SimdF32>(tg: &Target<V>, rg: &Regions<V>, p: &Params<V>, ends: &Ends<V>) -> Trial<V> {
+fn quantize_and_index<V: SimdF32, const S: bool>(
+    tg: &Target<V, S>,
+    rg: &Regions<V>,
+    p: &Params<V, S>,
+    ends: &Ends<V>,
+) -> Trial<V> {
     let mut q = quantize_ends(rg, p, ends);
     let (mut idx, mut err) = index(tg, rg, p, &q);
     let n = if rg.two { 8 } else { 16 };
@@ -651,11 +722,11 @@ fn quantize_and_index<V: SimdF32>(tg: &Target<V>, rg: &Regions<V>, p: &Params<V>
         }
         let u = line(&u[0], &u[1]);
         let wt = if rg.two { &W3_16 } else { &W4_16 };
-        let old = sq_err(&tg.h[0], &u, Int::<V>::lookup16(wt, idx[0]).to_float());
+        let old = sq_err::<V, S>(&tg.h[0], &u, Int::<V>::lookup16(wt, idx[0]).to_float());
         let mut be = V::splat(f32::MAX);
         let mut bj = Int::<V>::splat(0);
         for j in 0..n / 2 {
-            let e = sq_err(&tg.h[0], &u, V::splat(wt[j as usize] as f32));
+            let e = sq_err::<V, S>(&tg.h[0], &u, V::splat(wt[j as usize] as f32));
             let lt = e.simd_lt(be);
             be = V::select(lt, e, be);
             bj = Int::<V>::select(lt, Int::<V>::splat(j), bj);
@@ -698,10 +769,10 @@ fn quantize_and_index<V: SimdF32>(tg: &Target<V>, rg: &Regions<V>, p: &Params<V>
 /// Quantizes `ends` for each lane's mode and measures them with the indices `idx` kept (whose
 /// anchors are already in range: they come from a [`quantize_and_index`] trial).
 #[inline(always)]
-fn requantize<V: SimdF32>(
-    tg: &Target<V>,
+fn requantize<V: SimdF32, const S: bool>(
+    tg: &Target<V, S>,
     rg: &Regions<V>,
-    p: &Params<V>,
+    p: &Params<V, S>,
     ends: &Ends<V>,
     idx: &[Int<V>; 16],
 ) -> Trial<V> {
@@ -730,7 +801,7 @@ fn requantize<V: SimdF32>(
         } else {
             ln[0]
         };
-        err += sq_err(&tg.h[i], &lv, Int::<V>::lookup16(wt, idx[i]).to_float());
+        err += sq_err::<V, S>(&tg.h[i], &lv, Int::<V>::lookup16(wt, idx[i]).to_float());
     }
     Trial { err, q, idx: *idx }
 }
@@ -756,10 +827,10 @@ fn merge<V: SimdF32>(best: &mut Best<V>, t: &Trial<V>, m: Mask<V>, mode: V, part
     reason = "the kernel state is passed by reference, not bundled"
 )]
 #[inline(always)]
-fn try_mode<V: SimdF32>(
-    tg: &Target<V>,
+fn try_mode<V: SimdF32, const S: bool>(
+    tg: &Target<V, S>,
     rg: &Regions<V>,
-    p: &Params<V>,
+    p: &Params<V, S>,
     ends: &Ends<V>,
     refits: usize,
     reindex: bool,
@@ -791,7 +862,13 @@ fn try_mode<V: SimdF32>(
 /// lane): ends quantized (`q`), deltas clamped, and each region's end displacements spread over
 /// its `cnt` texels as interpolation does.
 #[inline(always)]
-fn mode_estimate<V: SimdF32>(mi: usize, p: &Params<V>, ends: &Ends<V>, q: &Ends<V>, cnt: &[V; 2]) -> V {
+fn mode_estimate<V: SimdF32, const S: bool>(
+    mi: usize,
+    p: &Params<V, S>,
+    ends: &Ends<V>,
+    q: &Ends<V>,
+    cnt: &[V; 2],
+) -> V {
     let m = MODES[mi];
     let nr = m.regions();
     let mut q = *q;
@@ -819,7 +896,7 @@ fn mode_estimate<V: SimdF32>(mi: usize, p: &Params<V>, ends: &Ends<V>, q: &Ends<
 /// The `k` modes from `order` with the least estimated error per lane, best first (ties to the
 /// earlier, more precise mode), as [`MODES`] indices.
 #[inline(always)]
-fn pick_modes<V: SimdF32, const N: usize>(
+fn pick_modes<V: SimdF32, const S: bool, const N: usize>(
     order: &[usize; N],
     ends: &Ends<V>,
     cnt: &[V; 2],
@@ -831,7 +908,7 @@ fn pick_modes<V: SimdF32, const N: usize>(
     let mut est = [zero::<V>(); N];
     for i in 0..N {
         let mi = order[i];
-        let p = params1::<V>(mi);
+        let p = params1::<V, S>(mi);
         let eb = usize::from(MODES[mi].eb);
         if have & (1 << eb) == 0 {
             have |= 1 << eb;
@@ -934,7 +1011,12 @@ fn region_estimate<V: SimdF32>(s: &[V; 9], n: f32, axis: &[V; 3]) -> V {
 /// order, and each lane's best estimate. The masks are the same in every lane, so the per-partition
 /// moment sums are plain vector adds; only the final ordering runs per lane.
 #[inline(always)]
-fn rank_partitions<V: SimdF32>(tg: &Target<V>, mean: &[V; 3], axis: &[V; 3], k: usize) -> ([[u8; 32]; LANES], V) {
+fn rank_partitions<V: SimdF32, const S: bool>(
+    tg: &Target<V, S>,
+    mean: &[V; 3],
+    axis: &[V; 3],
+    k: usize,
+) -> ([[u8; 32]; LANES], V) {
     let mut c = [[zero::<V>(); 3]; 16];
     for i in 0..16 {
         for ch in 0..3 {
@@ -1001,8 +1083,8 @@ fn rank_partitions<V: SimdF32>(tg: &Target<V>, mean: &[V; 3], axis: &[V; 3], k: 
 
 /// Encodes eight blocks with search settings `s`.
 #[inline(always)]
-fn encode8<V: SimdF32>(px: &Texels, s: Search) -> [[u8; 16]; LANES] {
-    let tg = target::<V>(px);
+fn encode8<V: SimdF32, const S: bool>(px: &Texels, s: Search) -> [[u8; 16]; LANES] {
+    let tg = target::<V, S>(px);
     let mut best = Best {
         t: Trial {
             err: V::splat(f32::MAX),
@@ -1017,9 +1099,9 @@ fn encode8<V: SimdF32>(px: &Texels, s: Search) -> [[u8; 16]; LANES] {
     let (one, mean, axis, _) = line_fit(&tg, &[V::splat(1.0); 16]);
     let ends = [one, one];
     let k1 = s.modes1.clamp(1, ONE_ORDER.len());
-    let modes = pick_modes(&ONE_ORDER, &ends, &[V::splat(16.0), zero()], k1);
+    let modes = pick_modes::<V, S, 4>(&ONE_ORDER, &ends, &[V::splat(16.0), zero()], k1);
     for m in &modes[..k1] {
-        let p = params::<V>(m);
+        let p = params::<V, S>(m);
         try_mode(
             &tg,
             &rg,
@@ -1039,7 +1121,11 @@ fn encode8<V: SimdF32>(px: &Texels, s: Search) -> [[u8; 16]; LANES] {
         let (parts, est0) = rank_partitions(&tg, &mean, &axis, np);
         if s.skip > 0.0 {
             // The estimate is on the 16-bit scale; errors are in half bits.
-            let scale = (31.0f32 / 64.0) * (31.0 / 64.0);
+            let scale = if S {
+                (31.0f32 / 32.0) * (31.0 / 32.0)
+            } else {
+                (31.0f32 / 64.0) * (31.0 / 64.0)
+            };
             let lim = est0 * V::splat(s.skip * scale);
             active = active & lim.simd_lt(best.t.err);
         }
@@ -1060,9 +1146,9 @@ fn encode8<V: SimdF32>(px: &Texels, s: Search) -> [[u8; 16]; LANES] {
             let (e0, _, _, n0) = line_fit(&tg, &w0);
             let (e1, _, _, n1) = line_fit(&tg, &rg.w1);
             let ends = [e0, e1];
-            let modes = pick_modes(&TWO_ORDER, &ends, &[n0, n1], k2);
+            let modes = pick_modes::<V, S, 10>(&TWO_ORDER, &ends, &[n0, n1], k2);
             for m in &modes[..k2] {
-                let p = params::<V>(m);
+                let p = params::<V, S>(m);
                 try_mode(
                     &tg,
                     &rg,
@@ -1089,7 +1175,8 @@ fn mode_vec<V: SimdF32>(m: &[usize; LANES]) -> V {
     V::from_array(a)
 }
 
-/// Packs each lane's best trial.
+/// Packs each lane's best trial. Signed values are stored as two's complement, which [`pack`]
+/// truncates to each field's width.
 #[inline(always)]
 fn finish_blocks<V: SimdF32>(best: &Best<V>) -> [[u8; 16]; LANES] {
     let mode = best.mode.to_array();
@@ -1136,13 +1223,14 @@ fn finish_blocks<V: SimdF32>(best: &Best<V>) -> [[u8; 16]; LANES] {
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma")]
-fn encode8_avx2(px: &Texels, s: Search) -> [[u8; 16]; LANES] {
-    encode8::<crate::simd::avx2::F>(px, s)
+fn encode8_avx2<const S: bool>(px: &Texels, s: Search) -> [[u8; 16]; LANES] {
+    encode8::<crate::simd::avx2::F, S>(px, s)
 }
 
-/// Encodes up to eight blocks at effort 0..=9 (shorter batches are padded with their last block).
-pub fn encode_batch(blocks: &[HdrBlock], effort: u8) -> Vec<[u8; 16]> {
-    encode_lanes(blocks, super::search(effort))[..blocks.len()].to_vec()
+/// Encodes up to eight blocks at effort 0..=9, signed (BC6H_SF16) when `signed` (shorter batches
+/// are padded with their last block).
+pub fn encode_batch(blocks: &[HdrBlock], effort: u8, signed: bool) -> Vec<[u8; 16]> {
+    encode_lanes(blocks, super::search(effort, signed))[..blocks.len()].to_vec()
 }
 
 /// Encodes up to eight blocks with search settings `s`; lanes past `blocks.len()` repeat the last
@@ -1151,7 +1239,7 @@ pub(super) fn encode_lanes(blocks: &[HdrBlock], s: Search) -> [[u8; 16]; LANES] 
     debug_assert!(!blocks.is_empty() && blocks.len() <= LANES);
     let mut x = [[0f32; LANES]; 48];
     for (l, b) in blocks.iter().enumerate() {
-        set_lane(&mut x, l, b);
+        set_lane(&mut x, l, b, s.signed);
     }
     pad_lanes(&mut x, blocks.len());
     encode_texels(&x, s)
@@ -1159,20 +1247,29 @@ pub(super) fn encode_lanes(blocks: &[HdrBlock], s: Search) -> [[u8; 16]; LANES] 
 
 /// Encodes the eight blocks of `x` with search settings `s`.
 pub(super) fn encode_texels(x: &Texels, s: Search) -> [[u8; 16]; LANES] {
-    match crate::simd::level() {
+    match (crate::simd::level(), s.signed) {
         #[cfg(target_arch = "x86_64")]
         // SAFETY: `level()` returns Avx2 only when the CPU reports AVX2 and FMA.
-        Level::Avx2 => unsafe { encode8_avx2(x, s) },
-        _ => encode8::<f32x8>(x, s),
+        (Level::Avx2, false) => unsafe { encode8_avx2::<false>(x, s) },
+        #[cfg(target_arch = "x86_64")]
+        // SAFETY: as above.
+        (Level::Avx2, true) => unsafe { encode8_avx2::<true>(x, s) },
+        (_, false) => encode8::<f32x8, false>(x, s),
+        (_, true) => encode8::<f32x8, true>(x, s),
     }
 }
 
 /// Encodes eight blocks with the portable backend (tests compare it with AVX2).
 #[cfg(test)]
-pub(super) fn encode8_generic(px: &[HdrBlock; LANES], effort: u8) -> [[u8; 16]; LANES] {
+pub(super) fn encode8_generic(px: &[HdrBlock; LANES], effort: u8, signed: bool) -> [[u8; 16]; LANES] {
     let mut x = [[0f32; LANES]; 48];
     for (l, b) in px.iter().enumerate() {
-        set_lane(&mut x, l, b);
+        set_lane(&mut x, l, b, signed);
     }
-    encode8::<f32x8>(&x, super::search(effort))
+    let s = super::search(effort, signed);
+    if signed {
+        encode8::<f32x8, true>(&x, s)
+    } else {
+        encode8::<f32x8, false>(&x, s)
+    }
 }

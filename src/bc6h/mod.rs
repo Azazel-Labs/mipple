@@ -1,10 +1,11 @@
 //! BC6H (BPTC float) block codec: 16-byte blocks of RGB half floats, for HDR color.
 //!
-//! The encoder writes BC6H_UF16 (unsigned); the decoder reads both the unsigned and the signed
-//! variant. Errors are measured on the half-float bit patterns, which grow like the logarithm of
-//! the value (1024 steps per octave), so a squared error there is a relative error: a dark texel
-//! counts as much as a bright one with the same ratio of error to value. That is also the domain
-//! the format interpolates in.
+//! Both variants encode and decode: BC6H_UF16 (unsigned) and BC6H_SF16 (signed). Errors are
+//! measured on the half-float bit patterns, which grow like the logarithm of the value (1024 steps
+//! per octave), so a squared error there is a relative error: a dark texel counts as much as a
+//! bright one with the same ratio of error to value. That is also the domain the format
+//! interpolates in. Signed halves are measured as their magnitude's bits with their sign
+//! ([`half_key`]), the scale signed blocks interpolate on, so -x and x are twice x's bits apart.
 //!
 //! The bit layouts of the 14 modes ([`LAYOUT`]) were generated from the D3D11 specification's mode
 //! tables and are checked against Microsoft's reference decoder (texconv) in
@@ -68,6 +69,35 @@ pub fn f32_to_uf16(f: f32) -> u16 {
         0
     } else {
         f32_to_half(f).min(HALF_MAX)
+    }
+}
+
+/// The half a signed BC6H block can hold nearest `f`: NaN and zero become 0, magnitudes past
+/// [`HALF_MAX`] become it.
+pub fn f32_to_sf16(f: f32) -> u16 {
+    if f.is_nan() || f == 0.0 {
+        0
+    } else {
+        let h = f32_to_half(f);
+        (h & 0x8000) | (h & 0x7fff).min(HALF_MAX)
+    }
+}
+
+/// [`f32_to_sf16`] when `signed`, else [`f32_to_uf16`].
+pub fn f32_to_bc6h(f: f32, signed: bool) -> u16 {
+    if signed { f32_to_sf16(f) } else { f32_to_uf16(f) }
+}
+
+/// Half `h` on the scale errors are measured on, clamped to [`HALF_MAX`] steps: unsigned, its
+/// bits (negative values as 0); signed, its magnitude's bits with its sign.
+pub fn half_key(h: u16, signed: bool) -> i32 {
+    let m = i32::from((h & 0x7fff).min(HALF_MAX));
+    if h & 0x8000 == 0 {
+        m
+    } else if signed {
+        -m
+    } else {
+        0
     }
 }
 
@@ -486,30 +516,55 @@ pub fn decode(raw: &[u8], signed: bool) -> HdrBlock {
     unpack(raw).map_or([[0; 3]; 16], |b| decode_block(&b, signed))
 }
 
-/// Decodes a 16-byte unsigned block to 8-bit RGB (values clamped to [0, 1], alpha 255): what an
-/// LDR viewer or [`crate::format::Format::decode_block`] sees.
-pub fn decode_ldr(raw: &[u8], out: &mut crate::surface::Block) {
-    for (o, h) in out.iter_mut().zip(decode(raw, false)) {
+/// Decodes a 16-byte block to 8-bit RGB (alpha 255): what an LDR viewer or
+/// [`crate::format::Format::decode_block`] sees. Unsigned values are clamped to [0, 1] and scaled
+/// by 255; signed ones are clamped to [-1, 1] and mapped back as [`ldr_block`] stores them,
+/// `v` to `(255 v + 255) / 2`.
+pub fn decode_ldr(raw: &[u8], out: &mut crate::surface::Block, signed: bool) {
+    for (o, h) in out.iter_mut().zip(decode(raw, signed)) {
         for c in 0..3 {
-            o[c] = (half_to_f32(h[c]).clamp(0.0, 1.0) * 255.0).round() as u8;
+            let v = half_to_f32(h[c]);
+            o[c] = if signed {
+                ((v.clamp(-1.0, 1.0) * 255.0 + 255.0) * 0.5).round() as u8
+            } else {
+                (v.clamp(0.0, 1.0) * 255.0).round() as u8
+            };
         }
         o[3] = 255;
     }
 }
 
-/// The half-float targets for an 8-bit block read as values in [0, 1].
-pub fn ldr_block(px: &crate::surface::Block) -> HdrBlock {
-    px.map(|p| [0, 1, 2].map(|c| f32_to_uf16(f32::from(p[c]) / 255.0)))
+/// The half-float targets for an 8-bit block: `u` read as `u / 255`, or signed, as
+/// `(2u - 255) / 255` (the crate's convention for signed formats).
+pub fn ldr_block(px: &crate::surface::Block, signed: bool) -> HdrBlock {
+    px.map(|p| {
+        [0, 1, 2].map(|c| {
+            let u = f32::from(p[c]);
+            if signed {
+                f32_to_sf16((2.0 * u - 255.0) / 255.0)
+            } else {
+                f32_to_uf16(u / 255.0)
+            }
+        })
+    })
 }
 
-/// Sum of squared differences between two blocks' half-float bits.
-pub fn sse(a: &HdrBlock, b: &HdrBlock) -> u64 {
+/// Sum of squared differences between two blocks' halves, on the [`half_key`] scale (signed when
+/// `signed`; unsigned blocks hold their keys as their bits).
+pub fn sse(a: &HdrBlock, b: &HdrBlock, signed: bool) -> u64 {
+    let key = |h: u16| {
+        if signed {
+            i64::from(half_key(h, true))
+        } else {
+            i64::from(h)
+        }
+    };
     a.iter()
         .zip(b)
         .map(|(x, y)| {
             (0..3)
                 .map(|c| {
-                    let d = i64::from(x[c]) - i64::from(y[c]);
+                    let d = key(x[c]) - key(y[c]);
                     (d * d) as u64
                 })
                 .sum::<u64>()
@@ -533,9 +588,11 @@ struct Search {
     /// Two-region modes are skipped when the one-region error is at most this multiple of the best
     /// partition's estimated error (0: never skipped).
     skip: f32,
+    /// BC6H_SF16 rather than BC6H_UF16.
+    signed: bool,
 }
 
-fn search(effort: u8) -> Search {
+fn search(effort: u8, signed: bool) -> Search {
     let e = usize::from(effort.min(crate::format::MAX_EFFORT));
     Search {
         // Effort 0 is one region only (no partition search).
@@ -546,6 +603,7 @@ fn search(effort: u8) -> Search {
         skip: [1.0, 1.0, 0.5, 0.35, 0.25, 0.0, 0.0, 0.0, 0.0, 0.0][e],
         // Effort 0 keeps its indices through the refit.
         reindex: e > 0,
+        signed,
     }
 }
 
@@ -554,19 +612,21 @@ const ONE_ORDER: [usize; 4] = [13, 12, 11, 10];
 /// Two-region modes, most precise endpoints first.
 const TWO_ORDER: [usize; 10] = [2, 3, 4, 0, 5, 6, 7, 8, 1, 9];
 
-/// Encodes one block of half floats (negative values and NaN as 0) at effort 0..=9.
-pub fn encode_block(px: &HdrBlock, effort: u8) -> [u8; 16] {
-    batch::encode_batch(std::slice::from_ref(px), effort)[0]
+/// Encodes one block of half floats at effort 0..=9: signed (BC6H_SF16) when `signed`, else
+/// unsigned with negative values and NaN as 0.
+pub fn encode_block(px: &HdrBlock, effort: u8, signed: bool) -> [u8; 16] {
+    batch::encode_batch(std::slice::from_ref(px), effort, signed)[0]
 }
 
-/// Encodes an 8-bit block read as values in [0, 1] (what [`crate::format::Format::encode_block`]
+/// Encodes an 8-bit block as [`ldr_block`] reads it (what [`crate::format::Format::encode_block`]
 /// does for BC6H; HDR sources go through [`encode_block`]).
-pub fn encode_ldr(px: &crate::surface::Block, effort: u8) -> [u8; 16] {
-    encode_block(&ldr_block(px), effort)
+pub fn encode_ldr(px: &crate::surface::Block, effort: u8, signed: bool) -> [u8; 16] {
+    encode_block(&ldr_block(px, signed), effort, signed)
 }
 
-/// Encodes every block of an HDR surface, in parallel, raster order.
-pub fn encode_surface(surface: &crate::hdr::HdrSurface, effort: u8) -> Vec<u8> {
+/// Encodes every block of an HDR surface, in parallel, raster order: signed (BC6H_SF16) when
+/// `signed`.
+pub fn encode_surface(surface: &crate::hdr::HdrSurface, effort: u8, signed: bool) -> Vec<u8> {
     // Each block's texels are converted as its lanes are filled (F16C where the CPU has it).
     let px = &surface.pixels;
     let (w, h, bw) = (
@@ -580,14 +640,24 @@ pub fn encode_surface(surface: &crate::hdr::HdrSurface, effort: u8) -> Vec<u8> {
         surface.block_count(),
         |i, l, x| {
             let (x0, y0) = (i as usize % bw * 4, i as usize / bw * 4);
-            if x0 + 4 <= w && y0 + 4 <= h {
+            let interior = x0 + 4 <= w && y0 + 4 <= h;
+            #[cfg(target_arch = "x86_64")]
+            if f16c && interior {
                 let rows: [&[[f32; 3]]; 4] = std::array::from_fn(|ty| &px[(y0 + ty) * w + x0..][..4]);
-                #[cfg(target_arch = "x86_64")]
-                if f16c {
-                    // SAFETY: the CPU reports F16C and AVX2.
-                    unsafe { fill_f16c(&rows, l, x) };
-                    return;
-                }
+                // SAFETY: the CPU reports F16C and AVX2.
+                unsafe {
+                    if signed {
+                        fill_f16c::<true>(&rows, l, x);
+                    } else {
+                        fill_f16c::<false>(&rows, l, x);
+                    }
+                };
+                return;
+            }
+            if signed {
+                batch::set_lane(x, l, &surface.read_block_as(i % bw as u32, i / bw as u32, true), true);
+            } else if interior {
+                let rows: [&[[f32; 3]]; 4] = std::array::from_fn(|ty| &px[(y0 + ty) * w + x0..][..4]);
                 for (ty, row) in rows.iter().enumerate() {
                     for (tx, p) in row.iter().enumerate() {
                         for c in 0..3 {
@@ -606,17 +676,25 @@ pub fn encode_surface(surface: &crate::hdr::HdrSurface, effort: u8) -> Vec<u8> {
             }
         },
         effort,
+        signed,
     )
 }
 
-/// Lane `l` of `x` from four rows of four texels, each channel as [`f32_to_uf16`]: clamping to
-/// [0, 65504] first (`max` returns its second operand, 0, for NaN) leaves finite, non-negative
-/// values, which the round-to-nearest-even conversion maps as `f32_to_half` does.
+/// Lane `l` of `x` from four rows of four texels, each channel as [`f32_to_uf16`] (or signed,
+/// [`f32_to_sf16`] as its [`half_key`]): clamping to [0, 65504] first (`max` returns its second
+/// operand, 0, for NaN) leaves finite, non-negative values, which the round-to-nearest-even
+/// conversion maps as `f32_to_half` does. Signed, NaN is zeroed first and the clamp is to
+/// [-65504, 65504]; -0 lands on key 0 as 0 does.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,f16c")]
-unsafe fn fill_f16c(rows: &[&[[f32; 3]]; 4], l: usize, x: &mut batch::Texels) {
+unsafe fn fill_f16c<const S: bool>(rows: &[&[[f32; 3]]; 4], l: usize, x: &mut batch::Texels) {
     use std::arch::x86_64::*;
-    let (zero, top) = (_mm256_setzero_ps(), _mm256_set1_ps(65504.0));
+    let top = _mm256_set1_ps(65504.0);
+    let low = if S {
+        _mm256_set1_ps(-65504.0)
+    } else {
+        _mm256_setzero_ps()
+    };
     for (ty, row) in rows.iter().enumerate() {
         let s = row.as_flattened();
         assert!(s.len() >= 12);
@@ -624,10 +702,21 @@ unsafe fn fill_f16c(rows: &[&[[f32; 3]]; 4], l: usize, x: &mut batch::Texels) {
         // SAFETY: `s` holds 12 floats, read as 8 and the last 8 (overlapping); `v` holds 16.
         unsafe {
             for (k, off) in [(0, 0), (8, 4)] {
-                let a = _mm256_loadu_ps(s.as_ptr().add(off));
-                let a = _mm256_min_ps(_mm256_max_ps(a, zero), top);
-                let h = _mm256_cvtps_ph::<_MM_FROUND_TO_NEAREST_INT>(a);
-                _mm256_storeu_ps(v.as_mut_ptr().add(k), _mm256_cvtepi32_ps(_mm256_cvtepu16_epi32(h)));
+                let mut a = _mm256_loadu_ps(s.as_ptr().add(off));
+                if S {
+                    a = _mm256_and_ps(a, _mm256_cmp_ps::<_CMP_ORD_Q>(a, a));
+                }
+                let a = _mm256_min_ps(_mm256_max_ps(a, low), top);
+                let h = _mm256_cvtepu16_epi32(_mm256_cvtps_ph::<_MM_FROUND_TO_NEAREST_INT>(a));
+                let key = if S {
+                    // Magnitude, negated where the sign bit is set: (m ^ s) - s.
+                    let m = _mm256_and_si256(h, _mm256_set1_epi32(0x7fff));
+                    let sg = _mm256_srai_epi32::<31>(_mm256_slli_epi32::<16>(h));
+                    _mm256_sub_epi32(_mm256_xor_si256(m, sg), sg)
+                } else {
+                    h
+                };
+                _mm256_storeu_ps(v.as_mut_ptr().add(k), _mm256_cvtepi32_ps(key));
             }
         }
         // v[0..8] are floats 0..8; v[8..16] are floats 4..12.
@@ -641,11 +730,11 @@ unsafe fn fill_f16c(rows: &[&[[f32; 3]]; 4], l: usize, x: &mut batch::Texels) {
 }
 
 /// Encodes blocks `0..n` eight at a time, in parallel, raster order: `fill(i, l, x)` puts block
-/// `i` in lane `l` of `x`.
-fn encode_blocks(n: usize, fill: impl Fn(u32, usize, &mut batch::Texels) + Sync, effort: u8) -> Vec<u8> {
+/// `i` in lane `l` of `x` (as [`half_key`], signed when `signed`).
+fn encode_blocks(n: usize, fill: impl Fn(u32, usize, &mut batch::Texels) + Sync, effort: u8, signed: bool) -> Vec<u8> {
     use rayon::prelude::*;
     const L: usize = crate::simd::LANES;
-    let s = search(effort);
+    let s = search(effort, signed);
     let mut out = vec![0u8; n * 16];
     out.par_chunks_mut(16 * L)
         .enumerate()
@@ -663,18 +752,23 @@ fn encode_blocks(n: usize, fill: impl Fn(u32, usize, &mut batch::Texels) + Sync,
     out
 }
 
-/// Decodes unsigned BC6H blocks (raster order) to an HDR surface.
-pub fn decode_surface(data: &[u8], width: u32, height: u32) -> crate::hdr::HdrSurface {
-    crate::hdr::HdrSurface::from_blocks(width, height, data.as_chunks::<16>().0.iter().map(|b| decode(b, false)))
+/// Decodes BC6H blocks (raster order, signed when `signed`) to an HDR surface.
+pub fn decode_surface(data: &[u8], width: u32, height: u32, signed: bool) -> crate::hdr::HdrSurface {
+    crate::hdr::HdrSurface::from_blocks(
+        width,
+        height,
+        data.as_chunks::<16>().0.iter().map(|b| decode(b, signed)),
+    )
 }
 
 /// Encodes every block of an 8-bit surface (as [`encode_ldr`]), in parallel, raster order.
-pub fn encode_surface_ldr(surface: &crate::surface::Surface, effort: u8) -> Vec<u8> {
+pub fn encode_surface_ldr(surface: &crate::surface::Surface, effort: u8, signed: bool) -> Vec<u8> {
     let bx = surface.blocks_x();
     encode_blocks(
         surface.block_count(),
-        |i, l, x| batch::set_lane(x, l, &ldr_block(&surface.read_block(i % bx, i / bx))),
+        |i, l, x| batch::set_lane(x, l, &ldr_block(&surface.read_block(i % bx, i / bx), signed), signed),
         effort,
+        signed,
     )
 }
 
@@ -756,8 +850,12 @@ mod tests {
 
     /// Mean squared error per channel sample, in half-float steps.
     fn mse(px: &HdrBlock, effort: u8) -> f64 {
-        let raw = encode_block(px, effort);
-        sse(px, &decode(&raw, false)) as f64 / 48.0
+        mse_as(px, effort, false)
+    }
+
+    fn mse_as(px: &HdrBlock, effort: u8, signed: bool) -> f64 {
+        let raw = encode_block(px, effort, signed);
+        sse(px, &decode(&raw, signed), signed) as f64 / 48.0
     }
 
     #[test]
@@ -823,9 +921,16 @@ mod tests {
         for seed in [3u64, 99, 12345] {
             let px = mixed_blocks(seed);
             for effort in [0, 2, 5] {
-                let all = batch::encode_batch(&px, effort);
-                for (l, b) in px.iter().enumerate() {
-                    assert_eq!(all[l], encode_block(b, effort), "seed {seed} effort {effort} lane {l}");
+                for signed in [false, true] {
+                    let px = if signed { signed_blocks(&px) } else { px };
+                    let all = batch::encode_batch(&px, effort, signed);
+                    for (l, b) in px.iter().enumerate() {
+                        assert_eq!(
+                            all[l],
+                            encode_block(b, effort, signed),
+                            "seed {seed} effort {effort} lane {l} signed {signed}"
+                        );
+                    }
                 }
             }
         }
@@ -836,12 +941,15 @@ mod tests {
         for seed in [5u64, 77, 4242] {
             let px = mixed_blocks(seed);
             for effort in [0, 3, 9] {
-                let generic = batch::encode8_generic(&px, effort);
-                assert_eq!(
-                    batch::encode_batch(&px, effort),
-                    generic.to_vec(),
-                    "seed {seed} effort {effort}"
-                );
+                for signed in [false, true] {
+                    let px = if signed { signed_blocks(&px) } else { px };
+                    let generic = batch::encode8_generic(&px, effort, signed);
+                    assert_eq!(
+                        batch::encode_batch(&px, effort, signed),
+                        generic.to_vec(),
+                        "seed {seed} effort {effort} signed {signed}"
+                    );
+                }
             }
         }
     }
@@ -885,10 +993,90 @@ mod tests {
             height: h,
             pixels,
         };
-        let got = encode_surface(&s, 1);
-        for i in 0..s.block_count() as u32 {
-            let b = s.read_block(i % s.blocks_x(), i / s.blocks_x());
-            assert_eq!(got[i as usize * 16..][..16], encode_block(&b, 1), "block {i}");
+        for signed in [false, true] {
+            let got = encode_surface(&s, 1, signed);
+            for i in 0..s.block_count() as u32 {
+                let b = s.read_block_as(i % s.blocks_x(), i / s.blocks_x(), signed);
+                assert_eq!(
+                    got[i as usize * 16..][..16],
+                    encode_block(&b, 1, signed),
+                    "block {i} signed {signed}"
+                );
+            }
+        }
+    }
+
+    /// `px` with every other texel's channels negated, and lanes 1 and 5 wholly negative, so
+    /// signed blocks cross zero, sit below it and straddle it in one channel only.
+    fn signed_blocks(px: &[HdrBlock; crate::simd::LANES]) -> [HdrBlock; crate::simd::LANES] {
+        std::array::from_fn(|l| {
+            std::array::from_fn(|i| {
+                std::array::from_fn(|c| {
+                    let neg = match l {
+                        1 | 5 => true,
+                        2 | 6 => c == 1 && i % 3 == 0,
+                        _ => i % 2 == 1,
+                    };
+                    let h = px[l][i][c];
+                    if neg && h != 0 { h | 0x8000 } else { h }
+                })
+            })
+        })
+    }
+
+    #[test]
+    fn signed_blocks_encode_well() {
+        // Signs agree with unsigned where the data is non-negative: a flat block and a ramp.
+        let sblock = |f: &dyn Fn(usize, usize) -> f32| -> HdrBlock {
+            std::array::from_fn(|i| [0, 1, 2].map(|c| f32_to_sf16(f(i, c))))
+        };
+        let flat = sblock(&|_, c| [0.25, -3.0, 1200.0][c]);
+        assert!(mse_as(&flat, 5, true) < 1.0, "{}", mse_as(&flat, 5, true));
+        let ramp = sblock(&|i, c| -(1.0 + (i % 4) as f32 * 0.25 + (i / 4) as f32 * 0.0625) * [0.5, 2.0, 8.0][c]);
+        for e in [0, 5] {
+            assert!(mse_as(&ramp, e, true) < 30.0, "{}", mse_as(&ramp, e, true));
+        }
+        // A gradient through zero: -1 to 1 across the block, linear on the signed scale only near
+        // zero, so well under one 8-bit step (about 11 half steps near 0.5) per channel is the bar.
+        let cross = sblock(&|i, c| ((i % 4) as f32 - 1.5) / 1.5 * [1.0, 0.5, 0.25][c]);
+        let e = mse_as(&cross, 5, true);
+        assert!(e.sqrt() < 2000.0, "{e}");
+        // Effort helps on random signed blocks, and every block decodes with the signs it was given.
+        let mut seed = 99u64;
+        let (mut lo, mut hi) = (0.0, 0.0);
+        for k in 0..100 {
+            let px = signed_blocks(&mixed_blocks(seed + k))[(k % 8) as usize];
+            lo += mse_as(&px, 1, true);
+            hi += mse_as(&px, 9, true);
+            let d = decode(&encode_block(&px, 9, true), true);
+            for i in 0..16 {
+                for c in 0..3 {
+                    let (a, b) = (half_key(px[i][c], true), half_key(d[i][c], true));
+                    assert!(
+                        a.signum() * b.signum() >= 0 || (a - b).abs() < 2048,
+                        "{k} {i} {c}: {a} {b}"
+                    );
+                }
+            }
+            seed = rng(&mut seed);
+        }
+        assert!(hi <= lo, "effort 9 {hi} vs effort 1 {lo}");
+    }
+
+    #[test]
+    fn signed_ldr_round_trips() {
+        // Every 8-bit value through (2u - 255) / 255 and back on a flat block.
+        for u in 0..=255u8 {
+            let px = [[u, 255 - u, u / 2, 255]; 16];
+            let mut out = [[0u8; 4]; 16];
+            decode_ldr(&encode_ldr(&px, 5, true), &mut out, true);
+            for c in 0..3 {
+                assert!(
+                    (i32::from(out[0][c]) - i32::from(px[0][c])).abs() <= 1,
+                    "{u} {c}: {:?}",
+                    out[0]
+                );
+            }
         }
     }
 
@@ -902,6 +1090,7 @@ mod tests {
             ..Default::default()
         };
         let d = decode(&pack(&b), true);
+        assert_eq!(super::half_key(d[0][0], true), -93);
         // -1 at 10 bits unquantizes to -((1 << 15) + 0x4000) >> 9 = -96, finished to -(96*31>>5) = -93.
         assert_eq!(d[0], [0x8000 | 93; 3]);
         assert_eq!(d[1], [93; 3]);

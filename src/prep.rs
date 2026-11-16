@@ -30,7 +30,7 @@ pub fn forward(format: Format, raw: &[u8]) -> Vec<u8> {
         Format::Bc4 | Format::EacR11 | Format::EacR11Snorm => split_bc4(raw, 1),
         Format::Bc5 | Format::EacRg11 | Format::EacRg11Snorm => split_bc4(raw, 2),
         // No field split yet: one stream of whole blocks.
-        Format::Bc6h | crate::format::astc!() => vec![raw.to_vec()],
+        Format::Bc6h | Format::Bc6hSf16 | crate::format::astc!() => vec![raw.to_vec()],
         Format::Bc7 => split_bc7(raw),
     };
     let mut out = Vec::with_capacity(raw.len() + 4 * streams.len());
@@ -56,7 +56,7 @@ pub fn inverse(format: Format, data: &[u8]) -> Option<Vec<u8>> {
         Format::Bc3 | Format::Etc2Rgba => 8,
         Format::Bc4 | Format::EacR11 | Format::EacR11Snorm => 3,
         Format::Bc5 | Format::EacRg11 | Format::EacRg11Snorm => 6,
-        Format::Bc6h | crate::format::astc!() => 1,
+        Format::Bc6h | Format::Bc6hSf16 | crate::format::astc!() => 1,
         Format::Bc7 => 6,
     };
     let mut lens = Vec::with_capacity(n);
@@ -78,7 +78,9 @@ pub fn inverse(format: Format, data: &[u8]) -> Option<Vec<u8>> {
         Format::Bc3 | Format::Etc2Rgba => join_bc3(&streams),
         Format::Bc4 | Format::EacR11 | Format::EacR11Snorm => join_bc4(&streams, 1),
         Format::Bc5 | Format::EacRg11 | Format::EacRg11Snorm => join_bc4(&streams, 2),
-        Format::Bc6h | crate::format::astc!() => Some(streams[0].to_vec()).filter(|s| s.len() % 16 == 0),
+        Format::Bc6h | Format::Bc6hSf16 | crate::format::astc!() => {
+            Some(streams[0].to_vec()).filter(|s| s.len() % 16 == 0)
+        }
         Format::Bc7 => join_bc7(&streams),
     }
 }

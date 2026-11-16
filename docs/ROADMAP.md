@@ -8,7 +8,8 @@ milestone in progress; every green push to main is released as the next patch (`
 
 1. ~~ASTC LDR (4x4, 6x6, 8x8) output, with the same RDO pass.~~ Done (v1.0 below); next for it: a GPU kernel,
    ~~more footprints~~ (all 14 2D footprints done), a faster RDO pass.
-2. BC6H: ~~RDO with a log-space distortion~~ (done: 42% smaller Zstd files at λ 2), signed BC6H, a GPU kernel.
+2. BC6H: ~~RDO with a log-space distortion~~ (done: 42% smaller Zstd files at λ 2), ~~signed BC6H~~ (done),
+   a GPU kernel.
 3. ~~ETC2 / EAC for mobile fallbacks.~~ Done (v1.0 below), with ~~punch-through alpha (ETC2 RGB A1)~~ and
    ~~signed EAC~~; next for it: a SIMD batch encoder.
 
@@ -169,7 +170,11 @@ Open for v0.9.x:
   - [x] RDO for BC6H: half-float bit-pattern distortion (log-like, so λ means the same across exposures);
     whole copies, re-indexed borrowed endpoints and endpoints refit to borrowed indices. On the 20 HDRIs,
     λ 2 makes the Zstd files 42% smaller at the quality of effort 0 (BENCHMARKS.md).
-  - [ ] Signed BC6H, GPU kernel.
+  - [x] Signed BC6H (`bc6h-sf16`; KTX2 vkFormat 144, DDS `DXGI_FORMAT_BC6H_SF16`), from `.pfm` (or 8/16-bit
+    images read as `2v - 1`), with RDO: errors on each half's magnitude with its sign, so a sign error costs
+    the distance through zero. texconv's signed encoder clamps negative values to zero and ISPC has none, so
+    on 20 signed HDR detail layers every mipple effort is far ahead of the only competitor (BENCHMARKS.md).
+  - [ ] GPU kernel.
 - [x] ASTC LDR 4x4, 6x6 and 8x8 (1-3 partitions, dual plane, every weight grid of the footprint), to KTX2
   (sRGB or UNORM) or `.astc`, through the CLI, library, `mipple check` and the web demo, with
   base+offset and base+scale endpoints and per-partition CEMs. On Kodak, one thread on a cloud EPYC
@@ -190,7 +195,8 @@ Open for v0.9.x:
     files 0.7-2.8% smaller for 0.005-0.021 dB.
   - [x] Every other 2D LDR footprint (5x4, 5x5, 6x5, 8x5, 8x6, 10x5, 10x6, 10x8, 10x10, 12x10, 12x12): CLI,
     library, KTX2 (vkFormat 159-184), `.astc`, `mipple check`; the default λ interpolates by texel count,
-    rising past 8x8 to 2 / 3.5 / 4.5 / 6 at 10x8 / 10x10 / 12x10 / 12x12.
+    rising past 8x8 to 2 / 3.5 / 4.5 / 6 at 10x8 / 10x10 / 12x10 / 12x12, where effort 0 beats astcenc fast
+    on PSNR, SSIM, Zstd and Deflate size and time at once (BENCHMARKS.md, e570c02).
   - [ ] A GPU kernel, a SIMD batch encoder, HDR.
 - [x] ETC2 / EAC for mobile fallbacks: ETC2 RGB (all five modes), ETC2 RGBA8 and EAC R11 / RG11 (unsigned),
   KTX2 only, with the RDO pass. On Kodak, one thread, effort 0 is 0.37 dB ahead of Compressonator in an

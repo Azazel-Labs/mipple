@@ -12,7 +12,7 @@ fn channels(format: Format) -> &'static [usize] {
         Format::Bc1 => &[0, 1, 2],
         Format::Bc4 => &[0],
         Format::Bc5 => &[0, 1],
-        Format::Bc6h => &[],
+        Format::Bc6h | Format::Bc6hSf16 => &[],
         Format::Bc3 | Format::Bc7 => &[0, 1, 2, 3],
         Format::Etc2Rgb => &[0, 1, 2],
         Format::Etc2Rgba | Format::Etc2RgbA1 => &[0, 1, 2, 3],
@@ -39,7 +39,7 @@ fn channels(format: Format) -> &'static [usize] {
 fn encoded_blocks_match_reference_decoder() {
     for (name, img) in corpus(64) {
         // ASTC blocks are not 4x4: `astc_blocks_match_reference_decoder` covers them.
-        for format in Format::ALL.into_iter().filter(|&f| f != Format::Bc6h && !f.is_astc()) {
+        for format in Format::ALL.into_iter().filter(|&f| !f.is_bc6h() && !f.is_astc()) {
             for (effort, reduce_entropy) in [(0u8, false), (1, false), (5, false), (6, false), (5, true)] {
                 let opts = BlockOpts {
                     effort,

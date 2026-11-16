@@ -118,6 +118,7 @@ pub fn quality(format: Format, source: &Surface, dec: &Surface, normal: bool) ->
         Format::Bc1
         | Format::Bc3
         | Format::Bc6h
+        | Format::Bc6hSf16
         | Format::Bc7
         | Format::Etc2Rgb
         | Format::Etc2Rgba

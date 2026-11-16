@@ -340,13 +340,13 @@ fn main() -> Result<()> {
             if level >= tex.levels.len() {
                 bail!("level {level} out of range (file has {})", tex.levels.len());
             }
-            let float_out = output
-                .extension()
-                .and_then(|e| e.to_str())
-                .is_some_and(|e| e.eq_ignore_ascii_case("hdr"));
+            let float_out = has_ext(&output, "hdr") || has_ext(&output, "pfm");
             if float_out {
-                if tex.format != Format::Bc6h {
-                    bail!("only BC6H decodes to .hdr; use .png for {}", tex.format);
+                if !tex.format.is_bc6h() {
+                    bail!("only BC6H decodes to .hdr or .pfm; use .png for {}", tex.format);
+                }
+                if tex.format.is_signed() && has_ext(&output, "hdr") {
+                    bail!("Radiance .hdr holds no negative values; write .pfm for {}", tex.format);
                 }
                 pipeline::decode_level_hdr(&tex, level).save(&output)?;
             } else {
@@ -445,7 +445,7 @@ fn main() -> Result<()> {
             astc,
         } => {
             let tex = load_encoded(&encoded, astc)?;
-            if tex.format == Format::Bc6h {
+            if tex.format.is_bc6h() {
                 return score_hdr(&source, &encoded, &tex, zstd_level, deflate_level, label, secs, csv);
             }
             let src = Surface::load(&source)?;
@@ -599,7 +599,8 @@ fn score_hdr(
     secs: Option<f64>,
     csv: bool,
 ) -> Result<()> {
-    let src = HdrSurface::load(source, false)?.representable();
+    let signed = tex.format.is_signed();
+    let src = HdrSurface::load_as(source, false, signed)?.representable_as(signed);
     if (tex.width, tex.height) != (src.width, src.height) {
         bail!(
             "size mismatch: encoded {}x{}, source {}x{}",
@@ -649,10 +650,12 @@ fn score_hdr(
     Ok(())
 }
 
-/// `encode -f bc6h`: float input (Radiance `.hdr`; 8-bit images decoded from sRGB unless `--linear`).
+/// `encode -f bc6h` / `bc6h-sf16`: float input (Radiance `.hdr` or `.pfm`; 8-bit images decoded
+/// from sRGB unless `--linear`, or for `bc6h-sf16` stored as `(2u - 255) / 255`).
 fn encode_bc6h(a: &EncodeArgs) -> Result<()> {
-    let src = HdrSurface::load(&a.input, a.linear)?;
-    let mut opts = EncodeOptions::new(Format::Bc6h);
+    let signed = a.format.is_signed();
+    let src = HdrSurface::load_as(&a.input, a.linear, signed)?;
+    let mut opts = EncodeOptions::new(a.format);
     opts.effort = a.effort;
     opts.mips = !a.no_mips;
     opts.rdo = a.rdo.params(a.lambda.unwrap_or(0.0));
@@ -664,8 +667,8 @@ fn encode_bc6h(a: &EncodeArgs) -> Result<()> {
     let is_dds = a.output.extension().is_some_and(|e| e.eq_ignore_ascii_case("dds"));
     let zstd = (a.zstd > 0).then_some(a.zstd);
     let sc_params = format!(
-        "--format bc6h --effort {} --lambda {} --zstd {}",
-        a.effort, opts.rdo.lambda, a.zstd
+        "--format {} --effort {} --lambda {} --zstd {}",
+        a.format, a.effort, opts.rdo.lambda, a.zstd
     );
     let bytes = if is_dds {
         dds::write(&tex)?
@@ -679,14 +682,15 @@ fn encode_bc6h(a: &EncodeArgs) -> Result<()> {
         .iter()
         .map(|l| f64::from(l.width) * f64::from(l.height))
         .sum();
-    let (rep, dec) = (src.representable(), pipeline::decode_level_hdr(&tex, 0));
+    let (rep, dec) = (src.representable_as(signed), pipeline::decode_level_hdr(&tex, 0));
     let stops = hdr::exposure_range(&rep);
     println!(
-        "{} -> {}: {}x{} bc6h, {} level(s)",
+        "{} -> {}: {}x{} {}, {} level(s)",
         a.input.display(),
         a.output.display(),
         tex.width,
         tex.height,
+        tex.format,
         tex.levels.len()
     );
     println!(
@@ -721,7 +725,7 @@ fn encode_bc6h(a: &EncodeArgs) -> Result<()> {
 }
 
 fn encode(a: EncodeArgs) -> Result<()> {
-    if a.format == Format::Bc6h {
+    if a.format.is_bc6h() {
         return encode_bc6h(&a);
     }
     let is_dds = has_ext(&a.output, "dds");

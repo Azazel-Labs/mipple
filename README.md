@@ -155,9 +155,10 @@ WebGPU and win (BC7 effort 5: 42 vs 902 ms for a 512² mip chain in Chrome). Car
 - BC1, BC3, BC4, BC5 and BC7 encoders (all 8 BC7 modes), with an entropy-reduced BC7 mode for RDO (mode-6
   preference, 64-level mode-6 endpoints), and wgpu compute kernels that write the CPU's exact blocks (BC3
   is CPU only for now).
-- A BC6H encoder (unsigned half floats, all 14 modes) that reads Radiance `.hdr` and is scored with mPSNR
-  and log2 RMSE in linear light; `scripts/compete_bc6h.py` grades it against ISPC, texconv and
-  Compressonator. `--lambda` runs an RDO pass for it with a log-space distortion (about 42% smaller Zstd
+- A BC6H encoder (unsigned and signed half floats, all 14 modes) that reads Radiance `.hdr` and Portable
+  Float Maps (`.pfm`, which hold negative values) and is scored with mPSNR and log2 RMSE in linear light;
+  `scripts/compete_bc6h.py` grades it against ISPC and texconv (`--signed` for `bc6h-sf16`, where texconv's
+  encoder clamps negative values to zero and ISPC has no signed mode). `--lambda` runs an RDO pass for it with a log-space distortion (about 42% smaller Zstd
   files at λ 2). No GPU kernel for it yet.
 - ETC2 RGB (individual, differential, T, H and planar modes), ETC2 RGB A1 (punch-through alpha), ETC2 RGBA8,
   and EAC R11 / RG11 (unsigned and signed) encoders and decoders, KTX2 only, with the same RDO pass; `scripts/compete_etc.py` grades them against

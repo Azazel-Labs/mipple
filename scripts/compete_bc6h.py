@@ -9,8 +9,12 @@ Encoders (each skipped if not found):
   --mipple     target/release/mipple (efforts from --efforts)
   --harness    tools/competitors bcn_harness built with ISPC (ispc_bc6h profiles)
   --texconv    third_party/bin/texconv.exe (BC6H_UF16; -singleproc with --threads 1)
-  --cmp        compressonatorcli (-fd BC6H, -Quality from --cmp-quality; reads a texconv half-float DDS,
-               as it does not load .hdr)
+  --cmp        compressonatorcli, only when given (-fd BC6H, -Quality from --cmp-quality; reads a texconv
+               half-float DDS, as it does not load .hdr). Off by default: on one thread it took 51-178 s per
+               2K image at quality 0.1 and about 21 minutes at 1.0, never ahead of mipple effort 2.
+
+--signed grades signed BC6H (BC6H_SF16) instead, from Portable Float Maps (.pfm, which hold negative values):
+mipple -f bc6h-sf16, texconv -f BC6H_SF16 and Compressonator -fd BC6H_SF (ISPC has no signed BC6H).
 
 Time: mipple's own base-encode time, the harness's block loop, and process wall time for texconv and
 Compressonator (which includes loading and writing). --threads N limits every encoder to N threads; --cpu N
@@ -50,8 +54,8 @@ def main():
     ap.add_argument("--mipple", type=Path, default=ROOT / "target" / "release" / "mipple.exe")
     ap.add_argument("--harness", type=Path, default=ROOT / "third_party" / "build-harness" / "Release" / "bcn_harness.exe")
     ap.add_argument("--texconv", type=Path, default=ROOT / "third_party" / "bin" / "texconv.exe")
-    ap.add_argument("--cmp", type=Path,
-                    default=ROOT / "third_party" / "dl" / "cmp" / "compressonatorcli-4.6.0-win64" / "compressonatorcli.exe")
+    ap.add_argument("--cmp", type=Path, default=None,
+                    help="e.g. third_party/dl/cmp/compressonatorcli-4.6.0-win64/compressonatorcli.exe")
     ap.add_argument("--efforts", default="0,2,5,9")
     ap.add_argument("--ispc", default="veryfast,fast,basic,slow,veryslow")
     ap.add_argument("--cmp-quality", default="0.1,1.0")
@@ -59,6 +63,7 @@ def main():
     ap.add_argument("--limit", type=int, default=0, help="first N images only")
     ap.add_argument("--runs", type=int, default=1, help="best of N timings per image (mipple and ISPC)")
     ap.add_argument("--cpu", type=int, default=None, help="pin this script and the encoders to this logical CPU")
+    ap.add_argument("--signed", action="store_true", help="signed BC6H from .pfm images")
     a = ap.parse_args()
     if a.cpu is not None:
         # Child processes inherit the affinity.
@@ -70,7 +75,8 @@ def main():
         else:
             os.sched_setaffinity(0, {a.cpu})
 
-    imgs = sorted(a.images.glob("*.hdr"))
+    imgs = sorted(a.images.glob("*.pfm" if a.signed else "*.hdr"))
+    fmt, tc_fmt, cmp_fmt = ("bc6h-sf16", "BC6H_SF16", "BC6H_SF") if a.signed else ("bc6h", "BC6H_UF16", "BC6H")
     if a.limit:
         imgs = imgs[: a.limit]
     a.out.mkdir(parents=True, exist_ok=True)
@@ -82,12 +88,12 @@ def main():
     if a.mipple.exists():
         for e in a.efforts.split(","):
             encoders.append((f"mipple e{e}", "mipple", e))
-    if a.harness.exists():
+    if a.harness.exists() and not a.signed:
         for p in a.ispc.split(","):
             encoders.append((f"ispc {p}", "ispc", p))
     if a.texconv.exists():
         encoders.append(("texconv", "texconv", ""))
-    if a.cmp.exists() and a.texconv.exists():
+    if a.cmp and a.cmp.exists() and a.texconv.exists():
         for q in a.cmp_quality.split(","):
             encoders.append((f"cmp q{q}", "cmp", q))
 
@@ -98,7 +104,7 @@ def main():
             if kind == "mipple":
                 secs = wall = float("inf")
                 for _ in range(a.runs):
-                    so, w = run([str(a.mipple), "encode", str(img), "-o", str(out), "-f", "bc6h", "-e", param,
+                    so, w = run([str(a.mipple), "encode", str(img), "-o", str(out), "-f", fmt, "-e", param,
                                  "--no-mips"], env)
                     secs = min(secs, float(re.search(r"time: base ([\d.]+)s", so).group(1)))
                     wall = min(wall, w)
@@ -111,7 +117,7 @@ def main():
             elif kind == "texconv":
                 d = tmp / "texconv"
                 d.mkdir(exist_ok=True)
-                cmd = [str(a.texconv), "-nologo", "-y", "-f", "BC6H_UF16", "-m", "1", "-o", str(d)]
+                cmd = [str(a.texconv), "-nologo", "-y", "-f", tc_fmt, "-m", "1", "-o", str(d)]
                 if a.threads == 1:
                     cmd.append("-singleproc")
                 _, wall = run(cmd + [str(img)])
@@ -125,7 +131,7 @@ def main():
                     src.parent.mkdir(exist_ok=True)
                     run([str(a.texconv), "-nologo", "-y", "-f", "R16G16B16A16_FLOAT", "-m", "1", "-o",
                          str(src.parent), str(img)])
-                _, wall = run([str(a.cmp), "-fd", "BC6H", "-Quality", param, "-NumThreads", str(a.threads),
+                _, wall = run([str(a.cmp), "-fd", cmp_fmt, "-Quality", param, "-NumThreads", str(a.threads),
                                "-nomipmap", str(src), str(out)])
                 secs = wall
             so, _ = run([str(a.mipple), "score", str(img), str(out), "--csv", "--label", label, "--secs", f"{secs}"])

@@ -16,10 +16,13 @@
 //!   texels (its high bytes match).
 //!
 //! Like the other formats, a chunk that real Zstd does not shrink goes back to its base encoding.
+//!
+//! Signed blocks (BC6H_SF16) run the same pass with errors on the signed scale of
+//! [`super::half_key`].
 
 use super::{
-    Bc6hBlock, HdrBlock, MODES, W3, W4, decode, decode_block, endpoints, finish, interp, pack, region_anchors,
-    region_of, sse, unpack, unquantize,
+    Bc6hBlock, HdrBlock, MODES, W3, W4, decode, decode_block, endpoints, finish, half_key, interp, pack,
+    region_anchors, region_of, sse, unpack, unquantize,
 };
 use crate::format::Format;
 use crate::hdr::HdrSurface;
@@ -44,13 +47,20 @@ struct Prev {
     fields: Option<Bc6hBlock>,
 }
 
-fn sq(a: [u16; 3], b: [u16; 3]) -> u64 {
+/// Squared distance between two texels: their bits unsigned (`k` the halves, as unsigned palettes
+/// and targets hold their keys as their bits), [`half_key`] signed.
+fn sq(a: [i32; 3], b: [i32; 3]) -> u64 {
     (0..3)
         .map(|c| {
             let d = i64::from(a[c]) - i64::from(b[c]);
             (d * d) as u64
         })
         .sum()
+}
+
+/// Each channel of `h` as [`sq`] measures it.
+fn keys(h: [u16; 3], signed: bool) -> [i32; 3] {
+    h.map(|v| if signed { half_key(v, true) } else { i32::from(v) })
 }
 
 /// The first bit of `b`'s indices: everything below it (mode, endpoints, partition) is the head.
@@ -60,16 +70,17 @@ fn index_start(b: &Bc6hBlock) -> u32 {
 
 /// `b` with each texel's index chosen for `src` (anchors restricted to the lower half, as the format
 /// requires), and its error, or `None` once the error passes `cap`.
-fn reindex(b: &Bc6hBlock, src: &HdrBlock, cap: u64) -> Option<(Bc6hBlock, u64)> {
+fn reindex(b: &Bc6hBlock, src: &HdrBlock, cap: u64, signed: bool) -> Option<(Bc6hBlock, u64)> {
     let m = MODES[usize::from(b.mode)];
-    let e = endpoints(b, false);
+    let e = endpoints(b, signed);
     let wt: &[i32] = if m.two_regions { &W3 } else { &W4 };
     let nw = wt.len();
-    let mut pal = [[[0u16; 3]; 16]; 2];
+    let mut pal = [[[0i32; 3]; 16]; 2];
     for (r, pr) in pal.iter_mut().enumerate().take(m.regions()) {
         for (k, p) in pr.iter_mut().enumerate().take(nw) {
             for c in 0..3 {
-                p[c] = finish(interp(e[r][0][c], e[r][1][c], wt[k]), false);
+                let h = finish(interp(e[r][0][c], e[r][1][c], wt[k]), signed);
+                p[c] = if signed { half_key(h, true) } else { i32::from(h) };
             }
         }
     }
@@ -79,9 +90,10 @@ fn reindex(b: &Bc6hBlock, src: &HdrBlock, cap: u64) -> Option<(Bc6hBlock, u64)> 
     for i in 0..16 {
         let r = region_of(m, b.partition, i);
         let lim = if anchors.contains(&i) { nw / 2 } else { nw };
+        let x = keys(src[i], signed);
         let mut best = (u64::MAX, 0usize);
         for (k, &p) in pal[r][..lim].iter().enumerate() {
-            let d = sq(p, src[i]);
+            let d = sq(p, x);
             if d < best.0 {
                 best = (d, k);
             }
@@ -95,8 +107,27 @@ fn reindex(b: &Bc6hBlock, src: &HdrBlock, cap: u64) -> Option<(Bc6hBlock, u64)> 
     Some((out, err))
 }
 
-/// The `eb`-bit endpoint value whose unquantized value is nearest `x` (on the 16-bit scale).
-fn quantize(x: f32, eb: u8) -> i32 {
+/// The `eb`-bit endpoint value whose unquantized value is nearest `x` (on the 16-bit scale;
+/// signed: -32767..=32767, the magnitude quantized with `eb - 1` bits and the sign kept).
+fn quantize(x: f32, eb: u8, signed: bool) -> i32 {
+    if signed {
+        let a = x.abs();
+        let q = if eb >= 16 {
+            (a.round() as i32).min(0x7fff)
+        } else {
+            let max = (1 << (eb - 1)) - 1;
+            let q0 = ((a * (1 << (eb - 1)) as f32 / 32768.0) as i32).clamp(0, max);
+            let mut best = (f32::MAX, q0);
+            for q in (q0 - 1).max(0)..=(q0 + 1).min(max) {
+                let d = (unquantize(q, eb, true) as f32 - a).abs();
+                if d < best.0 {
+                    best = (d, q);
+                }
+            }
+            best.1
+        };
+        return if x < 0.0 { -q } else { q };
+    }
     if eb >= 15 {
         return (x.round() as i32).clamp(0, 0xffff);
     }
@@ -114,7 +145,7 @@ fn quantize(x: f32, eb: u8) -> i32 {
 
 /// `b`'s mode, partition and indices with least-squares endpoints for `src` (deltas clamped to their
 /// bits), and its error, or `None` when it passes `cap`.
-fn refit(b: &Bc6hBlock, src: &HdrBlock, cap: u64) -> Option<(Bc6hBlock, u64)> {
+fn refit(b: &Bc6hBlock, src: &HdrBlock, cap: u64, signed: bool) -> Option<(Bc6hBlock, u64)> {
     let m = MODES[usize::from(b.mode)];
     let wt: &[i32] = if m.two_regions { &W3 } else { &W4 };
     // Per region: sums of s², st, t², s·x, t·x and x, with t the weight and s = 1 - t.
@@ -129,8 +160,14 @@ fn refit(b: &Bc6hBlock, src: &HdrBlock, cap: u64) -> Option<(Bc6hBlock, u64)> {
         a[1] += s * t;
         a[2] += t * t;
         for c in 0..3 {
-            // The 16-bit value that `finish` maps to the middle of this half-float step.
-            let x = (f64::from(src[i][c]) + 0.5) * 64.0 / 31.0;
+            // The 16-bit value that `finish` maps to the middle of this half-float step (signed:
+            // of the magnitude's step, with the sign).
+            let x = if signed {
+                let k = f64::from(half_key(src[i][c], true));
+                (k.abs() + 0.5).copysign(k) * 32.0 / 31.0
+            } else {
+                (f64::from(src[i][c]) + 0.5) * 64.0 / 31.0
+            };
             a[3 + c] += s * x;
             a[6 + c] += t * x;
             a[9 + c] += x;
@@ -151,8 +188,9 @@ fn refit(b: &Bc6hBlock, src: &HdrBlock, cap: u64) -> Option<(Bc6hBlock, u64)> {
                 let mean = a[9 + c] / n[r].max(1.0);
                 (mean, mean)
             };
-            q[2 * r][c] = quantize(e0.clamp(0.0, 65535.0) as f32, m.eb);
-            q[2 * r + 1][c] = quantize(e1.clamp(0.0, 65535.0) as f32, m.eb);
+            let (lo, hi) = if signed { (-32767.0, 32767.0) } else { (0.0, 65535.0) };
+            q[2 * r][c] = quantize(e0.clamp(lo, hi) as f32, m.eb, signed);
+            q[2 * r + 1][c] = quantize(e1.clamp(lo, hi) as f32, m.eb, signed);
         }
     }
     let mut out = *b;
@@ -168,12 +206,12 @@ fn refit(b: &Bc6hBlock, src: &HdrBlock, cap: u64) -> Option<(Bc6hBlock, u64)> {
             };
         }
     }
-    let err = sse(src, &decode_block(&out, false));
+    let err = sse(src, &decode_block(&out, signed), signed);
     (err <= cap).then_some((out, err))
 }
 
-fn optimize_chunk(s: &HdrSurface, nx: usize, first: usize, data: &mut [u8], p: &RdoParams) -> RdoStats {
-    let format = Format::Bc6h;
+fn optimize_chunk(s: &HdrSurface, nx: usize, first: usize, data: &mut [u8], p: &RdoParams, signed: bool) -> RdoStats {
+    let format = if signed { Format::Bc6hSf16 } else { Format::Bc6h };
     let count = data.len() / 16;
     let window = p.window_for(format);
     let max_back = p.max_back_for(format).min(window / 16);
@@ -195,10 +233,10 @@ fn optimize_chunk(s: &HdrSurface, nx: usize, first: usize, data: &mut [u8], p: &
     let mut tails: HashSet<(u128, u8, u8)> = HashSet::new();
     for i in 0..count {
         let bi = first + i;
-        let src = s.read_block((bi % nx) as u32, (bi / nx) as u32);
+        let src = s.read_block_as((bi % nx) as u32, (bi / nx) as u32, signed);
         let score = |err: u64, bits: f32| err as f64 * scale + lambda * bits as f64;
         let base: [u8; 16] = data[i * 16..i * 16 + 16].try_into().unwrap();
-        let base_err = sse(&src, &decode(&base, false));
+        let base_err = sse(&src, &decode(&base, signed), signed);
         let (base_bits, base_rep) = model.cost(&base);
         let min_bits = lambda * model.min_cost(16) as f64;
         let limit = (base_err as f64 * ratio2 + floor) as u64;
@@ -224,7 +262,7 @@ fn optimize_chunk(s: &HdrSurface, nx: usize, first: usize, data: &mut [u8], p: &
         for d in 1..=max_back.min(i) {
             let j = i - d;
             if seen.insert(u128::from_le_bytes(prevs[j].bytes)) {
-                consider(prevs[j].bytes, sse(&src, &prevs[j].dec), &mut best);
+                consider(prevs[j].bytes, sse(&src, &prevs[j].dec, signed), &mut best);
             }
         }
         heads.clear();
@@ -238,10 +276,10 @@ fn optimize_chunk(s: &HdrSurface, nx: usize, first: usize, data: &mut [u8], p: &
             }
             // A candidate must beat the best on distortion alone.
             let cap = (limit as f64).min(best.0 / scale) as u64;
-            if let Some((b, err)) = reindex(f, &src, cap) {
+            if let Some((b, err)) = reindex(f, &src, cap, signed) {
                 let c = pack(&b);
                 if seen.insert(u128::from_le_bytes(c)) {
-                    debug_assert_eq!(err, sse(&src, &decode(&c, false)));
+                    debug_assert_eq!(err, sse(&src, &decode(&c, signed), signed));
                     consider(c, err, &mut best);
                 }
             }
@@ -256,7 +294,7 @@ fn optimize_chunk(s: &HdrSurface, nx: usize, first: usize, data: &mut [u8], p: &
                 continue;
             }
             let cap = (limit as f64).min(best.0 / scale) as u64;
-            if let Some((b, err)) = refit(f, &src, cap) {
+            if let Some((b, err)) = refit(f, &src, cap, signed) {
                 let c = pack(&b);
                 if seen.insert(u128::from_le_bytes(c)) {
                     consider(c, err, &mut best);
@@ -271,7 +309,7 @@ fn optimize_chunk(s: &HdrSurface, nx: usize, first: usize, data: &mut [u8], p: &
         data[i * 16..i * 16 + 16].copy_from_slice(&best.1);
         prevs.push(Prev {
             bytes: best.1,
-            dec: decode(&best.1, false),
+            dec: decode(&best.1, signed),
             fields: unpack(&best.1),
         });
         model.push(&best.1, best.3);
@@ -292,8 +330,8 @@ fn optimize_chunk(s: &HdrSurface, nx: usize, first: usize, data: &mut [u8], p: &
 }
 
 /// Runs RDO in place over one level's BC6H blocks (`data`, raster order, as
-/// [`super::encode_surface`] writes them) of surface `s`.
-pub fn optimize(s: &HdrSurface, data: &mut [u8], p: &RdoParams) -> RdoStats {
+/// [`super::encode_surface`] writes them, signed when `signed`) of surface `s`.
+pub fn optimize(s: &HdrSurface, data: &mut [u8], p: &RdoParams, signed: bool) -> RdoStats {
     let blocks = data.len() / 16;
     if !p.enabled() || blocks == 0 {
         return RdoStats {
@@ -305,7 +343,7 @@ pub fn optimize(s: &HdrSurface, data: &mut [u8], p: &RdoParams) -> RdoStats {
     let chunk = (p.chunk_bytes_for(Format::Bc6h) / 16).max(1);
     data.par_chunks_mut(chunk * 16)
         .enumerate()
-        .map(|(k, d)| optimize_chunk(s, nx, k * chunk, d, p))
+        .map(|(k, d)| optimize_chunk(s, nx, k * chunk, d, p, signed))
         .reduce(RdoStats::default, RdoStats::merge)
 }
 
@@ -317,15 +355,51 @@ mod tests {
     /// [`optimize_chunk`]), and RDO moves blocks and lowers the estimated rate.
     #[test]
     fn candidates_score_their_decode() {
-        let s = HdrSurface::from_ldr(&crate::synth::bricks(64), true);
-        let mut data = super::super::encode_surface(&s, 2);
-        let p = RdoParams {
-            lambda: 4.0,
-            verify_zstd_level: None,
-            ..Default::default()
+        let mut s = HdrSurface::from_ldr(&crate::synth::bricks(64), true);
+        for signed in [false, true] {
+            if signed {
+                // Half the texels' channels negative, so signed candidates cross zero.
+                for (i, p) in s.pixels.iter_mut().enumerate() {
+                    for (c, v) in p.iter_mut().enumerate() {
+                        if (i + c) % 3 == 0 {
+                            *v = -*v;
+                        }
+                    }
+                }
+            }
+            let mut data = super::super::encode_surface(&s, 2, signed);
+            let p = RdoParams {
+                lambda: 4.0,
+                verify_zstd_level: None,
+                ..Default::default()
+            };
+            let st = optimize(&s, &mut data, &p, signed);
+            assert!(st.changed > 0, "signed {signed}");
+            assert!(st.est_bits_after < st.est_bits_before, "signed {signed}");
+        }
+    }
+
+    #[test]
+    fn signed_refit_and_reindex_match_decode() {
+        let mut seed = 0x1234_5678u64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
         };
-        let st = optimize(&s, &mut data, &p);
-        assert!(st.changed > 0);
-        assert!(st.est_bits_after < st.est_bits_before);
+        for _ in 0..200 {
+            let src: HdrBlock = std::array::from_fn(|_| {
+                std::array::from_fn(|_| super::super::f32_to_sf16((next() % 2001) as f32 / 500.0 - 2.0))
+            });
+            let base = super::super::encode_block(&src, 3, true);
+            let f = unpack(&base).unwrap();
+            let (b, err) = reindex(&f, &src, u64::MAX, true).unwrap();
+            assert_eq!(err, sse(&src, &decode(&pack(&b), true), true));
+            // Re-indexing the encoder's own endpoints never does worse than its indices.
+            assert!(err <= sse(&src, &decode(&base, true), true));
+            let (b, err) = refit(&f, &src, u64::MAX, true).unwrap();
+            assert_eq!(err, sse(&src, &decode(&pack(&b), true), true));
+        }
     }
 }

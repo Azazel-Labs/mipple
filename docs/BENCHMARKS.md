@@ -551,11 +551,11 @@ which includes loading and writing):
 | ISPC slow | 46.838 | 0.03916 | 7.402 | 9.26 |
 | ISPC veryslow | 46.848 | 0.03912 | 7.409 | 19.7 |
 | texconv | 44.555 | 0.05390 | 7.334 | 5.27 |
-| Compressonator q0.1 | 45.944 | 0.04552 | 7.239 | 161 |
-| Compressonator q1.0 | 45.944 | 0.04552 | 7.243 | 2985 |
+| Compressonator q0.1\* | 45.944 | 0.04552 | 7.239 | 161 |
+| Compressonator q1.0\* | 45.944 | 0.04552 | 7.243 | 2985 |
 
-(Compressonator's rows are from an earlier, unpinned run with the same images; it is far off the pace either
-way.)
+\* Too slow to bother using. These rows are from an earlier, unpinned run with the same images, and
+`compete_bc6h.py` now runs Compressonator only when given `--cmp`.
 
 mipple encodes eight blocks at a time, one per SIMD lane, as ISPC does. Every ISPC profile has a mipple
 effort that is both better and faster:
@@ -590,6 +590,41 @@ At λ 2 the files are 42% smaller than plain effort 5, at the quality of effort 
 other BC6H encoders here has an RDO mode. Refitting endpoints to borrowed indices is worth 3.2% BD-rate
 against re-indexing alone. Looking back 32 blocks for refits instead of 256 costs 0.3% BD-rate for about half
 the RDO time.
+
+### Signed BC6H (`bc6h-sf16`)
+
+No standard signed HDR test set exists, so this one is made from the same twenty HDRIs: each image minus a 9×9
+box blur of itself (a detail layer, both signs everywhere, HDR magnitudes at highlights), saved as `.pfm`.
+One thread pinned to one P-core, best of three, `python scripts/compete_bc6h.py <dir> --signed --threads 1
+--cpu 14 --runs 3 --efforts 0,1,2,5`. The metrics score signed values: mPSNR tone maps each value by its
+magnitude and keeps its sign, and log2 RMSE measures stops above 2^-14 with the sign, so a sign error costs the
+distance through zero. Mostly small values of both signs make this a much harsher test than the table above;
+compare rows, not the two tables:
+
+| encoder | mPSNR dB | log2 RMSE | Zstd-19 bpt | time s |
+| --- | ---: | ---: | ---: | ---: |
+| mipple effort 0 | 13.257 | 1.98839 | 7.429 | 0.683 |
+| mipple effort 1 | 16.571 | 1.36070 | 7.545 | 3.58 |
+| mipple effort 2 | 16.653 | 1.34914 | 7.527 | 5.81 |
+| mipple effort 5 | 16.730 | 1.33797 | 7.525 | 14.6 |
+| texconv | 5.816 | 5.40843 | 6.120 | 17.5 |
+
+Compressonator\* is left out of the table. \* Too slow to bother using, so it was not run on all twenty: on
+the first two images, `-fd BC6H_SF` scored 15.471 dB in 229 s at quality 0.1 and 15.843 dB in 2,503 s at
+quality 1.0, against 17.230 dB in 0.51 s for mipple effort 2.
+
+texconv's `BC6H_SF16` encoder clamps every negative value to zero, even from a half-float DDS. Its decoder
+agrees with mipple's on every block, so the encoder alone is to blame, and its smaller files are mostly the
+zeros. ISPC has no signed mode. Every mipple effort is far ahead of the only other encoder that runs in useful
+time.
+
+- On images without negative values, signed blocks score 0.01-0.13 dB below unsigned ones: each endpoint
+  spends a bit on the sign.
+- Modes with 6-bit endpoints keep only 5 bits of magnitude when signed, so their endpoint levels sit about a
+  factor of two apart. Compressonator's output has the same coarse blocks.
+- RDO works the same way signed. On one natural HDRI (art_studio) read as signed, λ 2 shrinks the Zstd stream
+  from 7.40 to 4.55 bpt (−39%) at 42.29 dB, against 7.64 to 4.57 bpt at 42.29 dB unsigned. On the detail
+  layers λ 2 saves only 1.3-1.7%: they are close to noise.
 
 ## ETC2 and EAC vs Compressonator
 
@@ -838,6 +873,21 @@ Zstd-19 bpt / Deflate-9 bpt / time s:
   but its files are 4-12% larger: the default λ (8x8's 0.5 for every footprint past 8x8) is too light there.
   At 5x4 and 5x5 it has smaller files and higher SSIM but lower PSNR; at 6x5 it is level. At all three it is
   9-14% slower.
+
+At e570c02 the default λ keeps rising past 8x8 (2 / 3.5 / 4.5 / 6 at 10x8 / 10x10 / 12x10 / 12x12). Re-run on
+one cloud EPYC 9V74 (same setup, against fast and thorough):
+
+| footprint | astcenc fast | astcenc thorough | mipple effort 0 | mipple effort 5 |
+| --- | --- | --- | --- | --- |
+| 10x8 | 32.455 / .93851 / 1.399 / 1.421 / 2.35 | 33.438 / .95402 / 1.543 / 1.550 / 35.29 | 32.735 / .94765 / 1.374 / 1.384 / 1.67 | 33.367 / .95245 / 1.403 / 1.410 / 20.61 |
+| 10x10 | 31.339 / .91944 / 1.097 / 1.114 / 2.21 | 32.361 / .93992 / 1.239 / 1.243 / 38.09 | 31.698 / .93081 / 1.053 / 1.059 / 1.60 | 32.250 / .93648 / 1.077 / 1.082 / 19.25 |
+| 12x10 | 30.460 / .90286 / 0.907 / 0.920 / 1.97 | 31.565 / .92737 / 1.030 / 1.032 / 39.14 | 30.928 / .91719 / 0.881 / 0.884 / 1.51 | 31.453 / .92367 / 0.898 / 0.901 / 18.01 |
+| 12x12 | 29.581 / .88273 / 0.744 / 0.755 / 1.80 | 30.796 / .91305 / 0.853 / 0.856 / 40.82 | 30.164 / .90136 / 0.724 / 0.727 / 1.47 | 30.675 / .90888 / 0.741 / 0.744 / 17.25 |
+
+- **Effort 0 against fast:** now ahead on all five columns at all four footprints: +0.28 to +0.58 dB, higher
+  SSIM, files 1.8-4.0% smaller after Zstd (2.6-4.9% after Deflate), in 71-82% of its time.
+- **Effort 5 against thorough:** 0.07-0.12 dB behind with lower SSIM, but files 9-13% smaller after Zstd, in
+  42-58% of its time.
 
 Scoring astcenc's files exposed a decoder bug, fixed: a 2- or 3-partition block may spell equal CEMs the long
 way (with the extra CEM bits below the weights), and the decoder read those blocks with the short form's

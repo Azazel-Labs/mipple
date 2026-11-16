@@ -31,7 +31,7 @@ pub fn reference_decode(format: Format, raw: &[u8]) -> [[u8; 4]; 16] {
             texture2ddecoder::decode_bc5_block(raw, &mut buf);
         }
         Format::Bc7 => texture2ddecoder::decode_bc7_block(raw, &mut buf),
-        Format::Bc6h => panic!("no independent BC6H reference decoder here"),
+        Format::Bc6h | Format::Bc6hSf16 => panic!("no independent BC6H reference decoder here"),
         Format::Etc2Rgb => texture2ddecoder::decode_etc2_rgb_block(raw, &mut buf),
         Format::Etc2Rgba => texture2ddecoder::decode_etc2_rgba8_block(raw, &mut buf),
         Format::Etc2RgbA1 => {

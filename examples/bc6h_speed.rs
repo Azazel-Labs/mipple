@@ -1,6 +1,6 @@
 //! BC6H encode speed: `cargo run --release --example bc6h_speed -- EFFORT REPEATS a.hdr b.hdr ...`.
 //! Prints the best of REPEATS encode times per image, summed, and nanoseconds per block (set
-//! RAYON_NUM_THREADS=1 and pin the process for single-core numbers).
+//! RAYON_NUM_THREADS=1 and pin the process for single-core numbers; SIGNED=1 encodes BC6H_SF16).
 
 use std::path::Path;
 use std::time::Instant;
@@ -15,20 +15,21 @@ fn main() {
     // Q=1 also reports mean mPSNR against the representable source, as `mipple score` does.
     let quality = std::env::var("Q").is_ok_and(|v| v == "1");
     let mut psnr = 0.0;
+    let signed = std::env::var("SIGNED").is_ok_and(|v| v == "1");
     for path in &args[2..] {
         let s = mipple::hdr::HdrSurface::load(Path::new(path), true).expect("load");
         let mut best = f64::INFINITY;
         for r in 0..reps {
             let t = Instant::now();
-            let out = mipple::bc6h::encode_surface(&s, effort);
+            let out = mipple::bc6h::encode_surface(&s, effort, signed);
             best = best.min(t.elapsed().as_secs_f64());
             if r == 0 {
                 for &b in &out {
                     hash = (hash ^ u64::from(b)).wrapping_mul(0x100_0000_01b3);
                 }
                 if quality {
-                    let src = s.representable();
-                    let dec = mipple::bc6h::decode_surface(&out, s.width, s.height);
+                    let src = s.representable_as(signed);
+                    let dec = mipple::bc6h::decode_surface(&out, s.width, s.height, signed);
                     psnr += mipple::hdr::mpsnr(&src, &dec, mipple::hdr::exposure_range(&src));
                 }
             }

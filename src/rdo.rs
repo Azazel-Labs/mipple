@@ -222,7 +222,7 @@ impl RdoParams {
     /// it searches 128 deep plus the localized search's picks instead.
     pub fn window_for(&self, format: Format) -> usize {
         self.window.unwrap_or(match format {
-            Format::Bc6h | Format::Bc7 | crate::format::astc!() => 16 * 1024,
+            Format::Bc6h | Format::Bc6hSf16 | Format::Bc7 | crate::format::astc!() => 16 * 1024,
             Format::Bc1 | Format::Bc3 | Format::Etc2Rgb | Format::Etc2Rgba | Format::Etc2RgbA1 => 8 * 1024,
             Format::Bc5 | Format::EacRg11 | Format::EacRg11Snorm => 3072,
             Format::Bc4 | Format::EacR11 | Format::EacR11Snorm => 2048,
@@ -290,7 +290,7 @@ impl RdoParams {
             Format::Bc1 | Format::Bc3 | Format::Bc4 => 256,
             Format::Etc2Rgba | Format::EacR11 | Format::EacRg11 => 256,
             Format::EacR11Snorm | Format::EacRg11Snorm => 256,
-            Format::Bc5 | Format::Bc6h | Format::Etc2Rgb | Format::Etc2RgbA1 => 0,
+            Format::Bc5 | Format::Bc6h | Format::Bc6hSf16 | Format::Etc2Rgb | Format::Etc2RgbA1 => 0,
             crate::format::astc!() => 0,
         })
     }
@@ -1126,7 +1126,7 @@ fn candidates(
         }
         // No candidates: BC6H errors are not on the 8-bit scale, and the pipeline never runs this
         // RDO for it.
-        Format::Bc6h => {}
+        Format::Bc6h | Format::Bc6hSf16 => {}
         // `optimize_with_alt` refuses ASTC: its blocks are not 4x4.
         crate::format::astc!() => unreachable!("{format} has no RDO"),
         Format::Etc2Rgb
@@ -2235,7 +2235,7 @@ fn optimize_chunk(
         Format::Bc1 => w[3] == 0,
         Format::Bc4 => w[1..] == [0, 0, 0],
         Format::Bc5 => w[2..] == [0, 0],
-        Format::Bc3 | Format::Bc6h | Format::Bc7 => false,
+        Format::Bc3 | Format::Bc6h | Format::Bc6hSf16 | Format::Bc7 => false,
         Format::Etc2Rgb | Format::Etc2Rgba | Format::Etc2RgbA1 | Format::EacR11 | Format::EacRg11 => false,
         Format::EacR11Snorm | Format::EacRg11Snorm => false,
         crate::format::astc!() => false,
@@ -2772,7 +2772,7 @@ fn optimize_chunk(
                 Format::Bc5 => &[(0, 2), (2, 8), (8, 10), (10, 16)],
                 // Mode 6 (most RDO output): mode, endpoints and P0; then P1 and the indices.
                 Format::Bc7 => &[(0, 8), (8, 16)],
-                Format::Bc6h => &[(0, 16)],
+                Format::Bc6h | Format::Bc6hSf16 => &[(0, 16)],
                 Format::Etc2Rgb | Format::Etc2RgbA1 => &[(0, 4), (4, 8)],
                 Format::Etc2Rgba => &[(0, 2), (2, 8), (8, 12), (12, 16)],
                 Format::EacR11 | Format::EacR11Snorm => &[(0, 2), (2, 8)],

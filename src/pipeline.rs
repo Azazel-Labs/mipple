@@ -272,7 +272,7 @@ fn encode_surface_raw(surface: &Surface, format: Format, opts: BlockOpts) -> Vec
     match format {
         Format::Bc1 => crate::bc1::encode_surface(surface, opts.effort),
         Format::Bc3 => crate::bc3::encode_surface(surface, opts.effort),
-        Format::Bc6h => crate::bc6h::encode_surface_ldr(surface, opts.effort),
+        Format::Bc6h | Format::Bc6hSf16 => crate::bc6h::encode_surface_ldr(surface, opts.effort, format.is_signed()),
         Format::Bc4 => crate::bc4::encode_surface(surface, 1, opts.effort),
         Format::Bc5 => crate::bc4::encode_surface(surface, 2, opts.effort),
         Format::Etc2Rgb => crate::etc::encode_surface(surface, opts.effort),
@@ -368,11 +368,7 @@ fn rdo_params(opts: &EncodeOptions) -> RdoParams {
     RdoParams {
         reduce_entropy: opts.rdo.reduce_entropy || opts.block_opts().reduce_entropy,
         // The 8-bit RDO does not apply to BC6H, whose own pass runs in `encode_hdr`.
-        lambda: if opts.format == Format::Bc6h {
-            0.0
-        } else {
-            opts.rdo.lambda
-        },
+        lambda: if opts.format.is_bc6h() { 0.0 } else { opts.rdo.lambda },
         ..opts.rdo
     }
 }
@@ -527,11 +523,13 @@ fn encode_with(
     (tex, report)
 }
 
-/// Encodes an HDR image to BC6H (unsigned half floats), with a box-filtered mip chain when
-/// `opts.mips`, then RDO when `opts.rdo` enables it ([`crate::bc6h::rdo`]). Uses `opts.effort`,
-/// `opts.mips` and `opts.rdo`; `opts.format` must be [`Format::Bc6h`].
+/// Encodes an HDR image to BC6H (half floats: unsigned for [`Format::Bc6h`], signed for
+/// [`Format::Bc6hSf16`]), with a box-filtered mip chain when `opts.mips`, then RDO when `opts.rdo`
+/// enables it ([`crate::bc6h::rdo`]). Uses `opts.format`, `opts.effort`, `opts.mips` and
+/// `opts.rdo`; `opts.format` must be BC6H.
 pub fn encode_hdr(surface: &crate::hdr::HdrSurface, opts: &EncodeOptions) -> (EncodedTexture, EncodeReport) {
-    assert_eq!(opts.format, Format::Bc6h, "encode_hdr encodes BC6H");
+    assert!(opts.format.is_bc6h(), "encode_hdr encodes BC6H");
+    let signed = opts.format.is_signed();
     let chain = if opts.mips {
         surface.chain()
     } else {
@@ -543,7 +541,7 @@ pub fn encode_hdr(surface: &crate::hdr::HdrSurface, opts: &EncodeOptions) -> (En
         .map(|l| Level {
             width: l.width,
             height: l.height,
-            data: crate::bc6h::encode_surface(l, opts.effort),
+            data: crate::bc6h::encode_surface(l, opts.effort, signed),
         })
         .collect();
     let base_secs = t0.elapsed().as_secs_f64();
@@ -552,7 +550,7 @@ pub fn encode_hdr(surface: &crate::hdr::HdrSurface, opts: &EncodeOptions) -> (En
     let rdo = chain
         .iter()
         .zip(levels.iter_mut())
-        .map(|(l, lv)| crate::bc6h::rdo::optimize(l, &mut lv.data, &opts.rdo))
+        .map(|(l, lv)| crate::bc6h::rdo::optimize(l, &mut lv.data, &opts.rdo, signed))
         .fold(RdoStats::default(), RdoStats::merge);
     let report = EncodeReport {
         base_secs,
@@ -565,7 +563,7 @@ pub fn encode_hdr(surface: &crate::hdr::HdrSurface, opts: &EncodeOptions) -> (En
         ..Default::default()
     };
     let tex = EncodedTexture {
-        format: Format::Bc6h,
+        format: opts.format,
         srgb: false,
         width: surface.width,
         height: surface.height,
@@ -576,9 +574,9 @@ pub fn encode_hdr(surface: &crate::hdr::HdrSurface, opts: &EncodeOptions) -> (En
 
 /// Decodes one mip level of a BC6H texture to linear float RGB.
 pub fn decode_level_hdr(tex: &EncodedTexture, level: usize) -> crate::hdr::HdrSurface {
-    assert_eq!(tex.format, Format::Bc6h, "decode_level_hdr decodes BC6H");
+    assert!(tex.format.is_bc6h(), "decode_level_hdr decodes BC6H");
     let l = &tex.levels[level];
-    crate::bc6h::decode_surface(&l.data, l.width, l.height)
+    crate::bc6h::decode_surface(&l.data, l.width, l.height, tex.format.is_signed())
 }
 
 /// Decodes raw blocks back to an image. For BC5 with `normal_map`, Z is reconstructed into blue.
