@@ -134,8 +134,8 @@ pub fn r11_snorm_to_u8(v: i16) -> u8 {
     ((s * 255 + 1023) / 2046) as u8
 }
 
-/// One channel decoded to 8 bits.
-fn decode_u8(raw: &[u8], kind: Kind) -> [u8; 16] {
+/// One channel decoded to 8 bits, in raster order.
+pub fn decode_u8(raw: &[u8], kind: Kind) -> [u8; 16] {
     match kind {
         Kind::A8 => decode_a8(raw),
         Kind::R11 => decode_r11(raw).map(r11_to_u8),
@@ -224,6 +224,18 @@ impl Target {
         }
     }
 
+    /// [`Target::palette`] as `a + s·entry` (target units), if no entry of the table clamps.
+    fn affine(&self, base: i32, mult: i32, table: usize) -> Option<(i64, i64)> {
+        let (tmin, tmax) = (TABLES[table][3], TABLES[table][7]);
+        let scale = if mult == 0 { 1 } else { mult * 8 };
+        let (a, s, lo, hi, unit) = match self.kind {
+            Kind::A8 => (base, mult, 0, 255, 1),
+            Kind::R11 => (base * 8 + 4, scale, 0, 2047, 4),
+            Kind::R11Snorm => (base * 8, scale, -1023, 1023, 4),
+        };
+        (a + s * tmin >= lo && a + s * tmax <= hi).then(|| (i64::from(a * unit), i64::from(s * unit)))
+    }
+
     #[inline(always)]
     fn error(&self, pal: &[i32; 8]) -> i32 {
         let mut e = [i32::MAX; 16];
@@ -290,6 +302,12 @@ impl Target {
             sv += v;
             stv += e * v;
         }
+        self.refit_sums([st, stt, sv, stv], old)
+    }
+
+    /// [`Target::refit`] from its sums over the texels of entry e and value v: Σe, Σe², Σv, Σev.
+    #[inline(always)]
+    fn refit_sums(&self, [st, stt, sv, stv]: [i64; 4], old: (i32, i32)) -> (i32, i32) {
         let den = 16 * stt - st * st;
         if den == 0 {
             return old;
@@ -479,15 +497,47 @@ pub fn refit(idx: &[u8], v: &[u8; 16], kind: Kind) -> [u8; 8] {
     let ix: [u8; 16] = std::array::from_fn(|p| index(bits, p) as u8);
     let lo = *tg.t.iter().min().unwrap();
     let hi = *tg.t.iter().max().unwrap();
+    // Per index k: texel count n_k, Σv and Σv². The least-squares sums per table and a palette's
+    // error Σ (Σv² − 2·pal·Σv + n·pal²) then take eight terms each, and none when no entry clamps:
+    // with pal = a + s·entry the error is Σv² − 2(aΣv + sΣ entry·v) + 16a² + 2asΣ entry + s²Σ entry².
+    let mut n = [0i64; 8];
+    let mut s1 = [0i64; 8];
+    let mut s2 = [0i64; 8];
+    for p in 0..16 {
+        let (k, v) = (ix[p] as usize, i64::from(tg.t[p]));
+        n[k] += 1;
+        s1[k] += v;
+        s2[k] += v * v;
+    }
+    let sv: i64 = s1.iter().sum();
+    let sq: i64 = s2.iter().sum();
     let mmin = tg.min_mult();
     let (bmin, bmax) = kind.bases();
-    let mut best = (i32::MAX, 0, 0, 0);
+    let mut best = (i64::MAX, 0, 0, 0);
     for table in 0..16 {
-        let (b0, m0) = tg.refit(&ix, table, tg.range_fit(lo, hi, table));
+        let tab = &TABLES[table];
+        let (mut st, mut stt, mut stv) = (0i64, 0i64, 0i64);
+        for k in 0..8 {
+            let e = i64::from(tab[k]);
+            st += n[k] * e;
+            stt += n[k] * e * e;
+            stv += e * s1[k];
+        }
+        let (b0, m0) = tg.refit_sums([st, stt, sv, stv], tg.range_fit(lo, hi, table));
         for m in (m0 - 1).max(mmin)..=(m0 + 1).min(15) {
             for b in (b0 - 1).max(bmin)..=(b0 + 1).min(bmax) {
-                let pal = tg.palette(b, m, table);
-                let e: i32 = (0..16).map(|p| (tg.t[p] - pal[ix[p] as usize]).pow(2)).sum();
+                let e = match tg.affine(b, m, table) {
+                    Some((a, s)) => sq - 2 * (a * sv + s * stv) + 16 * a * a + 2 * a * s * st + s * s * stt,
+                    None => {
+                        let pal = tg.palette(b, m, table);
+                        let mut e = sq;
+                        for k in 0..8 {
+                            let v = i64::from(pal[k]);
+                            e += v * (n[k] * v - 2 * s1[k]);
+                        }
+                        e
+                    }
+                };
                 if e < best.0 {
                     best = (e, b, m, table);
                 }
@@ -659,6 +709,66 @@ mod tests {
                     "{x} {kind:?}"
                 );
             }
+        }
+    }
+
+    /// [`refit`] as it was: each candidate palette's error summed over the 16 texels.
+    fn refit_ref(idx: &[u8], v: &[u8; 16], kind: Kind) -> [u8; 8] {
+        let tg = Target::new(v, kind);
+        let bits = u64::from_be_bytes([0, 0, idx[0], idx[1], idx[2], idx[3], idx[4], idx[5]]);
+        let ix: [u8; 16] = std::array::from_fn(|p| index(bits, p) as u8);
+        let lo = *tg.t.iter().min().unwrap();
+        let hi = *tg.t.iter().max().unwrap();
+        let mmin = tg.min_mult();
+        let (bmin, bmax) = kind.bases();
+        let mut best = (i32::MAX, 0, 0, 0);
+        for table in 0..16 {
+            let (b0, m0) = tg.refit(&ix, table, tg.range_fit(lo, hi, table));
+            for m in (m0 - 1).max(mmin)..=(m0 + 1).min(15) {
+                for b in (b0 - 1).max(bmin)..=(b0 + 1).min(bmax) {
+                    let pal = tg.palette(b, m, table);
+                    let e: i32 = (0..16).map(|p| (tg.t[p] - pal[ix[p] as usize]).pow(2)).sum();
+                    if e < best.0 {
+                        best = (e, b, m, table);
+                    }
+                }
+            }
+        }
+        let (_, b, m, t) = best;
+        [
+            b as u8,
+            (m << 4 | t as i32) as u8,
+            idx[0],
+            idx[1],
+            idx[2],
+            idx[3],
+            idx[4],
+            idx[5],
+        ]
+    }
+
+    #[test]
+    fn refit_matches_direct_error() {
+        let mut seed = 0x1357_9bdfu32;
+        let mut rng = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            seed
+        };
+        for k in 0..3000 {
+            let kind = [Kind::A8, Kind::R11, Kind::R11Snorm][k % 3];
+            let (a, b) = (rng() as u8, rng() as u8);
+            let (lo, span) = (a.min(b), u32::from(a.abs_diff(b)) + 1);
+            let v: [u8; 16] = std::array::from_fn(|_| {
+                if k % 4 == 0 {
+                    rng() as u8
+                } else {
+                    lo + (rng() % span) as u8
+                }
+            });
+            let idx: [u8; 6] = std::array::from_fn(|_| rng() as u8);
+            assert_eq!(refit(&idx, &v, kind), refit_ref(&idx, &v, kind), "{k}");
         }
     }
 }

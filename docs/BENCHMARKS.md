@@ -809,6 +809,10 @@ images (mipple's encode loop; process wall time for Compressonator, which includ
 | mipple effort 9 | 37.776 | 0.98104 | 3.081 | 131 |
 | Compressonator | 36.700 | 0.98103 | 3.013 | 33.6 |
 
+These times predate the faster ETC2 encoder (byte-identical output; ROADMAP). On one pinned core of a busy
+machine, by process CPU time on Kodak 1-6 (best of 3, runs spread up to 40%), it takes 1.31x less at effort 0
+and 1.6-2.0x less at efforts 1-9; the table is not re-run.
+
 Effort 0 (ETC1 modes and planar only, two exact candidates per subblock) is 0.37 dB ahead of Compressonator
 in an eighth of its time; effort 1 adds T and H and is 0.94 dB ahead in half its time. Compressonator's blocks
 are 1.4% smaller after Zstd at λ = 0, which the RDO pass more than recovers (below).
@@ -844,8 +848,14 @@ Zstd, 25% and 24% after Deflate (interpolating between λ 2 and 4); at λ 0.5 ET
 closer. The RDO candidates per 8-byte half are whole-block and whole-half copies, another block's colors with
 the selectors re-chosen, another block's selectors with the base colors and tables refit (individual and
 differential blocks), and for EAC another block's base, multiplier and table re-indexed or its indices refit.
-The RDO pass takes about 1.7 s per Kodak image on all threads (a machine shared with other builds), several
-times BC1's: ETC candidates are scored by a full decode.
+The RDO pass took about 1.7 s per Kodak image on all threads (a machine shared with other builds), several
+times BC1's, when every ETC candidate was scored by a full decode. Re-chosen selectors and refit colors now
+return their error and skip the decode, refits use per-selector moments, and EAC refits score unclamped
+palettes in closed form (byte-identical output). Not re-run at full scale: on one pinned core of a busy
+machine, by process CPU time on Kodak 1-6 (encode, scoring and compression together, best of 3, runs spread
+up to 35%), effort 5 at λ 1 / 4 took 1.85x / 1.92x less for ETC2 RGB and 1.84x / 1.75x for RGBA8 before the
+last two of those steps; ETC2 RGB's refit across tables then took 1.12x less at λ 1, and EAC R11 at λ 1 took
+1.44x less in all.
 
 EAC R11 and RG11 have no competitor on disk (Compressonator has no EAC-only formats). On Kodak, one thread,
 R11 from the red channel and RG11 from red and green, PSNR over those channels:

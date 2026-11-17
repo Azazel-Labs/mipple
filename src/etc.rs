@@ -226,78 +226,95 @@ fn paints(raw: &[u8]) -> Option<(Paints, bool)> {
 /// weighted squared RGB error (for RDO: a copy of another block's first four bytes). `None` for
 /// planar blocks, whose last four bytes are colors.
 pub fn reselect(raw: &[u8], px: &Block, w: &[u32; 4]) -> Option<[u8; 8]> {
+    reselect_err(raw, px, w).map(|(b, _)| b)
+}
+
+/// [`reselect`], with the result's weighted R, G, B error ([`sse`] without the alpha term).
+pub fn reselect_err(raw: &[u8], px: &Block, w: &[u32; 4]) -> Option<([u8; 8], u64)> {
     let (pal, flip) = paints(raw)?;
     let pal = pal.map(|s| s.map(|c| c.map(|v| v.clamp(0, 255))));
     let mut lo = 0u32;
+    let mut err = 0u64;
     for p in 0..16 {
         let t = px[raster(p)];
         let mut best = (u32::MAX, 0u8);
         for (k, c) in pal[usize::from(second(p, flip))].iter().enumerate() {
-            let e: u32 = (0..3)
-                .map(|ch| (i32::from(t[ch]) - c[ch]).unsigned_abs().pow(2) * w[ch])
-                .sum();
+            let d = |ch: usize| (i32::from(t[ch]) - c[ch]).unsigned_abs().pow(2) * w[ch];
+            let e = d(0) + d(1) + d(2);
             if e < best.0 {
                 best = (e, k as u8);
             }
         }
         lo |= set_selector(p, best.1);
+        err += u64::from(best.0);
     }
     let mut out = [0u8; 8];
     out[..4].copy_from_slice(&raw[..4]);
     out[4..].copy_from_slice(&lo.to_be_bytes());
-    Some(out)
+    Some((out, err))
 }
 
 /// An individual or differential block with `raw`'s flip and the selectors in `sels` (the last four
 /// bytes of another block), its base colors and tables fit to `px` by least squares per table (for
 /// RDO: a copy of another block's selectors). `None` when `raw` is a T, H or planar block.
 pub fn refit_selectors(raw: &[u8], sels: &[u8], px: &Block) -> Option<[u8; 8]> {
+    refit_selectors_err(raw, sels, px).map(|(b, _)| b)
+}
+
+/// [`refit_selectors`], with the result's squared R, G, B error (unweighted).
+pub fn refit_selectors_err(raw: &[u8], sels: &[u8], px: &Block) -> Option<([u8; 8], u32)> {
     let flip = match mode(raw) {
         Mode::Individual | Mode::Differential => raw[3] & 1 != 0,
         _ => return None,
     };
     let lo = u32::from_be_bytes([sels[0], sels[1], sels[2], sels[3]]);
-    let px = texels(px);
-    // Per subblock: its texels and their selectors.
-    let mut subs = [[[0i32; 8]; 3]; 2];
-    let mut ss = [[0usize; 8]; 2];
-    let mut n = [0usize; 2];
+    // Per subblock and selector: texel count, and per channel the sum and sum of squares; a
+    // painted value v then costs Σ x² − 2vΣ x + n v² over those texels.
+    let mut n = [[0i32; 4]; 2];
+    let mut s1 = [[[0i32; 3]; 4]; 2];
+    let mut s2 = [[[0i32; 3]; 4]; 2];
     for p in 0..16 {
         let k = usize::from(second(p, flip));
+        let q = selector(lo, p);
+        let t = px[raster(p)];
+        n[k][q] += 1;
         for c in 0..3 {
-            subs[k][c][n[k]] = px[c][p];
+            let v = i32::from(t[c]);
+            s1[k][q][c] += v;
+            s2[k][q][c] += v * v;
         }
-        ss[k][n[k]] = selector(lo, p);
-        n[k] += 1;
     }
-    // Error and quantized base color of subblock k at `bits` per channel with table t.
-    let fit = |k: usize, bits: u32, t: usize| -> (u32, [i32; 3]) {
-        let msum: i32 = ss[k].iter().map(|&q| modifier(t, q)).sum();
+    let best = |k: usize, bits: u32| -> Pick {
+        // The eight tables side by side, so the loops run across tables.
         let max = (1 << bits) - 1;
-        let q: [i32; 3] = std::array::from_fn(|c| {
-            let sum = subs[k][c].iter().sum::<i32>() - msum;
-            ((sum * max + 4 * 255) / (8 * 255)).clamp(0, max)
-        });
-        let col = q.map(if bits == 5 { ext5 } else { ext4 });
-        let mut e = 0;
-        for i in 0..8 {
-            let m = modifier(t, ss[k][i]);
-            for c in 0..3 {
-                e += (subs[k][c][i] - (col[c] + m).clamp(0, 255)).pow(2) as u32;
+        let tot: [i32; 3] = std::array::from_fn(|c| s1[k][0][c] + s1[k][1][c] + s1[k][2][c] + s1[k][3][c]);
+        let m: [[i32; 8]; 4] = std::array::from_fn(|q| std::array::from_fn(|t| modifier(t, q)));
+        let msum: [i32; 8] =
+            std::array::from_fn(|t| n[k][0] * m[0][t] + n[k][1] * m[1][t] + n[k][2] * m[2][t] + n[k][3] * m[3][t]);
+        let mut e = [0i32; 8];
+        let mut q = [[0i32; 8]; 3];
+        for c in 0..3 {
+            for t in 0..8 {
+                q[c][t] = (((tot[c] - msum[t]) * max + 4 * 255) / (8 * 255)).clamp(0, max);
+                let col = if bits == 5 { ext5(q[c][t]) } else { ext4(q[c][t]) };
+                for s in 0..4 {
+                    let v = (col + m[s][t]).clamp(0, 255);
+                    e[t] += s2[k][s][c] - 2 * v * s1[k][s][c] + n[k][s] * v * v;
+                }
             }
         }
-        (e, q)
-    };
-    let best = |k: usize, bits: u32| -> Pick {
         let mut b = Pick {
             q: [0; 3],
             err: u32::MAX,
             table: 0,
         };
         for t in 0..8 {
-            let (err, q) = fit(k, bits, t);
-            if err < b.err {
-                b = Pick { q, err, table: t as u8 };
+            if (e[t] as u32) < b.err {
+                b = Pick {
+                    q: [q[0][t], q[1][t], q[2][t]],
+                    err: e[t] as u32,
+                    table: t as u8,
+                };
             }
         }
         b
@@ -306,11 +323,12 @@ pub fn refit_selectors(raw: &[u8], sels: &[u8], px: &Block) -> Option<[u8; 8]> {
     let dif = [best(0, 5), best(1, 5)];
     let fits = (0..3).all(|c| (-4..4).contains(&(dif[1].q[c] - dif[0].q[c])));
     let diff = fits && dif[0].err + dif[1].err <= ind[0].err + ind[1].err;
-    let hi = etc1_header(flip, diff, if diff { dif } else { ind });
+    let pick = if diff { dif } else { ind };
+    let hi = etc1_header(flip, diff, pick);
     let mut out = [0u8; 8];
     out[..4].copy_from_slice(&hi.to_be_bytes());
     out[4..].copy_from_slice(&lo.to_be_bytes());
-    Some(out)
+    Some((out, pick[0].err + pick[1].err))
 }
 
 #[inline(always)]
@@ -376,6 +394,7 @@ fn texels(px: &Block) -> Px {
     std::array::from_fn(|c| std::array::from_fn(|p| i32::from(px[raster(p)][c])))
 }
 
+#[inline(always)]
 fn subblock(px: &Px, flip: bool, s: bool) -> Sub {
     let mut out = [[0; 8]; 3];
     let mut n = 0;
@@ -391,24 +410,57 @@ fn subblock(px: &Px, flip: bool, s: bool) -> Sub {
 }
 
 /// Exact ETC1 subblock error of base color `c` (8-bit) for every table: (best error, its table).
+/// A table whose modifiers never clamp (all of `c` within its largest modifier of 0 and 255) gives
+/// texel offset e = s − c the error |e|² + min over m of (3m² − 2mΣe), and the four modifiers
+/// ±a, ±b reduce to a and b against |Σe|.
 #[inline(always)]
 fn sub_error(s: &Sub, c: [i32; 3]) -> (u32, u8) {
+    let lo = c[0].min(c[1]).min(c[2]);
+    let hi = c[0].max(c[1]).max(c[2]);
+    let mut e2 = [0i32; 8];
+    let mut ad = [0i32; 8];
+    let mut sd = [0i32; 8];
+    for i in 0..8 {
+        let (dr, dg, db) = (s[0][i] - c[0], s[1][i] - c[1], s[2][i] - c[2]);
+        e2[i] = dr * dr + dg * dg + db * db;
+        sd[i] = dr + dg + db;
+        ad[i] = sd[i].abs();
+    }
+    let base: i32 = e2.iter().sum();
     let mut best = (u32::MAX, 0u8);
     for t in 0..8 {
-        let mut e = [i32::MAX; 8];
-        for sel in 0..4 {
-            let m = modifier(t, sel);
-            let (r, g, b) = (
-                (c[0] + m).clamp(0, 255),
-                (c[1] + m).clamp(0, 255),
-                (c[2] + m).clamp(0, 255),
-            );
+        let [a, b] = MODIFIERS[t];
+        let total = if lo >= b && hi + b <= 255 {
+            let (ka, kb) = (3 * a * a, 3 * b * b);
+            let mut f = [0i32; 8];
             for i in 0..8 {
-                let (dr, dg, db) = (s[0][i] - r, s[1][i] - g, s[2][i] - b);
-                e[i] = e[i].min(dr * dr + dg * dg + db * db);
+                f[i] = (ka - 2 * a * ad[i]).min(kb - 2 * b * ad[i]);
             }
-        }
-        let total = e.iter().sum::<i32>() as u32;
+            base + f.iter().sum::<i32>()
+        } else {
+            let mut e = [i32::MAX; 8];
+            for sel in 0..4 {
+                let m = modifier(t, sel);
+                if lo + m >= 0 && hi + m <= 255 {
+                    // This modifier clamps no channel: |e − m|² = |e|² − 2mΣe + 3m².
+                    let k = 3 * m * m;
+                    for i in 0..8 {
+                        e[i] = e[i].min(e2[i] - 2 * m * sd[i] + k);
+                    }
+                    continue;
+                }
+                let (r, g, b) = (
+                    (c[0] + m).clamp(0, 255),
+                    (c[1] + m).clamp(0, 255),
+                    (c[2] + m).clamp(0, 255),
+                );
+                for i in 0..8 {
+                    let (dr, dg, db) = (s[0][i] - r, s[1][i] - g, s[2][i] - b);
+                    e[i] = e[i].min(dr * dr + dg * dg + db * db);
+                }
+            }
+            e.iter().sum::<i32>()
+        } as u32;
         if total < best.0 {
             best = (total, t as u8);
         }
@@ -417,6 +469,7 @@ fn sub_error(s: &Sub, c: [i32; 3]) -> (u32, u8) {
 }
 
 /// Best selector per subblock texel for base `c` and `table`.
+#[inline(always)]
 fn sub_selectors(s: &Sub, c: [i32; 3], table: usize) -> [u8; 8] {
     std::array::from_fn(|i| {
         let mut best = (i32::MAX, 0u8);
@@ -441,6 +494,7 @@ struct Ranker {
 }
 
 impl Ranker {
+    #[inline(always)]
     fn new(s: &Sub) -> Self {
         Self {
             sum: std::array::from_fn(|c| s[c].iter().sum()),
@@ -465,14 +519,14 @@ impl Ranker {
             return self.memo[k];
         }
         let mut best = i32::MAX;
-        for t in 0..8 {
-            let mut e = [i32::MAX; 8];
-            for sel in 0..4 {
-                let m3 = 3 * modifier(t, sel);
-                for i in 0..8 {
-                    let d = self.luma[i] - l - m3;
-                    e[i] = e[i].min(d * d);
-                }
+        // The modifiers come in ± pairs: the nearest is a or b against |s_i − l|.
+        let ad: [i32; 8] = std::array::from_fn(|i| (self.luma[i] - l).abs());
+        for [a, b] in MODIFIERS {
+            let (a3, b3) = (3 * a, 3 * b);
+            let mut e = [0i32; 8];
+            for i in 0..8 {
+                let (x, y) = (ad[i] - a3, ad[i] - b3);
+                e[i] = (x * x).min(y * y);
             }
             best = best.min(e.iter().sum());
         }
@@ -509,6 +563,7 @@ impl<const N: usize> Short<N> {
         }
     }
 
+    #[inline(always)]
     fn push(&mut self, cap: usize, q: [i32; 3], score: i64) {
         let cap = cap.min(N);
         if self.len == cap && score >= self.score[cap - 1] {
@@ -531,6 +586,7 @@ impl<const N: usize> Short<N> {
 const SHORT: usize = 24;
 
 /// Ranks the lattice (`bits` per channel) around subblock mean and keeps the best `cap`.
+#[inline(always)]
 fn shortlist(rank: &mut Ranker, bits: u32, cfg: &Cfg) -> Short<SHORT> {
     let max = (1 << bits) - 1;
     let ext = if bits == 4 { ext4 } else { ext5 };
@@ -567,15 +623,19 @@ struct Pick {
     table: u8,
 }
 
+/// A lattice color `q` (`bits` per channel) with its exact subblock error and table.
+#[inline(always)]
+fn exact_pick(s: &Sub, q: [i32; 3], bits: u32) -> Pick {
+    let c = if bits == 4 { q.map(ext4) } else { q.map(ext5) };
+    let (err, table) = sub_error(s, c);
+    Pick { q, err, table }
+}
+
 /// The ETC1 half of the search for one flip: best individual and differential encodings.
+#[inline(always)]
 fn etc1_flip(px: &Px, flip: bool, cfg: &Cfg, best: &mut Best, individual: bool) {
     let subs = [subblock(px, flip, false), subblock(px, flip, true)];
     let mut ranks = [Ranker::new(&subs[0]), Ranker::new(&subs[1])];
-    let exact = |s: &Sub, q: [i32; 3], bits: u32| {
-        let c = if bits == 4 { q.map(ext4) } else { q.map(ext5) };
-        let (err, table) = sub_error(s, c);
-        Pick { q, err, table }
-    };
 
     // Individual: each subblock on its own.
     let mut ind = [Pick {
@@ -586,7 +646,7 @@ fn etc1_flip(px: &Px, flip: bool, cfg: &Cfg, best: &mut Best, individual: bool) 
     for k in (0..2).filter(|_| individual) {
         let list = shortlist(&mut ranks[k], 4, cfg);
         for i in 0..list.len {
-            let p = exact(&subs[k], list.q[i], 4);
+            let p = exact_pick(&subs[k], list.q[i], 4);
             if p.err < ind[k].err {
                 ind[k] = p;
             }
@@ -597,7 +657,7 @@ fn etc1_flip(px: &Px, flip: bool, cfg: &Cfg, best: &mut Best, individual: bool) 
             if q == ind[k].q {
                 break;
             }
-            let p = exact(&subs[k], q, 4);
+            let p = exact_pick(&subs[k], q, 4);
             if p.err >= ind[k].err {
                 break;
             }
@@ -618,7 +678,7 @@ fn etc1_flip(px: &Px, flip: bool, cfg: &Cfg, best: &mut Best, individual: bool) 
     }; SHORT]; 2];
     for k in 0..2 {
         for i in 0..lists[k].len {
-            picks[k][i] = exact(&subs[k], lists[k].q[i], 5);
+            picks[k][i] = exact_pick(&subs[k], lists[k].q[i], 5);
         }
     }
     let ok = |a: [i32; 3], b: [i32; 3]| (0..3).all(|c| (-4..=3).contains(&(b[c] - a[c])));
@@ -643,14 +703,14 @@ fn etc1_flip(px: &Px, flip: bool, cfg: &Cfg, best: &mut Best, individual: bool) 
         for j in 0..proj {
             let qb: [i32; 3] = std::array::from_fn(|c| picks[1][j].q[c].clamp(a.q[c] - 4, a.q[c] + 3));
             if qb != picks[1][j].q {
-                consider(a, exact(&subs[1], qb, 5), &mut pair);
+                consider(a, exact_pick(&subs[1], qb, 5), &mut pair);
             }
         }
         let b = picks[1][i];
         for j in 0..proj {
             let qa: [i32; 3] = std::array::from_fn(|c| picks[0][j].q[c].clamp(b.q[c] - 3, b.q[c] + 4));
             if qa != picks[0][j].q {
-                consider(exact(&subs[0], qa, 5), b, &mut pair);
+                consider(exact_pick(&subs[0], qa, 5), b, &mut pair);
             }
         }
     }
@@ -667,7 +727,7 @@ fn etc1_flip(px: &Px, flip: bool, cfg: &Cfg, best: &mut Best, individual: bool) 
                 std::array::from_fn(|c| q[c].clamp(other[c] - 4, other[c] + 3))
             };
             if q != pair[k].q {
-                let p = exact(&subs[k], q, 5);
+                let p = exact_pick(&subs[k], q, 5);
                 if p.err < pair[k].err {
                     pair[k] = p;
                     improved = true;
@@ -685,6 +745,7 @@ fn etc1_flip(px: &Px, flip: bool, cfg: &Cfg, best: &mut Best, individual: bool) 
 }
 
 /// Least-squares base for a subblock given its selectors, quantized to `bits`.
+#[inline(always)]
 fn refit(s: &Sub, c: [i32; 3], table: usize, bits: u32) -> [i32; 3] {
     let sels = sub_selectors(s, c, table);
     let msum: i32 = sels.iter().map(|&k| modifier(table, k as usize)).sum();
@@ -711,6 +772,7 @@ fn etc1_header(flip: bool, diff: bool, picks: [Pick; 2]) -> u32 {
     hi
 }
 
+#[inline(always)]
 fn pack_etc1(subs: &[Sub; 2], flip: bool, diff: bool, picks: [Pick; 2]) -> u64 {
     let hi = etc1_header(flip, diff, picks);
     let ext = if diff { ext5 } else { ext4 };
@@ -746,64 +808,52 @@ impl Best {
     }
 }
 
-/// Error of the 16 texels against the nearest of four paint colors, and those choices.
+/// Error of the 16 texels against the nearest of four paint colors, and the nearest of each texel
+/// (the first on ties).
 #[inline(always)]
-fn paint_error(px: &Px, paint: &[[i32; 3]; 4]) -> u32 {
+fn paint_error_sels(px: &Px, paint: &[[i32; 3]; 4]) -> (u32, [u8; 16]) {
     let mut e = [i32::MAX; 16];
-    for c in paint {
+    let mut sel = [0i32; 16];
+    for (k, c) in paint.iter().enumerate() {
         let c = c.map(|v| v.clamp(0, 255));
         for p in 0..16 {
             let (dr, dg, db) = (px[0][p] - c[0], px[1][p] - c[1], px[2][p] - c[2]);
-            e[p] = e[p].min(dr * dr + dg * dg + db * db);
-        }
-    }
-    e.iter().sum::<i32>() as u32
-}
-
-fn paint_selectors(px: &Px, paint: &[[i32; 3]; 4]) -> [u8; 16] {
-    std::array::from_fn(|p| {
-        let mut best = (i32::MAX, 0u8);
-        for (k, c) in paint.iter().enumerate() {
-            let e: i32 = (0..3).map(|ch| (px[ch][p] - c[ch].clamp(0, 255)).pow(2)).sum();
-            if e < best.0 {
-                best = (e, k as u8);
+            let d = dr * dr + dg * dg + db * db;
+            if d < e[p] {
+                e[p] = d;
+                sel[p] = k as i32;
             }
         }
-        best.1
-    })
+    }
+    (e.iter().sum::<i32>() as u32, sel.map(|k| k as u8))
 }
 
-/// [`paint_error`] for an A1 punch-through block: paint color 2 is transparent, so opaque texels
-/// take one of the other three and transparent texels cost nothing.
-fn punch_paint_error(px: &Px, paint: &[[i32; 3]; 4], opaque: u16) -> u32 {
+/// [`paint_error_sels`] for an A1 punch-through block: paint color 2 is transparent, so opaque
+/// texels take the nearest of the other three and transparent texels (selector 2) cost nothing.
+#[inline(always)]
+fn punch_error_sels(px: &Px, paint: &[[i32; 3]; 4], opaque: u16) -> (u32, [u8; 16]) {
     let mut e = [i32::MAX; 16];
-    for c in [paint[0], paint[1], paint[3]] {
-        let c = c.map(|v| v.clamp(0, 255));
+    let mut sel = [0i32; 16];
+    for k in [0, 1, 3] {
+        let c = paint[k].map(|v| v.clamp(0, 255));
         for p in 0..16 {
             let (dr, dg, db) = (px[0][p] - c[0], px[1][p] - c[1], px[2][p] - c[2]);
-            e[p] = e[p].min(dr * dr + dg * dg + db * db);
+            let d = dr * dr + dg * dg + db * db;
+            if d < e[p] {
+                e[p] = d;
+                sel[p] = k as i32;
+            }
         }
     }
-    (0..16).filter(|&p| opaque >> p & 1 != 0).map(|p| e[p]).sum::<i32>() as u32
-}
-
-/// [`paint_selectors`] for an A1 punch-through block: 2 for transparent texels, otherwise the
-/// nearest of paint colors 0, 1 and 3.
-fn punch_selectors(px: &Px, paint: &[[i32; 3]; 4], opaque: u16) -> [u8; 16] {
-    std::array::from_fn(|p| {
+    let mut total = 0;
+    for p in 0..16 {
         if opaque >> p & 1 == 0 {
-            return 2;
+            sel[p] = 2;
+        } else {
+            total += e[p];
         }
-        let mut best = (i32::MAX, 0u8);
-        for k in [0u8, 1, 3] {
-            let c = paint[k as usize];
-            let e: i32 = (0..3).map(|ch| (px[ch][p] - c[ch].clamp(0, 255)).pow(2)).sum();
-            if e < best.0 {
-                best = (e, k);
-            }
-        }
-        best.1
-    })
+    }
+    (total as u32, sel.map(|k| k as u8))
 }
 
 /// T or H mode colors (444) and distance index.
@@ -818,6 +868,7 @@ struct Th {
 }
 
 impl Th {
+    #[inline(always)]
     fn paint(&self) -> [[i32; 3]; 4] {
         let (c1, c2, d) = (self.c1.map(ext4), self.c2.map(ext4), DISTANCES[self.d]);
         if self.h {
@@ -835,6 +886,7 @@ impl Th {
     /// H mode stores the distance's low bit in the color order, so equal colors need an odd one.
     /// Punch-through H blocks cannot swap the colors to match (which one loses its +d color to
     /// transparency depends on the order), so the order must already match.
+    #[inline(always)]
     fn valid(&self) -> bool {
         if self.h && self.punch.is_some() {
             return usize::from(pack444(self.c1) >= pack444(self.c2)) == self.d & 1;
@@ -842,26 +894,19 @@ impl Th {
         !(self.h && self.c1 == self.c2 && self.d & 1 == 0)
     }
 
-    fn error(&self, px: &Px) -> u32 {
-        if !self.valid() {
-            return u32::MAX;
-        }
-        match self.punch {
-            None => paint_error(px, &self.paint()),
-            Some(opaque) => punch_paint_error(px, &self.paint(), opaque),
-        }
+    /// Error of the block (`u32::MAX` if it cannot be packed) and the selectors of its texels.
+    #[inline(always)]
+    fn error_sels(&self, px: &Px) -> (u32, [u8; 16]) {
+        let (e, sels) = match self.punch {
+            None => paint_error_sels(px, &self.paint()),
+            Some(opaque) => punch_error_sels(px, &self.paint(), opaque),
+        };
+        (if self.valid() { e } else { u32::MAX }, sels)
     }
 
-    fn selectors(&self, px: &Px) -> [u8; 16] {
-        match self.punch {
-            None => paint_selectors(px, &self.paint()),
-            Some(opaque) => punch_selectors(px, &self.paint(), opaque),
-        }
-    }
-
-    /// Refits both colors to the texels each paint color won.
-    fn refit(&self, px: &Px) -> Th {
-        let sels = self.selectors(px);
+    /// Refits both colors to the texels each paint color won (`sels`, this block's selectors).
+    #[inline(always)]
+    fn refit_sels(&self, px: &Px, sels: &[u8; 16]) -> Th {
         let d = DISTANCES[self.d];
         // Offset of each paint color from its group's base color, and the group.
         let (off, group): ([i32; 4], [usize; 4]) = if self.h {
@@ -926,7 +971,7 @@ impl Th {
             let (t, u) = (c1[0] >> 2, c1[0] & 3);
             hi |= if t + u >= 4 { 7 << 29 } else { 1 << 26 };
         }
-        let sels = self.selectors(px);
+        let sels = self.error_sels(px).1;
         let mut lo = 0;
         for (p, &k) in sels.iter().enumerate() {
             lo |= set_selector(p, k ^ flip_sel);
@@ -996,6 +1041,7 @@ fn splits(px: &Px, n: usize) -> ([u16; 8], usize) {
 }
 
 /// Mean (444) of the texels in `include` on one side of `mask`.
+#[inline(always)]
 fn group_mean444(px: &Px, mask: u16, second: bool, include: u16) -> [i32; 3] {
     let mut sum = [0i32; 3];
     let mut n = 0;
@@ -1014,6 +1060,7 @@ fn group_mean444(px: &Px, mask: u16, second: bool, include: u16) -> [i32; 3] {
 }
 
 /// T and H search; `punch` (the opaque texels) for an A1 punch-through block.
+#[inline(always)]
 fn th_search(px: &Px, cfg: &Cfg, best: &mut Best, punch: Option<u16>) {
     let include = punch.unwrap_or(u16::MAX);
     // Transparent texels take the opaque mean, so they do not steer the split.
@@ -1048,17 +1095,17 @@ fn th_search(px: &Px, cfg: &Cfg, best: &mut Best, punch: Option<u16>) {
             for &(c1, c2) in orders {
                 for d in 0..8 {
                     let mut th = Th { h, c1, c2, d, punch };
-                    let mut e = th.error(px);
+                    let (mut e, mut sels) = th.error_sels(px);
                     for _ in 0..cfg.rounds {
-                        let next = th.refit(px);
+                        let next = th.refit_sels(px, &sels);
                         if next == th {
                             break;
                         }
-                        let ne = next.error(px);
+                        let (ne, ns) = next.error_sels(px);
                         if ne >= e {
                             break;
                         }
-                        (th, e) = (next, ne);
+                        (th, e, sels) = (next, ne, ns);
                     }
                     if e < top.0 {
                         top = (e, th);
@@ -1069,29 +1116,87 @@ fn th_search(px: &Px, cfg: &Cfg, best: &mut Best, punch: Option<u16>) {
         // ±1 descent over the six color components and the distance.
         for _ in 0..cfg.descent {
             let cur = top;
-            for k in 0..6 {
-                for step in [-1, 1] {
-                    let mut th = cur.1;
-                    let v = if k < 3 { &mut th.c1[k] } else { &mut th.c2[k - 3] };
-                    *v += step;
-                    if !(0..16).contains(v) {
-                        continue;
-                    }
-                    for d in cur.1.d.saturating_sub(1)..(cur.1.d + 2).min(8) {
-                        let th = Th { d, ..th };
-                        let e = th.error(px);
-                        if e < top.0 {
-                            top = (e, th);
-                        }
-                    }
-                }
-            }
+            descent_pass(px, cur.1, &mut top);
             if top.1 == cur.1 {
                 break;
             }
         }
         if u64::from(top.0) < best.err {
             best.set(u64::from(top.0), top.1.pack(px));
+        }
+    }
+}
+
+/// Per texel, the smallest squared distance to the paint colors one T/H color makes ([`Th::paint`]):
+/// group 0 those of c1, group 1 those of c2. Punch-through blocks drop paint color 2 (transparent).
+#[inline(always)]
+fn group_min(px: &Px, c: [i32; 3], d: i32, h: bool, g: usize, punch: bool) -> [i32; 16] {
+    // Multiples of the distance added to the color.
+    let offs: &[i32] = match (h, g, punch) {
+        (false, 0, _) => &[0],
+        (false, _, false) => &[1, 0, -1],
+        (false, _, true) => &[1, -1],
+        (true, 1, true) => &[-1],
+        (true, _, _) => &[1, -1],
+    };
+    let c = c.map(ext4);
+    let mut e = [i32::MAX; 16];
+    for &o in offs {
+        let col = c.map(|v| (v + o * d).clamp(0, 255));
+        for p in 0..16 {
+            let (dr, dg, db) = (px[0][p] - col[0], px[1][p] - col[1], px[2][p] - col[2]);
+            e[p] = e[p].min(dr * dr + dg * dg + db * db);
+        }
+    }
+    e
+}
+
+/// The error of a T/H block ([`Th::error_sels`]) from its two groups' [`group_min`]s.
+#[inline(always)]
+fn group_error(a: &[i32; 16], b: &[i32; 16], opaque: u16) -> u32 {
+    let mut e = 0;
+    for p in 0..16 {
+        let m = a[p].min(b[p]);
+        e += if opaque >> p & 1 != 0 { m } else { 0 };
+    }
+    e as u32
+}
+
+/// One ±1 descent pass around `cur` (as in [`th_search`]), each group's per-texel minimum
+/// computed once per distance: a move changes one color, so the other group is reused.
+#[inline(always)]
+fn descent_pass(px: &Px, cur: Th, top: &mut (u32, Th)) {
+    let (h, punch) = (cur.h, cur.punch.is_some());
+    let opaque = cur.punch.unwrap_or(u16::MAX);
+    let d0 = cur.d.saturating_sub(1);
+    let d1 = (cur.d + 2).min(8);
+    let mut ga = [[0i32; 16]; 3];
+    let mut gb = [[0i32; 16]; 3];
+    for d in d0..d1 {
+        ga[d - d0] = group_min(px, cur.c1, DISTANCES[d], h, 0, punch);
+        gb[d - d0] = group_min(px, cur.c2, DISTANCES[d], h, 1, punch);
+    }
+    for k in 0..6 {
+        for step in [-1, 1] {
+            let mut th = cur;
+            let v = if k < 3 { &mut th.c1[k] } else { &mut th.c2[k - 3] };
+            *v += step;
+            if !(0..16).contains(v) {
+                continue;
+            }
+            for d in d0..d1 {
+                let th = Th { d, ..th };
+                let e = if !th.valid() {
+                    u32::MAX
+                } else if k < 3 {
+                    group_error(&group_min(px, th.c1, DISTANCES[d], h, 0, punch), &gb[d - d0], opaque)
+                } else {
+                    group_error(&ga[d - d0], &group_min(px, th.c2, DISTANCES[d], h, 1, punch), opaque)
+                };
+                if e < top.0 {
+                    *top = (e, th);
+                }
+            }
         }
     }
 }
@@ -1157,6 +1262,7 @@ fn plane_error(v: &[i32; 16], o: i32, h: i32, w: i32) -> i32 {
     e
 }
 
+#[inline(always)]
 fn planar_search(px: &Px, cfg: &Cfg, best: &mut Best) {
     let w = plane_weights();
     let mut q = [[0i32; 3]; 3]; // [channel][O, H, V]
@@ -1237,6 +1343,39 @@ pub fn block_error(raw: &[u8], px: &Block) -> u32 {
         .zip(&out)
         .map(|(a, b)| (0..3).map(|c| u32::from(a[c].abs_diff(b[c])).pow(2)).sum::<u32>())
         .sum()
+}
+
+/// Weighted squared error (R, G, B, A by `w`) of an ETC2 RGB block, or with `a1` an ETC2 RGB A1
+/// block, against `px`: the value of decoding it and taking [`crate::surface::block_sse`], from
+/// the paint colors without writing the decoded block (for RDO).
+pub fn sse(raw: &[u8], px: &Block, w: &[u32; 4], a1: bool) -> u64 {
+    let pp = if a1 {
+        a1_paints(raw)
+    } else {
+        paints(raw).map(|(p, f)| (p, f, false))
+    };
+    let Some((pal, flip, punch)) = pp else {
+        // Planar (A1 planar blocks are opaque ETC2 ones).
+        let mut out = [[0u8; 4]; 16];
+        decode(&as_differential(raw), &mut out);
+        return crate::surface::block_sse(px, &out, w);
+    };
+    let lo = u32::from_be_bytes([raw[4], raw[5], raw[6], raw[7]]);
+    let pal = pal.map(|s| s.map(|c| c.map(|v| v.clamp(0, 255))));
+    let w = w.map(u64::from);
+    let mut e = 0u64;
+    for p in 0..16 {
+        let t = px[raster(p)];
+        let sel = selector(lo, p);
+        let (c, a) = if punch && sel == 2 {
+            ([0; 3], 0)
+        } else {
+            (pal[usize::from(second(p, flip))][sel], 255)
+        };
+        let d = |x: u8, y: i32| u64::from((i32::from(x) - y).unsigned_abs().pow(2));
+        e += w[0] * d(t[0], c[0]) + w[1] * d(t[1], c[1]) + w[2] * d(t[2], c[2]) + w[3] * d(t[3], a);
+    }
+    e
 }
 
 /// Encodes one ETC2 RGBA8 block: an 8-bit EAC alpha block (bytes 0..8), then ETC2 RGB.
@@ -1604,7 +1743,7 @@ fn punch_flip(px: &Px, opaque: u16, flip: bool, cfg: &Cfg, best: &mut Best) {
     for k in 0..2 {
         let (c, t) = (pair[k].q.map(ext5), pair[k].table as usize);
         let paint: [[i32; 3]; 4] = std::array::from_fn(|sel| c.map(|v| v + punch_modifier(t, sel)));
-        let sels = punch_selectors(px, &paint, opaque);
+        let sels = punch_error_sels(px, &paint, opaque).1;
         for p in (0..16).filter(|&p| second(p, flip) == (k == 1)) {
             lo |= set_selector(p, sels[p]);
         }
@@ -2040,6 +2179,206 @@ mod tests {
             for (k, b) in raw.as_chunks::<8>().0.iter().enumerate() {
                 let px = s.read_block(k as u32 % bw, k as u32 / bw);
                 assert_eq!(*b, encode_block_a1(&px, effort), "block {k} effort {effort}");
+            }
+        }
+    }
+
+    /// [`refit_selectors`] as it was: each table's error summed over the subblock's texels.
+    fn refit_selectors_ref(raw: &[u8], sels: &[u8], px: &Block) -> Option<[u8; 8]> {
+        let flip = match mode(raw) {
+            Mode::Individual | Mode::Differential => raw[3] & 1 != 0,
+            _ => return None,
+        };
+        let lo = u32::from_be_bytes([sels[0], sels[1], sels[2], sels[3]]);
+        let px = texels(px);
+        // Per subblock: its texels and their selectors.
+        let mut subs = [[[0i32; 8]; 3]; 2];
+        let mut ss = [[0usize; 8]; 2];
+        let mut n = [0usize; 2];
+        for p in 0..16 {
+            let k = usize::from(second(p, flip));
+            for c in 0..3 {
+                subs[k][c][n[k]] = px[c][p];
+            }
+            ss[k][n[k]] = selector(lo, p);
+            n[k] += 1;
+        }
+        // Error and quantized base color of subblock k at `bits` per channel with table t.
+        let fit = |k: usize, bits: u32, t: usize| -> (u32, [i32; 3]) {
+            let msum: i32 = ss[k].iter().map(|&q| modifier(t, q)).sum();
+            let max = (1 << bits) - 1;
+            let q: [i32; 3] = std::array::from_fn(|c| {
+                let sum = subs[k][c].iter().sum::<i32>() - msum;
+                ((sum * max + 4 * 255) / (8 * 255)).clamp(0, max)
+            });
+            let col = q.map(if bits == 5 { ext5 } else { ext4 });
+            let mut e = 0;
+            for i in 0..8 {
+                let m = modifier(t, ss[k][i]);
+                for c in 0..3 {
+                    e += (subs[k][c][i] - (col[c] + m).clamp(0, 255)).pow(2) as u32;
+                }
+            }
+            (e, q)
+        };
+        let best = |k: usize, bits: u32| -> Pick {
+            let mut b = Pick {
+                q: [0; 3],
+                err: u32::MAX,
+                table: 0,
+            };
+            for t in 0..8 {
+                let (err, q) = fit(k, bits, t);
+                if err < b.err {
+                    b = Pick { q, err, table: t as u8 };
+                }
+            }
+            b
+        };
+        let ind = [best(0, 4), best(1, 4)];
+        let dif = [best(0, 5), best(1, 5)];
+        let fits = (0..3).all(|c| (-4..4).contains(&(dif[1].q[c] - dif[0].q[c])));
+        let diff = fits && dif[0].err + dif[1].err <= ind[0].err + ind[1].err;
+        let hi = etc1_header(flip, diff, if diff { dif } else { ind });
+        let mut out = [0u8; 8];
+        out[..4].copy_from_slice(&hi.to_be_bytes());
+        out[4..].copy_from_slice(&lo.to_be_bytes());
+        Some(out)
+    }
+
+    #[test]
+    fn refit_and_reselect_errors() {
+        let mut seed = 0x0dd_ba11;
+        for k in 0..2000 {
+            let b = sample_block(&mut seed, k % 4);
+            let raw = encode_block(&b, (k % 4) as u8);
+            let other = encode_block(&sample_block(&mut seed, (k / 4) % 4), 1);
+            for sels in [&raw[4..], &other[4..]] {
+                let got = refit_selectors_err(&raw, sels, &b);
+                assert_eq!(got.map(|g| g.0), refit_selectors_ref(&raw, sels, &b), "{k}");
+                if let Some((v, e)) = got {
+                    assert_eq!(e, block_error(&v, &b), "{k}");
+                }
+            }
+            for w in [[1, 1, 1, 0], [3, 5, 2, 0]] {
+                if let Some((v, e)) = reselect_err(&other, &b, &w) {
+                    assert_eq!(e, sse(&v, &b, &w, false), "{k}");
+                }
+            }
+        }
+    }
+
+    fn value(seed: &mut u32, lo: i32, hi: i32) -> i32 {
+        let r = rng(seed);
+        let x = (r >> 8) as i32;
+        match r % 4 {
+            0 => lo + x % 24,
+            1 => hi - x % 24,
+            _ => lo + x % (hi - lo + 1),
+        }
+    }
+
+    /// The ETC1 subblock error, luma term, paint errors and T/H descent against direct evaluation
+    /// over every modifier, paint color and move, with values near 0 and 255 so clamping matters.
+    #[test]
+    fn fast_kernels_match_direct() {
+        let mut seed = 0x5eed_1234;
+        for k in 0..4000 {
+            let mut s: Sub = [[0; 8]; 3];
+            for v in s.iter_mut().flatten() {
+                *v = value(&mut seed, 0, 255);
+            }
+            let c = [0; 3].map(|_| value(&mut seed, 0, 255));
+            let mut want = (u32::MAX, 0u8);
+            for t in 0..8 {
+                let mut total = 0i32;
+                for i in 0..8 {
+                    let e = |sel| -> i32 {
+                        (0..3)
+                            .map(|ch| (s[ch][i] - (c[ch] + modifier(t, sel)).clamp(0, 255)).pow(2))
+                            .sum()
+                    };
+                    total += (0..4).map(e).min().unwrap();
+                }
+                if (total as u32) < want.0 {
+                    want = (total as u32, t as u8);
+                }
+            }
+            assert_eq!(sub_error(&s, c), want, "sub_error {k}");
+
+            let mut rank = Ranker::new(&s);
+            let l = value(&mut seed, 0, 765);
+            let near = |t: usize, i: usize| -> i32 {
+                (0..4)
+                    .map(|sel| (rank.luma[i] - l - 3 * modifier(t, sel)).pow(2))
+                    .min()
+                    .unwrap()
+            };
+            let want = (0..8).map(|t| (0..8).map(|i| near(t, i)).sum::<i32>()).min().unwrap();
+            rank.window(l, l);
+            assert_eq!(rank.luma_term(l), want, "luma_term {k}");
+
+            let mut px: Px = [[0; 16]; 3];
+            for v in px.iter_mut().flatten() {
+                *v = value(&mut seed, 0, 255);
+            }
+            let mut paint = [[0; 3]; 4];
+            for v in paint.iter_mut().flatten() {
+                *v = value(&mut seed, -60, 315);
+            }
+            let opaque = rng(&mut seed) as u16;
+            let nearest = |p: usize, ks: &[usize]| {
+                let mut best = (i32::MAX, 0u8);
+                for &k in ks {
+                    let e: i32 = (0..3).map(|ch| (px[ch][p] - paint[k][ch].clamp(0, 255)).pow(2)).sum();
+                    if e < best.0 {
+                        best = (e, k as u8);
+                    }
+                }
+                best
+            };
+            let all: [(i32, u8); 16] = std::array::from_fn(|p| nearest(p, &[0, 1, 2, 3]));
+            let want = (all.iter().map(|x| x.0).sum::<i32>() as u32, all.map(|x| x.1));
+            assert_eq!(paint_error_sels(&px, &paint), want, "paint {k}");
+            let some: [(i32, u8); 16] = std::array::from_fn(|p| {
+                if opaque >> p & 1 == 0 {
+                    (0, 2)
+                } else {
+                    nearest(p, &[0, 1, 3])
+                }
+            });
+            let want = (some.iter().map(|x| x.0).sum::<i32>() as u32, some.map(|x| x.1));
+            assert_eq!(punch_error_sels(&px, &paint, opaque), want, "punch {k}");
+
+            for punch in [None, Some(opaque)] {
+                let th = Th {
+                    h: k % 2 == 1,
+                    c1: [0; 3].map(|_| (rng(&mut seed) % 16) as i32),
+                    c2: [0; 3].map(|_| (rng(&mut seed) % 16) as i32),
+                    d: (rng(&mut seed) % 8) as usize,
+                    punch,
+                };
+                let mut top = (th.error_sels(&px).0, th);
+                let mut want = top;
+                descent_pass(&px, th, &mut top);
+                for m in 0..6 {
+                    for step in [-1, 1] {
+                        let mut moved = th;
+                        let v = if m < 3 { &mut moved.c1[m] } else { &mut moved.c2[m - 3] };
+                        *v += step;
+                        if !(0..16).contains(v) {
+                            continue;
+                        }
+                        for d in th.d.saturating_sub(1)..(th.d + 2).min(8) {
+                            let next = Th { d, ..moved };
+                            let e = next.error_sels(&px).0;
+                            if e < want.0 {
+                                want = (e, next);
+                            }
+                        }
+                    }
+                }
+                assert_eq!(top, want, "descent {k}");
             }
         }
     }

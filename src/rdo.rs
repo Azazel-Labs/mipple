@@ -1235,15 +1235,15 @@ fn candidates(
             for (h, &(o, chan)) in parts.iter().enumerate() {
                 let r = o..o + 8;
                 let tag = (h as u64) << 56;
-                let mut push = |val: &[u8]| {
+                let mut push = |val: &[u8], err: u64| {
                     let mut c = *base;
                     c[o..o + 8].copy_from_slice(val);
                     if c != *base {
-                        out.push((c, UNKNOWN));
+                        out.push((c, err));
                     }
                 };
                 if parts.len() > 1 && fields.halves[h].insert(field_key(&prev[r.clone()])) {
-                    push(&prev[r.clone()]);
+                    push(&prev[r.clone()], UNKNOWN);
                 }
                 match chan {
                     // A1 blocks are re-chosen with the punch-through rules; refits would make
@@ -1252,29 +1252,46 @@ fn candidates(
                         if fields.endpoints.insert(tag | field_key(&prev[o..o + 4]))
                             && let Some(v) = etc::reselect_a1(&prev[r.clone()], src, w)
                         {
-                            push(&v);
+                            push(&v, UNKNOWN);
                         }
                     }
                     None => {
+                        // Re-choosing the selectors or refitting the colors yields the color
+                        // error: add the alpha term (ETC2 RGB decodes alpha 255; RGBA8 keeps
+                        // base's alpha half).
+                        let alpha = || {
+                            if parts.len() > 1 {
+                                base_half[0]
+                            } else {
+                                u64::from(w[3]) * src.iter().map(|t| u64::from(255 - t[3]).pow(2)).sum::<u64>()
+                            }
+                        };
                         if fields.endpoints.insert(tag | field_key(&prev[o..o + 4]))
-                            && let Some(v) = etc::reselect(&prev[r.clone()], src, w)
+                            && let Some((v, e)) = etc::reselect_err(&prev[r.clone()], src, w)
                         {
-                            push(&v);
+                            push(&v, e + alpha());
                         }
                         if etc::mode(&prev[r.clone()]) != etc::Mode::Planar
                             && fields.indices.insert(tag | field_key(&prev[o + 4..o + 8]))
-                            && let Some(v) = etc::refit_selectors(&base[r.clone()], &prev[o + 4..o + 8], src)
                         {
-                            push(&v);
+                            if w[..3] != [1, 1, 1] {
+                                if let Some(v) = etc::refit_selectors(&base[r.clone()], &prev[o + 4..o + 8], src) {
+                                    push(&v, UNKNOWN);
+                                }
+                            } else if let Some((v, e)) =
+                                etc::refit_selectors_err(&base[r.clone()], &prev[o + 4..o + 8], src)
+                            {
+                                push(&v, u64::from(e) + alpha());
+                            }
                         }
                     }
                     Some(c) => {
                         let v = bc4::channel(src, c);
                         if fields.endpoints.insert(tag | field_key(&prev[o..o + 2])) {
-                            push(&eac::reindex(&prev[r.clone()], &v, kind));
+                            push(&eac::reindex(&prev[r.clone()], &v, kind), UNKNOWN);
                         }
                         if fields.indices.insert(tag | field_key(&prev[o + 2..o + 8])) {
-                            push(&eac::refit(&prev[o + 2..o + 8], &v, kind));
+                            push(&eac::refit(&prev[o + 2..o + 8], &v, kind), UNKNOWN);
                         }
                     }
                 }
@@ -1367,6 +1384,21 @@ fn block_err(
             let e = half(0, bound);
             if e > bound { e } else { e + half(1, bound - e) }
         }
+        Format::Etc2Rgb | Format::Etc2RgbA1 => etc::sse(raw, src, w, format == Format::Etc2RgbA1),
+        Format::EacR11 | Format::EacR11Snorm => etc_half_sse(format, 0, raw, src, w),
+        Format::Etc2Rgba | Format::EacRg11 | Format::EacRg11Snorm => {
+            // A candidate keeps one 8-byte half of the base block, or both: reuse its error.
+            let half = |h: usize| {
+                let r = h * 8..h * 8 + 8;
+                if raw[r.clone()] == base.0[r.clone()] {
+                    base.1[h]
+                } else {
+                    etc_half_sse(format, h, &raw[r], src, w)
+                }
+            };
+            let e = half(0);
+            if e > bound { e } else { e + half(1) }
+        }
         _ => {
             format.decode_block(raw, dec);
             block_sse(src, dec, w)
@@ -1379,8 +1411,46 @@ fn block_err(
 fn base_half_err(format: Format, base: &[u8; 16], src: &Block, w: &[u32; 4]) -> [u64; 2] {
     if format == Format::Bc3 || (format == Format::Bc5 && w[2..] == [0, 0]) {
         [0, 1].map(|h| half_sse(format, h, &base[h * 8..h * 8 + 8], src, w, u64::MAX))
+    } else if matches!(format, Format::Etc2Rgba | Format::EacRg11 | Format::EacRg11Snorm) {
+        [0, 1].map(|h| etc_half_sse(format, h, &base[h * 8..h * 8 + 8], src, w))
     } else {
         [0; 2]
+    }
+}
+
+/// Weighted SSE of half `h` (8 bytes) of an ETC2 RGBA8 or EAC block, as parts of the decoded
+/// block's [`block_sse`] that sum to it: ETC2 RGBA8's alpha (A by `w[3]`) and color (R, G, B);
+/// EAC RG11's red (with the constant blue 0 and alpha 255 terms) and green; EAC R11's whole
+/// block (red replicated to R, G, B, alpha 255).
+fn etc_half_sse(format: Format, h: usize, raw: &[u8], src: &Block, w: &[u32; 4]) -> u64 {
+    let w64 = w.map(u64::from);
+    let d = |x: u8, y: u8| u64::from(x.abs_diff(y)).pow(2);
+    match (format, h) {
+        (Format::Etc2Rgba, 0) => {
+            let a = eac::decode_a8(raw);
+            w64[3] * (0..16).map(|i| d(a[i], src[i][3])).sum::<u64>()
+        }
+        (Format::Etc2Rgba, _) => etc::sse(raw, src, &[w[0], w[1], w[2], 0], false),
+        _ => {
+            let kind = if format.is_signed() {
+                eac::Kind::R11Snorm
+            } else {
+                eac::Kind::R11
+            };
+            let v = eac::decode_u8(raw, kind);
+            let it = src.iter().zip(v);
+            match (format, h) {
+                (Format::EacR11 | Format::EacR11Snorm, _) => it
+                    .map(|(t, v)| {
+                        w64[0] * d(v, t[0]) + w64[1] * d(v, t[1]) + w64[2] * d(v, t[2]) + w64[3] * d(255, t[3])
+                    })
+                    .sum(),
+                (_, 0) => it
+                    .map(|(t, v)| w64[0] * d(v, t[0]) + w64[2] * d(0, t[2]) + w64[3] * d(255, t[3]))
+                    .sum(),
+                _ => w64[1] * it.map(|(t, v)| d(v, t[1])).sum::<u64>(),
+            }
+        }
     }
 }
 
@@ -3782,8 +3852,26 @@ mod tests {
             x
         };
         let mut dec = [[0u8; 4]; 16];
-        for format in [Format::Bc1, Format::Bc4, Format::Bc5] {
-            let w = format.error_weights();
+        // ETC2 / EAC twice: with their own weights, and with every channel weighted.
+        const ETC: [Format; 7] = [
+            Format::Etc2Rgb,
+            Format::Etc2Rgba,
+            Format::Etc2RgbA1,
+            Format::EacR11,
+            Format::EacRg11,
+            Format::EacR11Snorm,
+            Format::EacRg11Snorm,
+        ];
+        let formats = [Format::Bc1, Format::Bc4, Format::Bc5]
+            .into_iter()
+            .chain(ETC)
+            .chain(ETC);
+        for (k, format) in formats.enumerate() {
+            let w = if k < 3 + ETC.len() {
+                format.error_weights()
+            } else {
+                [3, 5, 2, 7]
+            };
             for _ in 0..2000 {
                 let mut raw = [0u8; 16];
                 for b in &mut raw {

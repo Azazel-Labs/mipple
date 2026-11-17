@@ -11,7 +11,8 @@ milestone in progress; every green push to main is released as the next patch (`
 2. BC6H: ~~RDO with a log-space distortion~~ (done: 42% smaller Zstd files at λ 2), ~~signed BC6H~~ (done),
    a GPU kernel.
 3. ~~ETC2 / EAC for mobile fallbacks.~~ Done (v1.0 below), with ~~punch-through alpha (ETC2 RGB A1)~~ and
-   ~~signed EAC~~; next for it: a SIMD batch encoder.
+   ~~signed EAC~~ and ~~a faster CPU encoder and RDO candidate error~~ (1.3-2x, byte-identical); next for it: a
+   SIMD batch encoder and a GPU kernel.
 
 ## v0.1 (pre-release): encoder and container
 
@@ -253,7 +254,18 @@ Open for v0.9.x:
     transcription of the Khronos specification.
   - [x] Punch-through alpha (`etc2-rgb-a1`, vkFormat 149/150): texels below alpha 128 decode transparent
     black, checked against `texture2ddecoder`.
-  - [ ] A SIMD batch encoder (eight blocks per call, as BC1/BC6H), a GPU kernel, and a cheaper RDO candidate error than a full decode.
+  - [x] A faster CPU encoder and a cheaper RDO candidate error than a full decode, byte-identical (552 Kodak
+    encodes across efforts 0-9, λ 0 / 1 / 4 and all ETC2 / EAC formats; `mipple check` 210/210). The subblock
+    error, luma term and paint errors take exact shortcuts (no clamping, so |e − m|² = |e|² − 2mΣe + 3m²); T and
+    H error and selectors come from one pass, and the descent reuses the unchanged group's errors. Refitting
+    another block's selectors uses per-selector moments (count, Σx, Σx²) and returns its error, as does
+    re-choosing the selectors, so those RDO candidates skip the decode; EAC refits score an unclamped palette in
+    closed form. One pinned core on a busy machine, process CPU time on 6 Kodak images: ETC2 RGB 1.31x less at
+    effort 0, 1.6-2.0x at efforts 1-9, 1.85x / 1.92x at λ 1 / 4; RGBA8 1.75-1.93x; RGB A1 1.61x at λ 1 (then
+    1.12x more at ETC2 RGB λ 1 from the refit running across tables); EAC R11 1.44x at λ 1.
+  - [ ] A SIMD batch encoder (eight blocks per call, as BC1/BC6H) and a GPU kernel. The per-block kernels
+    already run 8 or 16 texels wide; what a batch would widen is the scalar glue between them (shortlists, the
+    T/H descent), which must keep its order to stay byte-identical.
 
 ## v1.0+: perception and speed
 
