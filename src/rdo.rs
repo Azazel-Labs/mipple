@@ -23,7 +23,6 @@ use crate::ranker::bc4::{Rank1, RankSrc1};
 use crate::ranker::bc5::{RankBlock, RankSrc};
 use crate::ranker::bc7::{RankBlock7, RankSrc7};
 use crate::surface::{Block, block_sse};
-use rayon::prelude::*;
 
 /// λ of ASTC's default light RDO pass by footprint texel count ([`RdoParams::default_for`]);
 /// footprints between interpolate linearly ([`RdoParams::astc_default_lambda`]).
@@ -341,8 +340,9 @@ impl RdoParams {
     }
 
     /// Bytes per independently optimized chunk: by default 64 KiB for BC7 (6 chunks per Kodak
-    /// image; 128 KiB is −0.8% to −1.3% BD-rate for the same CPU time, but fewer, longer chunks
-    /// leave threads idle: 1.4-1.5× the wall time at 20 threads), 16 KiB for the others (1024 BC5
+    /// image; 128 KiB is about −0.9% BD-rate for the same CPU time, and the same wall time when many
+    /// images share one pool, but one image alone is 1.6× the wall time at 22 threads, since its few
+    /// long chunks are the critical path), 16 KiB for the others (1024 BC5
     /// or 2048 BC1/BC4 blocks, 24 or 12 chunks per Kodak image, about +0.03% BD-rate vs 64 KiB
     /// chunks at a 2 KiB window).
     pub fn chunk_bytes_for(&self, format: Format) -> usize {
@@ -3239,10 +3239,25 @@ pub fn optimize_with_alt(
             ..Default::default()
         };
     }
+    crate::sched::run(vec![chunk_tasks(format, src, blocks, alts, *w, *p)])[0]
+}
+
+/// [`optimize_with_alt`]'s chunks as independent tasks, for [`crate::sched::run`] to run beside
+/// other levels' chunks. RDO must be enabled.
+pub(crate) fn chunk_tasks<'a>(
+    format: Format,
+    src: &'a [Block],
+    blocks: &'a mut [[u8; 16]],
+    alts: &'a [Vec<[u8; 16]>],
+    w: [u32; 4],
+    p: RdoParams,
+) -> Vec<crate::sched::Task<'a>> {
+    assert!(!format.is_astc(), "RDO works on 4x4 blocks; {format} has its own pass");
+    assert_eq!(src.len(), blocks.len());
     let chunk = (p.chunk_bytes_for(format) / format.block_bytes()).max(1);
-    let mut smooth = smooth_map(src, w, p);
+    let mut smooth = smooth_map(src, &w, &p);
     if p.normal_map && p.normal_weight > 0.0 && matches!(format, Format::Bc5 | Format::EacRg11 | Format::EacRg11Snorm) {
-        let base = smooth.unwrap_or_else(|| src.iter().map(|b| smooth_factor(b, w, p)).collect());
+        let base = smooth.unwrap_or_else(|| src.iter().map(|b| smooth_factor(b, &w, &p)).collect());
         smooth = Some(
             base.iter()
                 .zip(src)
@@ -3250,22 +3265,16 @@ pub fn optimize_with_alt(
                 .collect(),
         );
     }
-    let smooth_chunks: Vec<Option<&[f32]>> = (0..src.len().div_ceil(chunk))
-        .map(|k| smooth.as_deref().map(|m| &m[k * chunk..((k + 1) * chunk).min(m.len())]))
-        .collect();
-    let alt_chunks: Vec<Vec<&[[u8; 16]]>> = (0..src.len().div_ceil(chunk))
-        .map(|k| {
-            alts.iter()
-                .map(|a| &a[k * chunk..((k + 1) * chunk).min(a.len())])
-                .collect()
+    src.chunks(chunk)
+        .zip(blocks.chunks_mut(chunk))
+        .enumerate()
+        .map(|(k, (s, b))| {
+            let range = k * chunk..k * chunk + s.len();
+            let a: Vec<&[[u8; 16]]> = alts.iter().map(|a| &a[range.clone()]).collect();
+            let q: Option<Vec<f32>> = smooth.as_ref().map(|m| m[range].to_vec());
+            crate::sched::Task::new(s.len(), move || optimize_chunk(format, s, b, &a, &w, &p, q.as_deref()))
         })
-        .collect();
-    src.par_chunks(chunk)
-        .zip(blocks.par_chunks_mut(chunk))
-        .zip(alt_chunks)
-        .zip(smooth_chunks)
-        .map(|(((s, b), a), q)| optimize_chunk(format, s, b, &a, w, p, q))
-        .reduce(RdoStats::default, RdoStats::merge)
+        .collect()
 }
 
 #[cfg(test)]

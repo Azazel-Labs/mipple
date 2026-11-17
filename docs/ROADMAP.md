@@ -88,8 +88,10 @@ Open for v0.9.x:
   smooth weight's new shape (0.9.18); mipple is now 0.6-1.5% smaller at equal RMSE and 0.3-3.1% at equal SSIM.
 - [ ] **Widen the BC7 lead:** the margin at λ 30-40 on SSIM is thin (−0.7%, −0.3%), and per image smooth-sky
   shots (kodim07, kodim20) are still up to 5.5% behind there. Oodle's RDO output has about 3× more index-half
-  repeats. 128 KiB chunks are another −1.0% to −1.3% BD-rate at the same CPU time, waiting on chunk rebalancing
-  (1.4-1.5× wall time).
+  repeats. 128 KiB chunks are another −0.9% / −1.0% BD-rate (RMSE / SSIM) at the same CPU time (0.3-0.6 points
+  at equal RMSE λ 10-40 against Oodle, 0.6-0.8 at equal SSIM). With the chunk pool they cost no wall time when
+  many images are encoded in one process, but one image alone is still 1.6× (its few long chunks are the
+  critical path), so they stay off by default.
 - [ ] **BC7 RDO clearly faster than Oodle** (reopened 2026-11-13): quality is ahead in every cell, but CPU is
   behind. On one pinned P-core, Oodle's share of a UE cook is about 20-22 CPU-seconds for Kodak-24 at λ 30 and
   mipple's λ 1 is 31.2-31.6 after the near-flat mode-6 gates on both bases (was 34.2-34.6; about 1.5×;
@@ -163,9 +165,14 @@ Open for v0.9.x:
 - [ ] **Wider searches elsewhere:** far endpoints for BC4 (−0.38%, 1.4×) need a tighter bound, and Oodle's far
   index-pattern reuse (about half mipple's distinct BC1 index patterns on kodim18) needs a cheap way to find
   index patterns that fit (refit candidates over 2048 blocks: −0.17%, several times slower).
-- [ ] Rebalance RDO chunks for many threads without making output depend on the thread count (BC5 on Kodak:
-  24 chunks on 20 threads run as two uneven rounds). Tried: splitting each block's search over back distances
-  across threads; no faster on a 155H, since per-block joins wait for the slowest core.
+- [x] Rebalance RDO chunks for many threads without making output depend on the thread count (BC5 on Kodak:
+  24 chunks on 20 threads run as two uneven rounds). Every level's chunks (and every input's, when `encode`
+  gets several) now go to one longest-first pool, and all CPU bases run before it in parallel; chunk
+  boundaries are unchanged, so the output is byte-identical at any thread count. Kodak-24 with mips on a 155H
+  (22 threads, a busy machine; best per image of 3): BC7 λ 1 14.1-14.6 s against 25.9-26.4 s (1.8×), BC5 λ 1
+  22.2-24.1 s against 35.7-37.4 s (1.6×), CPU time within 2%. One process for all 24 images: BC7 9.5-10.7 s,
+  BC5 22.2 s. Tried before: splitting each block's search over back distances across threads; no faster on a
+  155H, since per-block joins wait for the slowest core.
 - [x] **Basis UASTC + RDO + Zstd** and **XUBC7** in the head-to-head (`compete.py --basisu`: basisu 073eb6a,
   `-export_dds BC7`, then score; sizes are what ships). On Kodak-24, mipple's BC7 RDO is −55.9% BD-rate (Zstd-19,
   equal PSNR) against UASTC RDO and −8.5% against XUBC7 (bc7e level 2), but **+16.2% at equal SSIM** against

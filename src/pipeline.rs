@@ -408,7 +408,30 @@ pub fn gpu_eligible(opts: &EncodeOptions) -> bool {
 
 /// Encodes a surface (and optionally its mip chain).
 pub fn encode(surface: &Surface, opts: &EncodeOptions) -> (EncodedTexture, EncodeReport) {
-    let levels = prepare(surface, opts);
+    encode_batch(&[(surface, opts)]).pop().unwrap()
+}
+
+/// Encodes several surfaces, each as [`encode`] would (the same blocks), but with every level's RDO
+/// chunks, across all of them, in one pool: [`encode`] of one at a time leaves threads idle once a
+/// texture has fewer chunks left than there are threads. The reports share one RDO pass, so each
+/// gives that pass's wall time.
+pub fn encode_batch(items: &[(&Surface, &EncodeOptions)]) -> Vec<(EncodedTexture, EncodeReport)> {
+    let prepared: Vec<Vec<Cow<Surface>>> = items.iter().map(|&(s, opts)| prepare(s, opts)).collect();
+    let textures: Vec<_> = items
+        .iter()
+        .zip(&prepared)
+        .map(|(&(_, opts), levels)| {
+            let (name, bases) = gpu_bases(levels, opts);
+            let mut bases = bases.into_iter();
+            (&levels[..], opts, name, move |_: usize, _: &Surface| bases.next())
+        })
+        .collect();
+    encode_with(textures)
+}
+
+/// GPU base blocks for every level of one texture when the GPU makes them (one submission, so the
+/// GPU is waited on once per texture): the adapter's name and the levels' raw blocks.
+fn gpu_bases(levels: &[Cow<Surface>], opts: &EncodeOptions) -> (Option<String>, Vec<Vec<u8>>) {
     let use_gpu = gpu_eligible(opts)
         && match opts.gpu {
             GpuMode::Auto => crate::gpu::Gpu::preferred(opts.format, opts.base_opts()),
@@ -419,14 +442,12 @@ pub fn encode(surface: &Surface, opts: &EncodeOptions) -> (EncodedTexture, Encod
         .then(crate::gpu::Gpu::shared)
         .flatten()
         .filter(|g| g.encodes(opts.format));
-    // Every level in one submission, so the GPU is waited on once per texture.
     let bases = gpu.and_then(|g| {
         let refs: Vec<&Surface> = levels.iter().map(|l| &**l).collect();
         g.encode_surfaces(&refs, opts.format, opts.base_opts())
     });
-    let name = bases.as_ref().and(gpu).map(|g| g.info().name.as_str());
-    let mut bases = bases.unwrap_or_default().into_iter();
-    encode_with(&levels, opts, name, |_, _| bases.next())
+    let name = bases.as_ref().and(gpu).map(|g| g.info().name.clone());
+    (name, bases.unwrap_or_default())
 }
 
 /// [`encode`] of [`prepare`]'s levels with base blocks the caller already made, one entry per level
@@ -441,111 +462,166 @@ pub fn encode_prepared(
     mut bases: Vec<Option<Vec<u8>>>,
 ) -> (EncodedTexture, EncodeReport) {
     let eligible = gpu_eligible(opts);
-    encode_with(levels, opts, gpu, |i, _| {
-        bases.get_mut(i).and_then(Option::take).filter(|_| eligible)
-    })
+    let base = move |i: usize, _: &Surface| bases.get_mut(i).and_then(Option::take).filter(|_| eligible);
+    encode_with(vec![(levels, opts, gpu.map(str::to_owned), base)])
+        .pop()
+        .unwrap()
 }
 
-/// Encodes `levels`, taking each level's base blocks from `base(index, level)` when it returns
-/// them (a GPU encode) and from the CPU otherwise, then running RDO.
-fn encode_with(
-    levels_in: &[Cow<Surface>],
-    opts: &EncodeOptions,
-    gpu: Option<&str>,
-    mut base: impl FnMut(usize, &Surface) -> Option<Vec<u8>>,
-) -> (EncodedTexture, EncodeReport) {
-    let w = opts.format.error_weights();
-    let mut report = EncodeReport::default();
-    let mut levels = Vec::with_capacity(levels_in.len());
-    let rdo_params = rdo_params(opts);
-    for (i, level) in levels_in.iter().enumerate() {
-        let level: &Surface = level;
-        let t0 = Instant::now();
-        let on_gpu = base(i, level);
-        if on_gpu.is_some() {
-            report.gpu = gpu.map(str::to_owned);
-        }
-        if !rdo_params.enabled() && (on_gpu.is_some() || direct(opts.format, opts.block_opts())) {
-            // Straight to raw bytes: no source blocks, no 16-byte slots.
-            let data = on_gpu.unwrap_or_else(|| encode_surface_raw(level, opts.format, opts.block_opts()));
-            report.base_secs += t0.elapsed().as_secs_f64();
-            report.rdo = RdoStats::merge(
-                report.rdo,
-                RdoStats {
-                    blocks: data.len() / opts.format.block_bytes(),
-                    ..Default::default()
-                },
-            );
-            levels.push(Level {
-                width: level.width,
-                height: level.height,
-                data,
-            });
-            continue;
-        }
-        if opts.format.is_astc() {
-            // ASTC's footprints are not 4x4 source blocks: its RDO pass reads the surface itself.
-            let bo = opts.block_opts();
-            let mut data = encode_surface_raw(level, opts.format, bo);
-            let t1 = Instant::now();
-            let stats = crate::astc::encode::rdo::optimize(opts.format, level, bo.srgb, &mut data, &rdo_params);
-            report.base_secs += (t1 - t0).as_secs_f64();
-            report.rdo_secs += t1.elapsed().as_secs_f64();
-            report.rdo = RdoStats::merge(report.rdo, stats);
-            levels.push(Level {
-                width: level.width,
-                height: level.height,
-                data,
-            });
-            continue;
-        }
-        // Source blocks are only materialized when an encoder or RDO needs them.
-        let src = if rdo_params.enabled() || !direct(opts.format, opts.block_opts()) {
-            level.blocks()
-        } else {
-            Vec::new()
-        };
-        // A GPU base is RDO's only starting point (the CPU adds alternate bases for BC7).
-        let (mut blocks, alts) = match on_gpu {
-            Some(raw) => (unflatten(opts.format, &raw), Vec::new()),
-            None => rdo_bases(level, &src, opts.format, opts.block_opts(), rdo_params.enabled()),
-        };
-        let t1 = Instant::now();
-        let stats = if rdo_params.enabled() {
-            let row = (level.width as usize).div_ceil(4);
-            rdo::optimize_with_alt(
-                opts.format,
-                &src,
-                &mut blocks,
-                &alts,
-                &w,
-                &RdoParams { row, ..rdo_params },
-            )
-        } else {
-            RdoStats {
-                blocks: blocks.len(),
-                ..Default::default()
-            }
-        };
-        let t2 = Instant::now();
-        report.base_secs += (t1 - t0).as_secs_f64();
-        report.rdo_secs += (t2 - t1).as_secs_f64();
-        report.rdo = RdoStats::merge(report.rdo, stats);
-        levels.push(Level {
-            width: level.width,
-            height: level.height,
-            data: flatten(opts.format, &blocks),
-        });
+/// One level between its base encoding and RDO.
+enum Work {
+    /// Final raw blocks: no RDO.
+    Raw(Vec<u8>),
+    /// ASTC blocks for ASTC's RDO pass, which reads the surface itself (its footprints are not 4x4
+    /// source blocks).
+    Astc(Vec<u8>),
+    /// Source blocks, base blocks and alternate bases (BC7) for the 4x4 RDO pass.
+    Blocks {
+        src: Vec<Block>,
+        blocks: Vec<[u8; 16]>,
+        alts: Vec<Vec<[u8; 16]>>,
+    },
+}
+
+/// Base-encodes one level, taking its base blocks from `on_gpu` when given (a GPU encode) and from
+/// the CPU otherwise.
+fn base_work(level: &Surface, opts: &EncodeOptions, rdo_on: bool, on_gpu: Option<Vec<u8>>) -> Work {
+    if !rdo_on && (on_gpu.is_some() || direct(opts.format, opts.block_opts())) {
+        // Straight to raw bytes: no source blocks, no 16-byte slots.
+        return Work::Raw(on_gpu.unwrap_or_else(|| encode_surface_raw(level, opts.format, opts.block_opts())));
     }
-    let (width, height) = levels_in.first().map_or((0, 0), |l| (l.width, l.height));
-    let tex = EncodedTexture {
-        format: opts.format,
-        srgb: opts.srgb && opts.format.supports_srgb(),
-        width,
-        height,
-        levels,
+    if opts.format.is_astc() {
+        let data = encode_surface_raw(level, opts.format, opts.block_opts());
+        return if rdo_on { Work::Astc(data) } else { Work::Raw(data) };
+    }
+    // Source blocks are only materialized when an encoder or RDO needs them.
+    let src = if rdo_on || !direct(opts.format, opts.block_opts()) {
+        level.blocks()
+    } else {
+        Vec::new()
     };
-    (tex, report)
+    // A GPU base is RDO's only starting point (the CPU adds alternate bases for BC7).
+    let (blocks, alts) = match on_gpu {
+        Some(raw) => (unflatten(opts.format, &raw), Vec::new()),
+        None => rdo_bases(level, &src, opts.format, opts.block_opts(), rdo_on),
+    };
+    if rdo_on {
+        Work::Blocks { src, blocks, alts }
+    } else {
+        Work::Raw(flatten(opts.format, &blocks))
+    }
+}
+
+/// One texture for [`encode_with`]: its levels, options, GPU adapter name and base-block source.
+type Texture<'a, B> = (&'a [Cow<'a, Surface>], &'a EncodeOptions, Option<String>, B);
+
+/// Encodes each texture's levels, taking each level's base blocks from `base(index, level)` when it
+/// returns them (a GPU encode) and from the CPU otherwise: first every level's base encoding (the CPU
+/// ones in parallel), then RDO over every level's chunks in one pool ([`crate::sched::run`]).
+fn encode_with<B: FnMut(usize, &Surface) -> Option<Vec<u8>>>(
+    mut textures: Vec<Texture<'_, B>>,
+) -> Vec<(EncodedTexture, EncodeReport)> {
+    let mut reports: Vec<EncodeReport> = textures.iter().map(|_| EncodeReport::default()).collect();
+    let t0 = Instant::now();
+    // GPU bases first (in order), then every level's CPU base at once: a small level's encode
+    // does not fill the threads by itself.
+    let mut items = Vec::new();
+    for (ti, (levels, _, gpu, base)) in textures.iter_mut().enumerate() {
+        let levels: &[Cow<'_, Surface>] = levels;
+        for (i, level) in levels.iter().enumerate() {
+            let on_gpu = base(i, level);
+            if on_gpu.is_some() {
+                reports[ti].gpu.clone_from(gpu);
+            }
+            items.push((ti, level, on_gpu));
+        }
+    }
+    let all_opts: Vec<&EncodeOptions> = textures.iter().map(|t| t.1).collect();
+    let base_one = |(ti, level, on_gpu): (usize, &Cow<'_, Surface>, Option<Vec<u8>>)| {
+        let opts = all_opts[ti];
+        (ti, base_work(level, opts, rdo_params(opts).enabled(), on_gpu))
+    };
+    let flat: Vec<(usize, Work)> = items.into_par_iter().map(base_one).collect();
+    let base_secs = t0.elapsed().as_secs_f64();
+    let mut works: Vec<Vec<Work>> = textures.iter().map(|_| Vec::new()).collect();
+    for (ti, w) in flat {
+        works[ti].push(w);
+    }
+    for r in &mut reports {
+        r.base_secs = base_secs;
+    }
+    let t1 = Instant::now();
+    // One job per level with RDO to do, in texture then level order.
+    let mut jobs = Vec::new();
+    let mut job_of = Vec::new();
+    for (ti, ((levels, opts, _, _), w)) in textures.iter().zip(works.iter_mut()).enumerate() {
+        let p = rdo_params(opts);
+        let ew = opts.format.error_weights();
+        for (level, work) in levels.iter().zip(w.iter_mut()) {
+            let tasks = match work {
+                Work::Raw(_) => continue,
+                Work::Astc(data) => {
+                    crate::astc::encode::rdo::chunk_tasks(opts.format, level, opts.block_opts().srgb, data, p)
+                }
+                Work::Blocks { src, blocks, alts } => {
+                    let row = (level.width as usize).div_ceil(4);
+                    rdo::chunk_tasks(opts.format, src, blocks, alts, ew, RdoParams { row, ..p })
+                }
+            };
+            jobs.push(tasks);
+            job_of.push(ti);
+        }
+    }
+    let stats = crate::sched::run(jobs);
+    let rdo_secs = t1.elapsed().as_secs_f64();
+    for (ti, s) in job_of.into_iter().zip(stats) {
+        reports[ti].rdo = RdoStats::merge(reports[ti].rdo, s);
+    }
+    textures
+        .iter()
+        .zip(works)
+        .zip(reports)
+        .map(|(((levels_in, opts, _, _), w), mut report)| {
+            if rdo_params(opts).enabled() {
+                report.rdo_secs = rdo_secs;
+            }
+            let levels: Vec<Level> = levels_in
+                .iter()
+                .zip(w)
+                .map(|(level, work)| {
+                    let data = match work {
+                        Work::Raw(data) => {
+                            let blocks = data.len() / opts.format.block_bytes();
+                            report.rdo = RdoStats::merge(
+                                report.rdo,
+                                RdoStats {
+                                    blocks,
+                                    ..Default::default()
+                                },
+                            );
+                            data
+                        }
+                        Work::Astc(data) => data,
+                        Work::Blocks { blocks, .. } => flatten(opts.format, &blocks),
+                    };
+                    Level {
+                        width: level.width,
+                        height: level.height,
+                        data,
+                    }
+                })
+                .collect();
+            let (width, height) = levels_in.first().map_or((0, 0), |l| (l.width, l.height));
+            let tex = EncodedTexture {
+                format: opts.format,
+                srgb: opts.srgb && opts.format.supports_srgb(),
+                width,
+                height,
+                levels,
+            };
+            (tex, report)
+        })
+        .collect()
 }
 
 /// Encodes an HDR image to BC6H (half floats: unsigned for [`Format::Bc6h`], signed for
@@ -572,11 +648,23 @@ pub fn encode_hdr(surface: &crate::hdr::HdrSurface, opts: &EncodeOptions) -> (En
     let base_secs = t0.elapsed().as_secs_f64();
     let t1 = Instant::now();
     let mut levels = levels;
-    let rdo = chain
-        .iter()
-        .zip(levels.iter_mut())
-        .map(|(l, lv)| crate::bc6h::rdo::optimize(l, &mut lv.data, &opts.rdo, signed))
-        .fold(RdoStats::default(), RdoStats::merge);
+    let blocks = levels.iter().map(|l| l.data.len() / 16).sum();
+    let rdo = if opts.rdo.enabled() {
+        // Every level's chunks in one pool.
+        let jobs = chain
+            .iter()
+            .zip(levels.iter_mut())
+            .map(|(l, lv)| crate::bc6h::rdo::chunk_tasks(l, &mut lv.data, opts.rdo, signed))
+            .collect();
+        crate::sched::run(jobs)
+            .into_iter()
+            .fold(RdoStats::default(), RdoStats::merge)
+    } else {
+        RdoStats {
+            blocks,
+            ..Default::default()
+        }
+    };
     let report = EncodeReport {
         base_secs,
         rdo_secs: if opts.rdo.enabled() {
@@ -649,5 +737,28 @@ mod tests {
         assert!(!mask.srgb && !mask.normal_map);
         // Formats without an sRGB variant stay linear as albedo.
         assert!(!EncodeOptions::new(Format::Bc5).with_role(Role::Albedo).srgb);
+    }
+
+    /// Textures encoded together, and on any number of threads, come out as each encoded alone: the
+    /// chunk schedule does not reach the output.
+    #[test]
+    fn batch_and_thread_count_keep_the_output() {
+        let surfaces = [crate::synth::bricks(96), crate::synth::foliage(80)];
+        for format in [Format::Bc7, Format::Bc5, Format::Bc1, Format::Astc6x6] {
+            let mut opts = EncodeOptions::new(format);
+            opts.effort = 2;
+            opts.rdo.lambda = 2.0;
+            // Small chunks, so each level has several.
+            opts.rdo.chunk_bytes = Some(2048);
+            let alone: Vec<EncodedTexture> = surfaces.iter().map(|s| encode(s, &opts).0).collect();
+            for threads in [1, 3] {
+                let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).build().unwrap();
+                let items: Vec<(&Surface, &EncodeOptions)> = surfaces.iter().map(|s| (s, &opts)).collect();
+                let batch = pool.install(|| encode_batch(&items));
+                for (a, (b, _)) in alone.iter().zip(&batch) {
+                    assert!(a == b, "{format} on {threads} thread(s)");
+                }
+            }
+        }
     }
 }

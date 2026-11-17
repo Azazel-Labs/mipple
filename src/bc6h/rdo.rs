@@ -27,7 +27,6 @@ use super::{
 use crate::format::Format;
 use crate::hdr::HdrSurface;
 use crate::rdo::{LzModel, LzState, RdoParams, RdoStats, VERIFY_QUICK, bit_budget};
-use rayon::prelude::*;
 use std::collections::HashSet;
 
 /// Squared half-float steps per squared 8-bit step: near 0.5 one 8-bit step (1/255) is about 11
@@ -339,12 +338,23 @@ pub fn optimize(s: &HdrSurface, data: &mut [u8], p: &RdoParams, signed: bool) ->
             ..Default::default()
         };
     }
+    crate::sched::run(vec![chunk_tasks(s, data, *p, signed)])[0]
+}
+
+/// [`optimize`]'s chunks as independent tasks, for [`crate::sched::run`] to run beside other levels'
+/// chunks. RDO must be enabled.
+pub(crate) fn chunk_tasks<'a>(
+    s: &'a HdrSurface,
+    data: &'a mut [u8],
+    p: RdoParams,
+    signed: bool,
+) -> Vec<crate::sched::Task<'a>> {
     let nx = s.blocks_x() as usize;
     let chunk = (p.chunk_bytes_for(Format::Bc6h) / 16).max(1);
-    data.par_chunks_mut(chunk * 16)
+    data.chunks_mut(chunk * 16)
         .enumerate()
-        .map(|(k, d)| optimize_chunk(s, nx, k * chunk, d, p, signed))
-        .reduce(RdoStats::default, RdoStats::merge)
+        .map(|(k, d)| crate::sched::Task::new(d.len() / 16, move || optimize_chunk(s, nx, k * chunk, d, &p, signed)))
+        .collect()
 }
 
 #[cfg(test)]

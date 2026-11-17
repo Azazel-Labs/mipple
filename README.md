@@ -85,6 +85,7 @@ cargo xtask ci                             # what CI runs: fmt --check, clippy -
 
 ./target/release/mipple synth -o test-images/synthetic
 ./target/release/mipple encode test-images/synthetic/albedo_bricks.png -o bricks.ktx2 -f bc7 -l 1
+./target/release/mipple encode test-images/synthetic/*.png -o out -f bc7 -l 1   # several images share the threads
 ./target/release/mipple info bricks.ktx2
 ./target/release/mipple decode bricks.ktx2 -o bricks.decoded.png
 ./target/release/mipple compare test-images/synthetic/albedo_bricks.png bricks.decoded.png

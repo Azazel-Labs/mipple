@@ -24,7 +24,6 @@ use crate::astc::{COLOR_UNQUANT, PartitionFn, Symbolic, color_range, decode_bloc
 use crate::format::Format;
 use crate::rdo::{LzModel, LzState, RdoParams, RdoStats, bit_budget};
 use crate::surface::{Rgba, Surface};
-use rayon::prelude::*;
 
 /// How far back the reweight and refit candidates look (whole copies look `max_back` far). On Kodak,
 /// 256 is 4.8-6.6% smaller at equal PSNR than 32 for 2.4x the pass's time, and 512 another 0.3-0.7%
@@ -726,14 +725,31 @@ pub fn optimize(format: Format, s: &Surface, srgb: bool, data: &mut [u8], p: &Rd
             ..Default::default()
         };
     }
+    crate::sched::run(vec![chunk_tasks(format, s, srgb, data, *p)])[0]
+}
+
+/// [`optimize`]'s chunks as independent tasks, for [`crate::sched::run`] to run beside other levels'
+/// chunks. RDO must be enabled.
+pub(crate) fn chunk_tasks<'a>(
+    format: Format,
+    s: &'a Surface,
+    srgb: bool,
+    data: &'a mut [u8],
+    p: RdoParams,
+) -> Vec<crate::sched::Task<'a>> {
+    assert!(format.is_astc(), "ASTC RDO for {format}");
     let (bw, bh) = format.block_dims();
     let fp = Footprint::get(bw, bh);
     let nx = s.width.div_ceil(bw) as usize;
     let chunk = (p.chunk_bytes_for(format) / 16).max(1);
-    data.par_chunks_mut(chunk * 16)
+    data.chunks_mut(chunk * 16)
         .enumerate()
-        .map(|(k, d)| optimize_chunk(format, fp, s, nx, k * chunk, d, srgb, p))
-        .reduce(RdoStats::default, RdoStats::merge)
+        .map(|(k, d)| {
+            crate::sched::Task::new(d.len() / 16, move || {
+                optimize_chunk(format, fp, s, nx, k * chunk, d, srgb, &p)
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]

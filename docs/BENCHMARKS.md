@@ -155,10 +155,11 @@ bc7enc_rdo: bc7e u6 −28.4% → −29.4%, `-e` −26.7% → −27.9%, at 22.8-3
 
 Chunk boundaries cost little: on Kodak-24 BC5 (before frozen literals), 64 KiB chunks are −0.78% BD-rate
 against the default 16 KiB and a single chunk per image −0.86% (BC1: −0.54%), but with 24 chunks per image on
-20 threads larger chunks are slower (32 KiB: 13.3 s vs 10-12.5 s for λ 0.5 over the corpus). An earlier note
-here put 64 KiB at −2.0%; that does not reproduce at the current defaults. Seeding each chunk's rate model with
-the preceding blocks as the base encoder left them made it much worse (+2.9% at 16 KiB): RDO copies those
-blocks, and the thread optimizing them changes many.
+20 threads larger chunks are slower (32 KiB: 13.3 s vs 10-12.5 s for λ 0.5 over the corpus; measured before
+the chunk pool, which runs every level's chunks, and every input's when `encode` gets several, in one
+longest-first queue). An earlier note here put 64 KiB at −2.0%; that does not reproduce at the current
+defaults. Seeding each chunk's rate model with the preceding blocks as the base encoder left them made it much
+worse (+2.9% at 16 KiB): RDO copies those blocks, and the thread optimizing them changes many.
 
 
 ### BC4 and BC5
@@ -610,7 +611,13 @@ not the base encoder. It was 7-9% (+8.2%,
   6: on the 6 images +3.9% → +2.8% at RMSE and −2.4% → −3.5% at SSIM (with the learned ranker); Kodak-24
   BD-rate −0.22% vs the ranker alone at 1.06× the time. 128 KiB chunks would add another −1.0% to −1.3% BD-rate
   at the same CPU time (6-image Oodle subset: +2.1% / −4.5%), but fewer, longer chunks leave threads idle: 1.4-1.5×
-  the wall time at 20 threads, so BC7 chunks stay 64 KiB.
+  the wall time at 20 threads, so BC7 chunks stay 64 KiB. Re-measured with every level's chunks in one pool:
+  −0.86% / −1.03% BD-rate (RMSE-PSNR / SSIM, Kodak-24 total curves; per image −0.4% to −1.8%),
+  equal-RMSE λ 10-40 −1.6/−1.0/−1.6/−2.3% → −1.9/−1.5/−2.1/−2.9%, equal SSIM −3.6/−2.2/−1.7/−1.2% →
+  −4.2/−2.9/−2.4/−2.0%. All 24 images in one process take the same wall time (best of 5: 7.88 s against 7.85 s,
+  median 8.40 against 8.12 s, 22 threads, λ 1 with mips), but one image at a time is still 1.6× (best per image
+  23.6 s against 14.5 s for the 24): an image's work is mostly three top-level chunks of 8192 blocks and one of
+  6144 at level 1, so most threads idle. So 64 KiB stays the default.
 - the smooth-block weight's shape (all formats). The linear ramp gave flat blocks 5× and blocks at channel std
   14 or more nothing, so gradual-but-textured blocks got no protection while the flattest were over-weighted:
   turning the weight down only moved error from SSIM to RMSE (`--smooth-scale 1` +2.1% / +7.5%, 2.5 +2.0% /

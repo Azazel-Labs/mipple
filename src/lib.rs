@@ -36,6 +36,7 @@ pub mod pipeline;
 pub mod prep;
 pub mod ranker;
 pub mod rdo;
+mod sched;
 pub mod simd;
 pub mod surface;
 pub mod synth;

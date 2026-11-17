@@ -23,7 +23,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Encode an image to a KTX2 file (DDS for BC formats, .astc for ASTC; by extension).
+    /// Encode an image to a KTX2 file (DDS for BC formats, .astc for ASTC; by extension), or
+    /// several images to KTX2 files in a directory.
     Encode(EncodeArgs),
     /// Decode one mip level of a KTX2, DDS or .astc file to PNG (BC6H also to Radiance .hdr, by
     /// extension).
@@ -201,7 +202,11 @@ impl RdoArgs {
 
 #[derive(Args)]
 struct EncodeArgs {
-    input: PathBuf,
+    /// Input image(s). Several are encoded together, their RDO chunks sharing the threads (the same
+    /// files as encoding each alone), into KTX2 files named after them in the --output directory.
+    #[arg(required = true)]
+    input: Vec<PathBuf>,
+    /// Output file, or with several inputs the directory for their KTX2 files.
     #[arg(short, long)]
     output: PathBuf,
     #[arg(short, long, value_enum, default_value_t = Format::Bc7)]
@@ -668,7 +673,10 @@ fn score_hdr(
 /// from sRGB unless `--linear`, or for `bc6h-sf16` stored as `(2u - 255) / 255`).
 fn encode_bc6h(a: &EncodeArgs) -> Result<()> {
     let signed = a.format.is_signed();
-    let src = HdrSurface::load_as(&a.input, a.linear, signed)?;
+    let [input] = &a.input[..] else {
+        bail!("BC6H encodes one input at a time");
+    };
+    let src = HdrSurface::load_as(input, a.linear, signed)?;
     let mut opts = EncodeOptions::new(a.format);
     opts.effort = a.effort;
     opts.mips = !a.no_mips;
@@ -700,7 +708,7 @@ fn encode_bc6h(a: &EncodeArgs) -> Result<()> {
     let stops = hdr::exposure_range(&rep);
     println!(
         "{} -> {}: {}x{} {}, {} level(s)",
-        a.input.display(),
+        input.display(),
         a.output.display(),
         tex.width,
         tex.height,
@@ -742,8 +750,22 @@ fn encode(a: EncodeArgs) -> Result<()> {
     if a.format.is_bc6h() {
         return encode_bc6h(&a);
     }
-    let is_dds = has_ext(&a.output, "dds");
-    let is_astc_file = has_ext(&a.output, "astc");
+    let outputs: Vec<PathBuf> = if let [_] = &a.input[..] {
+        vec![a.output.clone()]
+    } else {
+        std::fs::create_dir_all(&a.output).with_context(|| format!("creating {}", a.output.display()))?;
+        let outs: Vec<PathBuf> = a
+            .input
+            .iter()
+            .map(|i| a.output.join(i.file_stem().unwrap_or_default()).with_extension("ktx2"))
+            .collect();
+        if let Some(dup) = (1..outs.len()).find(|&k| outs[..k].contains(&outs[k])) {
+            bail!("two inputs would both write {}", outs[dup].display());
+        }
+        outs
+    };
+    let is_dds = has_ext(&outputs[0], "dds");
+    let is_astc_file = has_ext(&outputs[0], "astc");
     if is_dds && !dds::supports(a.format) {
         bail!(
             "DDS has no {} format (it carries BC formats only, not ETC2, EAC or ASTC); write KTX2 instead",
@@ -762,7 +784,6 @@ fn encode(a: EncodeArgs) -> Result<()> {
     if is_astc_file && a.prep != mipple::ktx2::PrepMode::Off {
         eprintln!("note: --prep applies to KTX2 only; the .astc file stores plain blocks");
     }
-    let surface = Surface::load(&a.input)?;
     let mut opts = EncodeOptions::new(a.format);
     opts.effort = a.effort;
     opts.entropy = a.entropy;
@@ -789,11 +810,41 @@ fn encode(a: EncodeArgs) -> Result<()> {
     };
     opts.rdo.verify_zstd_level = (a.zstd > 0).then_some(a.zstd);
 
+    let surfaces = a.input.iter().map(|i| Surface::load(i)).collect::<Result<Vec<_>>>()?;
     // Start rayon's worker threads before timing, as a long-running host application would.
     rayon::broadcast(|_| ());
     let t = Instant::now();
-    let (tex, report) = pipeline::encode(&surface, &opts);
+    let items: Vec<(&Surface, &EncodeOptions)> = surfaces.iter().map(|s| (s, &opts)).collect();
+    let encoded = pipeline::encode_batch(&items);
     let encode_secs = t.elapsed().as_secs_f64();
+    for (((input, output), surface), (tex, report)) in a.input.iter().zip(&outputs).zip(&surfaces).zip(encoded) {
+        write_encoded(&a, &opts, input, output, surface, &tex, &report, encode_secs, t)?;
+    }
+    if a.input.len() > 1 {
+        println!(
+            "{} textures: encode {encode_secs:.6}s, total {:.6}s",
+            a.input.len(),
+            t.elapsed().as_secs_f64()
+        );
+    }
+    Ok(())
+}
+
+/// Writes one texture of [`encode`] and prints its report.
+#[expect(clippy::too_many_arguments, reason = "the pieces of one encode's report")]
+fn write_encoded(
+    a: &EncodeArgs,
+    opts: &EncodeOptions,
+    input: &std::path::Path,
+    output: &std::path::Path,
+    surface: &Surface,
+    tex: &mipple::EncodedTexture,
+    report: &pipeline::EncodeReport,
+    encode_secs: f64,
+    t: Instant,
+) -> Result<()> {
+    let is_dds = has_ext(output, "dds");
+    let is_astc_file = has_ext(output, "astc");
     let zstd = (a.zstd > 0).then_some(a.zstd);
     let sc_params = if a.format.is_astc() {
         // No entropy reduction.
@@ -817,7 +868,7 @@ fn encode(a: EncodeArgs) -> Result<()> {
         )
     };
     let bytes = if is_dds {
-        dds::write(&tex)?
+        dds::write(tex)?
     } else if is_astc_file {
         let (bw, bh) = tex.format.block_dims();
         astc::file::write(&astc::file::AstcFile {
@@ -828,18 +879,18 @@ fn encode(a: EncodeArgs) -> Result<()> {
             blocks: tex.levels[0].data.clone(),
         })
     } else {
-        ktx2::write(&tex, zstd, Some(&sc_params), a.prep)?
+        ktx2::write(tex, zstd, Some(&sc_params), a.prep)?
     };
-    std::fs::write(&a.output, &bytes).with_context(|| format!("writing {}", a.output.display()))?;
+    std::fs::write(output, &bytes).with_context(|| format!("writing {}", output.display()))?;
 
     let raw: usize = tex.levels.iter().map(|l| l.data.len()).sum();
-    let dec = pipeline::decode_level(&tex, 0, opts.normal_map);
+    let dec = pipeline::decode_level(tex, 0, opts.normal_map);
     let channels = a.format.metric_channels(surface.has_alpha());
     let texels: f64 = tex.levels.iter().map(|l| l.width as f64 * l.height as f64).sum();
     println!(
         "{} -> {}: {}x{} {}{}, {} level(s)",
-        a.input.display(),
-        a.output.display(),
+        input.display(),
+        output.display(),
         tex.width,
         tex.height,
         tex.format,
@@ -865,12 +916,12 @@ fn encode(a: EncodeArgs) -> Result<()> {
     }
     println!(
         "  level 0 PSNR {:.2} dB{}",
-        metrics::psnr(&surface, &dec, &channels),
+        metrics::psnr(surface, &dec, &channels),
         if opts.normal_map {
             format!(
                 ", normal error {:.2}°, lit PSNR {:.2} dB",
-                metrics::normal_angle_error_deg(&surface, &dec),
-                metrics::normal_lit_psnr(&surface, &dec)
+                metrics::normal_angle_error_deg(surface, &dec),
+                metrics::normal_lit_psnr(surface, &dec)
             )
         } else {
             String::new()

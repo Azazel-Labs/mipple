@@ -18,8 +18,11 @@ CPU times come from paired runs on the same core.
   counted on aren't in the final output.
 - **Larger chunks as a speed or size lever.** One chunk per image is only −0.86% (BC5) and
   −0.54% (BC1) against 16 KiB chunks. On 20 threads, 32 KiB chunks were slower (13.3 s against
-  10-12.5 s for λ 0.5 over the corpus). 128 KiB chunks for BC7 are still open (see the roadmap),
-  but only together with chunk rebalancing.
+  10-12.5 s for λ 0.5 over the corpus). 128 KiB chunks for BC7 are −0.86% / −1.03% (RMSE / SSIM)
+  at the same CPU time. With every level's chunks in one pool, all 24 images in one process take
+  the same wall time as 64 KiB (7.9 s), but one image at a time is still 1.6× (23.6 s against
+  14.5 s for the 24), since an image has only three top-level chunks and one long level-1 chunk.
+  The chunk size can't follow the batch size without changing the output, so 64 KiB stays.
 - **Splitting one block's search across threads (by back distance).** This was no faster on a
   155H: the join for each block waits for the slowest core.
 - **Frozen (non-adaptive) LZ costs in the rate model.** They score even in `mipple check`

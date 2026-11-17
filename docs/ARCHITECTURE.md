@@ -254,7 +254,9 @@ refreshed into a table once per appended block, and offset and length costs are 
 1024 BC5 or 2048 BC1/BC4 blocks; BC7 uses 64 KiB, 4096 blocks, with an 8 KiB window, because it gains most from
 distant history and has time to spare against bc7enc_rdo). Chunks are sized in bytes so the window-sized stretch at each chunk
 start that cannot see the previous chunk is the same fraction for every format, and independent of the thread
-count so output does not depend on the machine. (Splitting each block's search over back distances across
+count so output does not depend on the machine. Every level's chunks, and every input's when `encode` gets several
+images, go to one pool (`sched::run`) longest first, so a small mip level or a short image fills the threads that a
+large one leaves idle at its end. (Splitting each block's search over back distances across
 threads, merged by lowest score with ties to the nearest candidate, gives identical output but did not pay on a
 hybrid 155H: the per-block join waits for the slowest core, and the split loses dedup and pruning, +19% CPU.) After RDO, each chunk is compressed with real Zstd at the output
 level; if it is not smaller than the base encoding, the chunk reverts. RDO therefore never increases the
