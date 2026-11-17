@@ -483,6 +483,14 @@ Measured on Kodak images 1-3, single thread, effort 0, unless noted. ISPC fast t
   2.8% larger than the full pass's. With all three, 8x8-12x12 still come out 0.15-0.33% larger than the
   full pass for 0.05-0.2 s, so those footprints keep the full pass. A new match costing 10 bits instead of 6
   was larger at 5x5.
+- **A lighter effort 0 at 17-30 texels, paid for with a lower λ.** At 5x4-6x5, effort 0's search (polish 3,
+  16 re-ranked patterns, line thresholds 8 / 16 / 2) is slower than astcenc fast while it wins PSNR and size,
+  so the idea was to cut the search and buy the PSNR back with a lower λ. Kodak-24 5x5 (local, one thread):
+  polish 2, -0.019 dB; 8 re-ranked patterns, -0.016 dB; none, -0.069 dB; line thresholds 16 / 16 / 8,
+  -0.072 dB; all of effort 0's settings above 30 texels, -0.153 dB. But the light pass at a lower λ buys
+  little: λ 0.1 / 0.06 / 0.03 against the default 0.15 gave +0.012 / +0.017 / +0.021 dB for files 0.7 /
+  1.2 / 1.6% larger, the same for the lighter settings. In the light pass's reweight, polish matters
+  (without it files are 0.27% larger at the same PSNR); in its refit it doesn't (4.5539 against 4.5538 bpt).
 
 ## ETC2 / EAC
 
