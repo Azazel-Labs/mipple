@@ -147,11 +147,12 @@ Open for v0.9.x:
   - Next: structural cuts to the far re-indexing and the second base, using the cross-domain research
     sweep's ideas (hash-based block matching from screen-content video coding, lower-bound cascades).
 - [x] BC7 mode 4 in the fast encoder, p-bit search in quantization, and a faster uber step. Kodak-24, λ 0, one
-  thread: effort 8 adds mode 4, 46.018 → 46.033 dB for 0.97-1.04× the CPU time (17 images up, none down). It
+  thread: effort 8 adds mode 4, 46.018 → 46.033 dB in the same time (17 images up, none down; cloud A/B on an EPYC
+  7763, 14.32 → 14.40 s). It
   also feeds RDO below λ 1, whose base is effort 8: `mipple check` λ 0.5 normal_rocks +0.84 dB and 1.7% smaller
   Zstd. Effort 9 adds the p-bit search by exact error (multi-subset fits, refits and polish, and mode 6's
   fits). It polishes the top two candidates like effort 8, not every one: 46.084 dB (24/24 images up) for
-  1.75× effort 8's time, where it was 46.018 dB at 1.10× (1.57× the old effort 9's time, paired). The uber
+  about 2× effort 8's time, where it was 46.018 dB at 1.1× (cloud A/B: 16.04 → 28.33 s, 1.77× the old effort 9's). The uber
   trials skip stretch ranges that repeat an earlier index map, with the same output. Efforts 0-5 are
   unchanged, since the GPU kernel must match them. Efforts 6-7 are unchanged too: both additions fall below
   the effort curve there (see DEADENDS). RDO's second base (λ ≥ 1) stays as it was. Open: a cheaper p-bit
@@ -220,7 +221,11 @@ Open for v0.9.x:
   - [x] Every other 2D LDR footprint (5x4, 5x5, 6x5, 8x5, 8x6, 10x5, 10x6, 10x8, 10x10, 12x10, 12x12): CLI,
     library, KTX2 (vkFormat 159-184), `.astc`, `mipple check`; the default λ interpolates by texel count,
     rising past 8x8 to 2 / 3.5 / 4.5 / 6 at 10x8 / 10x10 / 12x10 / 12x12, where effort 0 beats astcenc fast
-    on PSNR, SSIM, Zstd and Deflate size and time at once (BENCHMARKS.md, e570c02).
+    on PSNR, SSIM, Zstd and Deflate size and time at once (BENCHMARKS.md, e570c02). Effort 0 has its
+    own floor on λ from 8x5 to 10x8 (0.85-3), so it beats fast on all five there too, level on time at 8x5
+    (BENCHMARKS.md, b7b5f20).
+  - [ ] Effort 0's default light pass against fast's time at 4x4-6x6: it wins PSNR, SSIM and both sizes but
+    takes 1.0-1.3× fast's time (`-l 0` is faster than fast, with files up to 2% larger).
   - [ ] A GPU kernel, a SIMD batch encoder, HDR.
 - [x] ETC2 / EAC for mobile fallbacks: ETC2 RGB (all five modes), ETC2 RGBA8 and EAC R11 / RG11 (unsigned),
   KTX2 only, with the RDO pass. On Kodak, one thread, effort 0 is 0.37 dB ahead of Compressonator in an

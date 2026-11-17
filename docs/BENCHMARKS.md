@@ -341,7 +341,7 @@ On kodim01 mipple's top effort beats rgbcx L18 on high-variance blocks and loses
 Every one of the 33 competitor configs is beaten on both PSNR and speed by some mipple effort. The last one to fall
 was ISPC BC1 (`ispc_bc1`): mipple effort 0 is 0.34 dB better (36.05 vs 35.71) and now slightly faster (467 vs
 450 Mpix/s; it was 3% slower before the change below). BC7: effort 8 beats bc7e u6 (46.02 dB in 33.4 s vs
-46.01 dB in 38.7 s; mode 4, added since, gives +0.015 dB for 0.97-1.04× the time), and effort 6 beats ISPC
+46.01 dB in 38.7 s; mode 4, added since, gives +0.015 dB in the same time: cloud A/B 0.994×), and effort 6 beats ISPC
 `slow` (45.64 vs 45.63 dB, 6.6× faster).
 
 The BC1 effort-0 speedup came from dependency chains, not arithmetic: the line fit summed 16 texels per
@@ -1032,6 +1032,26 @@ one cloud EPYC 9V74 (same setup, against fast and thorough):
   SSIM, files 1.8-4.0% smaller after Zstd (2.6-4.9% after Deflate), in 71-82% of its time.
 - **Effort 5 against thorough:** 0.07-0.12 dB behind with lower SSIM, but files 9-13% smaller after Zstd, in
   42-58% of its time.
+
+At b7b5f20 effort 0 gets its own floor on the default λ from 8x5 to 10x8 (0.85 at 8x5, 1.5 at 8x6, 2 at 10x5,
+3 at 10x6, 8x8 and 10x8; effort 1 and up keep the table above). Re-run on one cloud EPYC 9V45 (same setup)
+against fast, with the previous default as the base row:
+
+| footprint | astcenc fast | mipple effort 0 | effort 0 before (3ab7142) |
+| --- | --- | --- | --- |
+| 6x6 | 37.657 / .98337 / 3.205 / 3.262 / 1.48 | 37.664 / .98517 / 3.198 / 3.240 / 1.51 | (unchanged) |
+| 8x5 | 36.807 / .97961 / 2.772 / 2.826 / 1.47 | 36.832 / .98109 / 2.766 / 2.799 / 1.48 | 36.900 / .98224 / 2.905 / 2.942 / 1.43 |
+| 8x6 | 35.525 / .96978 / 2.343 / 2.380 / 1.68 | 35.547 / .97288 / 2.213 / 2.235 / 1.45 | 35.668 / .97554 / 2.434 / 2.460 / 1.40 |
+| 10x5 | 35.144 / .96202 / 2.162 / 2.200 / 1.83 | 35.206 / .96939 / 2.096 / 2.116 / 1.43 | 35.364 / .97331 / 2.355 / 2.380 / 1.37 |
+| 10x6 | 34.021 / .95117 / 1.838 / 1.866 / 1.93 | 34.118 / .95911 / 1.684 / 1.698 / 1.37 | 34.307 / .96512 / 1.968 / 1.985 / 1.31 |
+| 8x8 | 33.682 / .95448 / 1.742 / 1.770 / 1.74 | 33.753 / .95655 / 1.562 / 1.575 / 1.35 | 33.926 / .96235 / 1.830 / 1.846 / 1.30 |
+| 10x8 | 32.455 / .93851 / 1.399 / 1.421 / 1.72 | 32.689 / .94558 / 1.309 / 1.318 / 1.29 | 32.735 / .94765 / 1.374 / 1.384 / 1.28 |
+
+- **8x6 to 10x8:** effort 0 is now ahead of fast on all five columns: +0.02 to +0.23 dB, higher SSIM, files
+  3.1-10.3% smaller after Zstd (3.8-11.0% after Deflate), in 71-86% of its time. Before, its files were
+  1.9-12.6% larger after Zstd.
+- **8x5 and 6x6:** ahead on PSNR, SSIM and both sizes (Zstd 0.2% smaller), level on time (1.48 vs 1.47 s and
+  1.51 vs 1.48 s here; 2.40 vs 2.48 s for 8x5 on an EPYC 7763).
 
 Scoring astcenc's files exposed a decoder bug, fixed: a 2- or 3-partition block may spell equal CEMs the long
 way (with the extra CEM bits below the weights), and the decoder read those blocks with the short form's
