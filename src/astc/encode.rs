@@ -1025,6 +1025,59 @@ fn polish_parts<const W: bool, const E: bool>(
     sym: &mut Symbolic,
     passes: usize,
 ) -> u32 {
+    POLISH.with_borrow_mut(|b| {
+        let b = b.get_or_insert_with(|| {
+            Box::new(PolishBuf {
+                sums: [[0; MAX_TEXELS]; 2],
+                xs: [I16x8::splat(0); MAX_TEXELS],
+                pos: [0; MAX_TEXELS],
+                live: [0; LANES],
+                wl: [[0; LANES]; 2],
+                xl: [[0; LANES]; 4],
+                errp: [[0; MAX_TEXELS]; 2],
+            })
+        });
+        polish_in::<W, E>(b, t, lay, grid, sym, passes)
+    })
+}
+
+/// [`polish_parts`]'s lanes: partition `p`'s texels are lanes `seg[p]..seg[p + 1]`, each start a
+/// multiple of eight.
+const LANES: usize = MAX_TEXELS + 24;
+
+/// [`polish_parts`]'s per-texel state, kept per thread: a call fills only the texels and lanes it
+/// reads (about 6.5 KB zeroed per call when it lived on the stack).
+struct PolishBuf {
+    sums: [[u16; MAX_TEXELS]; 2],
+    xs: [I16x8; MAX_TEXELS],
+    pos: [u8; MAX_TEXELS],
+    live: [i16; LANES],
+    wl: [[i16; LANES]; 2],
+    xl: [[i16; LANES]; 4],
+    errp: [[i32; MAX_TEXELS]; 2],
+}
+
+thread_local! {
+    static POLISH: std::cell::RefCell<Option<Box<PolishBuf>>> = const { std::cell::RefCell::new(None) };
+}
+
+fn polish_in<const W: bool, const E: bool>(
+    buf: &mut PolishBuf,
+    t: &Texels,
+    lay: &Layout,
+    grid: &Grid,
+    sym: &mut Symbolic,
+    passes: usize,
+) -> u32 {
+    let PolishBuf {
+        sums,
+        xs,
+        pos,
+        live,
+        wl,
+        xl,
+        errp,
+    } = buf;
     let tb = tables();
     let q = sym.mode.quant as usize;
     let cq = sym.color_quant as usize;
@@ -1048,7 +1101,6 @@ fn polish_parts<const W: bool, const E: bool>(
     });
     // Each texel's infill sum (16 times its weight, plus the rounding 8), so a grid point's step
     // moves its texels' sums by its tap weight times the step.
-    let mut sums = [[0u16; MAX_TEXELS]; 2];
     for (pl, sp) in sums.iter_mut().enumerate().take(planes) {
         for (o, tap) in sp.iter_mut().zip(&grid.taps[..n]) {
             let mut v = 8u32;
@@ -1072,7 +1124,6 @@ fn polish_parts<const W: bool, const E: bool>(
         eps[p] = sym_endpoints(sym, p);
         (base[p], slope[p]) = lanes_of(&eps[p]);
     }
-    let mut xs = [I16x8::splat(0); MAX_TEXELS];
     for (x, p) in xs.iter_mut().zip(&t.px[..n]) {
         *x = I16x8::from_array(std::array::from_fn(|l| p[l % 4] as i16));
     }
@@ -1086,7 +1137,6 @@ fn polish_parts<const W: bool, const E: bool>(
     // The texels by partition, eight lanes at a time: partition `p`'s are lanes `seg[p]..seg[p +
     // 1]` (each start a multiple of eight; `live` masks off the padding), texel `i` is lane
     // `pos[i]`, with its weight per plane in `wl` and its channels in `xl`.
-    const LANES: usize = MAX_TEXELS + 24;
     let mut seg = [0usize; 4];
     let mut cnt = [0usize; 3];
     for &l in &lay.labels[..n] {
@@ -1095,10 +1145,11 @@ fn polish_parts<const W: bool, const E: bool>(
     for p in 0..parts {
         seg[p + 1] = seg[p] + cnt[p].next_multiple_of(8);
     }
-    let mut pos = [0u8; MAX_TEXELS];
-    let mut live = [0i16; LANES];
-    let mut wl = [[0i16; LANES]; 2];
-    let mut xl = [[0i16; LANES]; 4];
+    let used = seg[parts];
+    live[..used].fill(0);
+    for v in wl.iter_mut().chain(xl.iter_mut()) {
+        v[..used].fill(0);
+    }
     let mut fill = seg;
     for i in 0..n {
         let p = lay.labels[i] as usize;
@@ -1114,7 +1165,6 @@ fn polish_parts<const W: bool, const E: bool>(
         }
     }
     // Each texel's error over the channels of each plane.
-    let mut errp = [[0i32; MAX_TEXELS]; 2];
     for pl in 0..planes {
         for i in 0..n {
             errp[pl][i] = texel_err(&base, &slope, i, pl, sums[pl][i] >> 4);
