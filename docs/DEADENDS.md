@@ -300,6 +300,15 @@ mipple effort 0 scores 45.18 dB in 0.385 s. (The 20-image results are in BENCHMA
 - **EXR input through the `image` crate's `exr` feature.** It raised iteration builds from 2-4
   minutes to about 22. Radiance `.hdr` covers the test corpus. EXR could return through a
   separate helper crate or binary.
+- **A BC6H GPU compute kernel (WGSL, `gpu` feature).** The GPU must write the CPU encoder's
+  blocks exactly, so the CPU path was first moved to exact integer arithmetic (endpoint fits,
+  quantization and index projection). That made the CPU encoder 1.15-1.32x slower on one pinned
+  core (local, loaded machine; an estimate), with unchanged quality. On a 4096x2048 HDR image the
+  kernel on an Intel Arc iGPU against 20 CPU threads: effort 0 82 vs 34 ms, effort 1 132 vs 138 ms,
+  effort 2 173 vs 232 ms. A small win at effort 2 does not pay for a slower CPU path everywhere.
+  Not merged; the work is on branch `wt/bc6h-gpu` (cda1db4). On the way, solving the exact
+  least-squares refit's slope on the 9-bit cut of each texel alone (without the slope on the bits
+  the cut drops) lost 1.36 dB (BC6H) and 3.39 dB (BC6H_SF16) on ui_alpha at λ 0.
 
 ## ASTC LDR
 

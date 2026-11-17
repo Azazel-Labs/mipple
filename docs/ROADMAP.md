@@ -287,6 +287,8 @@ Open for v0.9.x:
   Next: BC7 modes 3/0/2/5 up to effort 8 (where the GPU should win; a workgroup per block, a
   thread per candidate) and the RDO alternates, BC1 efforts 2+ (needs per-lane cluster-fit pruning
   and exact split scoring).
+  Tried: BC6H (exact-integer CPU path 1.15-1.32x slower; the Arc iGPU only wins at effort 2; see
+  DEADENDS).
 
 ## v1.2: "output B": latent-space supercompression + transcoder
 
