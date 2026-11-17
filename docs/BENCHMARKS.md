@@ -113,9 +113,11 @@ or below each value and the sum of their distances below it, and summing by part
 LZ-costed (4 / 16: −0.18% / −0.23% against −0.22%; most far wins are a better endpoint pair, not cheaper
 bytes), and the scan is skipped when the near search has already cut J to 0.7 of its start (as the BC7 far
 search is gated at 0.8). Kodak-24 BD-rate (λ 0.5-8): BC4 −0.20% Zstd / −0.20% Deflate, BC5 −0.56% / −0.54%,
-for 1.13× / 1.08× the time (λ 2, 3 images, one loaded P-core, ±5%; ungated 1.19× / 1.16× for −0.22% / −0.56%).
+for 1.115× / 1.101× the time at λ 2 (cloud A/B, ec28caa against 9868e5d, Xeon 6973P-C, Kodak 1-12, one pinned
+thread; ungated, locally, 1.19× / 1.16× for −0.22% / −0.56%).
 The gain is at λ ≤ 2; at λ 8 the size is up to 0.14% larger at 0.03-0.04 dB more PSNR. The compete times
-above predate it; BC5's slowest setting (9.8 s) was only 9% under bc7enc_rdo's fastest.
+above predate it; BC5's slowest setting (9.8 s) was only 9% under bc7enc_rdo's fastest, and scaled by the
+cloud A/B's 1.10× it comes to about 10.8 s, level with it (an estimate; not re-timed side by side).
 
 Deeper BC5 search: BC5's window is now 3072 bytes, so its search reaches 192 blocks instead of 128 (Kodak-24
 BD-rate −2.8%; 256 blocks: −3.6%). It became affordable by making each back-reference cheaper, all
@@ -822,9 +824,9 @@ images (mipple's encode loop; process wall time for Compressonator, which includ
 | mipple effort 9 | 37.776 | 0.98104 | 3.081 | 131 |
 | Compressonator | 36.700 | 0.98103 | 3.013 | 33.6 |
 
-These times predate the faster ETC2 encoder (byte-identical output; ROADMAP). On one pinned core of a busy
-machine, by process CPU time on Kodak 1-6 (best of 3, runs spread up to 40%), it takes 1.31x less at effort 0
-and 1.6-2.0x less at efforts 1-9; the table is not re-run.
+These times predate the faster ETC2 encoder (byte-identical output; ROADMAP). A cloud A/B (Xeon 6973P-C, Kodak
+1-12, one pinned thread) measured 1.327× less time at the default effort and 1.740× at λ 1; locally it is
+1.6-2.0× less at efforts 1-9. The table is not re-run.
 
 Effort 0 (ETC1 modes and planar only, two exact candidates per subblock) is 0.37 dB ahead of Compressonator
 in an eighth of its time; effort 1 adds T and H and is 0.94 dB ahead in half its time. Compressonator's blocks

@@ -170,7 +170,7 @@ Open for v0.9.x:
   0.1% (DEADENDS.md).
 - [x] **Far endpoints for BC4/BC5:** each pair's exact error in a few operations (a per-block prefix table summed
   over the palette's midpoints), only the 8 lowest LZ-costed, gated at 0.7 of the starting J: Kodak-24 BD-rate
-  BC4 −0.20%, BC5 −0.56% for 1.13× / 1.08× the time (the interval bound: BC4 −0.38% for 1.4×).
+  BC4 −0.20%, BC5 −0.56% for 1.115× / 1.101× the time at λ 2 (cloud A/B) (the interval bound: BC4 −0.38% for 1.4×).
 - [ ] **Far index patterns for BC1:** Oodle's far index-pattern reuse (about half mipple's distinct BC1 index
   patterns on kodim18) still needs a cheap way to find patterns that fit. Refit candidates over 2048 blocks:
   −0.17%, several times slower; with a lower bound on each pattern's error (least-squares fit from popcounts
@@ -267,9 +267,10 @@ Open for v0.9.x:
     H error and selectors come from one pass, and the descent reuses the unchanged group's errors. Refitting
     another block's selectors uses per-selector moments (count, Σx, Σx²) and returns its error, as does
     re-choosing the selectors, so those RDO candidates skip the decode; EAC refits score an unclamped palette in
-    closed form. One pinned core on a busy machine, process CPU time on 6 Kodak images: ETC2 RGB 1.31x less at
-    effort 0, 1.6-2.0x at efforts 1-9, 1.85x / 1.92x at λ 1 / 4; RGBA8 1.75-1.93x; RGB A1 1.61x at λ 1 (then
-    1.12x more at ETC2 RGB λ 1 from the refit running across tables); EAC R11 1.44x at λ 1.
+    closed form. Cloud A/B (ec28caa against 9868e5d, Xeon 6973P-C, Kodak 1-12, one pinned thread, 12/12
+    identical each): ETC2 RGB 1.327× less time at the default effort, 1.740× at λ 1; RGBA8 1.697× at λ 1; EAC
+    R11 1.293× at λ 1. Local estimates on a busy machine for the rest: 1.6-2.0× at efforts 1-9, RGB A1 1.61× at
+    λ 1.
   - [ ] A SIMD batch encoder (eight blocks per call, as BC1/BC6H) and a GPU kernel. The per-block kernels
     already run 8 or 16 texels wide; what a batch would widen is the scalar glue between them (shortlists, the
     T/H descent), which must keep its order to stay byte-identical.
