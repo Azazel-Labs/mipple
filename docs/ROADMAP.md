@@ -165,9 +165,13 @@ Open for v0.9.x:
 - [x] **Smarter entropy reduction** (tried, not merged): RDO already chooses each block's start by J among
   three bases, so a rate-aware weight, a fourth base or a bias on the start moved Kodak-24 BD-rate by under
   0.1% (DEADENDS.md).
-- [ ] **Wider searches elsewhere:** far endpoints for BC4 (−0.38%, 1.4×) need a tighter bound, and Oodle's far
-  index-pattern reuse (about half mipple's distinct BC1 index patterns on kodim18) needs a cheap way to find
-  index patterns that fit (refit candidates over 2048 blocks: −0.17%, several times slower).
+- [x] **Far endpoints for BC4/BC5:** each pair's exact error in a few operations (a per-block prefix table summed
+  over the palette's midpoints), only the 8 lowest LZ-costed, gated at 0.7 of the starting J: Kodak-24 BD-rate
+  BC4 −0.20%, BC5 −0.56% for 1.13× / 1.08× the time (the interval bound: BC4 −0.38% for 1.4×).
+- [ ] **Far index patterns for BC1:** Oodle's far index-pattern reuse (about half mipple's distinct BC1 index
+  patterns on kodim18) still needs a cheap way to find patterns that fit. Refit candidates over 2048 blocks:
+  −0.17%, several times slower; with a lower bound on each pattern's error (least-squares fit from popcounts
+  and subset sums): −0.08% for 1.18× the RDO time (DEADENDS).
 - [x] Rebalance RDO chunks for many threads without making output depend on the thread count (BC5 on Kodak:
   24 chunks on 20 threads run as two uneven rounds). Every level's chunks (and every input's, when `encode`
   gets several) now go to one longest-first pool, and all CPU bases run before it in parallel; chunk

@@ -88,10 +88,11 @@ pub struct RdoParams {
     /// per-format default ([`RdoParams::refine_back_for`]); 0 disables it. For ASTC, how far back
     /// the reweight and refit candidates look instead (default 256).
     pub refine_back: Option<usize>,
-    /// Beyond `max_back`, try the endpoints of earlier blocks up to this far back (capped by the
-    /// window), re-indexed: each distinct pair once, at its nearest position, and only when a
-    /// cheap lower bound on its error leaves it a chance. `None` picks a per-format default
-    /// ([`RdoParams::far_back_for`]); 0 disables it. BC1/BC4/BC5 only.
+    /// Beyond `max_back`, try the endpoints of earlier blocks up to this far back (BC1/BC7: capped
+    /// by the window), re-indexed: each distinct pair once, at its nearest position, and only when
+    /// its error leaves it a chance (BC1: a cheap lower bound; BC4/BC5: the exact error, and only
+    /// the lowest few). `None` picks a per-format default ([`RdoParams::far_back_for`]); 0
+    /// disables it. BC1/BC4/BC5/BC7 only.
     pub far_back: Option<usize>,
     /// Channel standard deviation at which a block gets half of `smooth_scale`'s extra weight
     /// (see [`smooth_factor`]).
@@ -315,10 +316,12 @@ impl RdoParams {
     /// BD-rate −0.55% for 1.09× the time, −0.59% at 2048 blocks for 1.16×) and the whole 16 KiB
     /// window for BC7 (1024 blocks: past `max_back`, whole-block copies and endpoint re-indexes
     /// only; Kodak-8 BD-rate −1.46% for 1.25× the time, −0.85% at 512 blocks for 1.07×, −1.67% at
-    /// 2048), off for BC4 (−0.38% for 1.4× the time) and BC5 (no time to spare).
+    /// 2048), and 1024 blocks for BC4/BC5, past their windows (exact errors, only the
+    /// [`FAR_TOP_K`] lowest LZ-costed, gated by [`FAR4_GATE`]; Kodak-24 BD-rate BC4 −0.20%, BC5
+    /// −0.56% for 1.13× / 1.08× the time).
     pub fn far_back_for(&self, format: Format) -> usize {
         self.far_back.unwrap_or(match format {
-            Format::Bc1 | Format::Bc7 => 1024,
+            Format::Bc1 | Format::Bc4 | Format::Bc5 | Format::Bc7 => 1024,
             _ => 0,
         })
     }
@@ -1804,13 +1807,15 @@ fn pair<'a>(base: Option<&'a bc7::Bc7Block>, prev: Option<&'a (bc7::Bc7Block, Bl
 }
 
 /// Endpoint pairs of a chunk's finished blocks, for the far-endpoint search. Fields are BC1's
-/// endpoints or each BC4/BC5 half's. Per position and field: the decoded endpoints, scaled by the
-/// square roots of the channel weights so plain distances are weighted errors, and whether it is
-/// the latest occurrence of that pair.
+/// endpoints or each BC4/BC5 half's. Per position and field: whether it is the latest occurrence
+/// of that pair and (BC1) the decoded endpoints, scaled by the square roots of the channel weights
+/// so plain distances are weighted errors.
 struct FarEndpoints {
     format: Format,
     fields: usize,
     seg: Vec<[f32; 6]>,
+    /// BC4/BC5: each field's palette.
+    pal: Vec<Pal8>,
     latest: Vec<bool>,
     last: std::collections::HashMap<FieldKey, usize>,
     sw: [f32; 3],
@@ -1827,7 +1832,8 @@ impl FarEndpoints {
         Self {
             format,
             fields,
-            seg: Vec::with_capacity(cap * fields),
+            seg: Vec::with_capacity(if format == Format::Bc1 { cap } else { 0 }),
+            pal: Vec::with_capacity(if format == Format::Bc1 { 0 } else { cap * fields }),
             latest: Vec::with_capacity(cap * fields),
             last: std::collections::HashMap::with_capacity(cap * fields),
             sw: [(w[0] as f32).sqrt(), (w[1] as f32).sqrt(), (w[2] as f32).sqrt()],
@@ -1839,7 +1845,11 @@ impl FarEndpoints {
     fn pop(&mut self) {
         for h in (0..self.fields).rev() {
             let (k, old) = self.log.pop().unwrap();
-            self.seg.pop();
+            if self.format == Format::Bc1 {
+                self.seg.pop();
+            } else {
+                self.pal.pop();
+            }
             self.latest.pop();
             match old {
                 Some((o, lv)) => {
@@ -1855,7 +1865,7 @@ impl FarEndpoints {
 
     fn push(&mut self, i: usize, b: &[u8; 16]) {
         for h in 0..self.fields {
-            let (k, valid, s) = if self.format == Format::Bc1 {
+            let (k, valid) = if self.format == Format::Bc1 {
                 let c0 = u16::from_le_bytes([b[0], b[1]]);
                 let c1 = u16::from_le_bytes([b[2], b[3]]);
                 let (a, z) = (bc1::unpack565(c0), bc1::unpack565(c1));
@@ -1864,15 +1874,14 @@ impl FarEndpoints {
                     s[c] = a[c] as f32 * self.sw[c];
                     s[3 + c] = z[c] as f32 * self.sw[c];
                 }
+                self.seg.push(s);
                 // 3-color blocks also have black in their palette: no simple bound, never tried.
-                ([b[0], b[1], b[2], b[3]], c0 > c1, s)
+                ([b[0], b[1], b[2], b[3]], c0 > c1)
             } else {
                 let (e0, e1) = (b[h * 8], b[h * 8 + 1]);
-                let mut s = [0f32; 6];
-                s[h] = e0 as f32 * self.sw[h];
-                s[3 + h] = e1 as f32 * self.sw[h];
+                self.pal.push(if e0 > e1 { Pal8::new(e0, e1) } else { Pal8::default() });
                 // 6-value blocks also have 0 and 255: likewise never tried.
-                ([e0, e1, 0, 0], e0 > e1, s)
+                ([e0, e1, 0, 0], e0 > e1)
             };
             let old = self.last.insert((h as u8, k), i).map(|o| {
                 let lv = std::mem::replace(&mut self.latest[o * self.fields + h], false);
@@ -1880,12 +1889,11 @@ impl FarEndpoints {
             });
             self.log.push(((h as u8, k), old));
             self.latest.push(valid);
-            self.seg.push(s);
         }
     }
 
     /// The source block's scaled mean, and the slack for palette rounding: BC1's interpolated
-    /// colors are truncated, up to 1 per channel off the segment; BC4's stay between the endpoints.
+    /// colors are truncated, up to 1 per channel off the segment.
     fn mean(&self, s: &Block) -> ([f32; 3], f32) {
         let mut m = [0f32; 3];
         for px in s {
@@ -1896,34 +1904,19 @@ impl FarEndpoints {
         for c in 0..3 {
             m[c] *= self.sw[c] / 16.0;
         }
-        let slack = if self.format == Format::Bc1 {
-            (self.sw[0] * self.sw[0] + self.sw[1] * self.sw[1] + self.sw[2] * self.sw[2]).sqrt()
-        } else {
-            0.0
-        };
+        let slack = (self.sw[0] * self.sw[0] + self.sw[1] * self.sw[1] + self.sw[2] * self.sw[2]).sqrt();
         (m, slack)
     }
 
-    /// Lower bound on the error per texel of field `h` with position `j`'s endpoints and any
-    /// indices: the mean of the chosen palette entries lies on the endpoints' segment, and the
-    /// error is at least 16 times the squared distance between the two means. None when not tried.
-    fn lower_bound(&self, j: usize, h: usize, m: &[f32; 3], slack: f32, px: &[[f32; 16]; 2]) -> Option<f64> {
+    /// Lower bound on the error per texel of BC1 position `j`'s endpoints with any indices: the
+    /// mean of the chosen palette entries lies on the endpoints' segment, and the error is at least
+    /// 16 times the squared distance between the two means. None when not tried.
+    fn lower_bound(&self, j: usize, h: usize, m: &[f32; 3], slack: f32) -> Option<f64> {
         let at = j * self.fields + h;
         if !self.latest[at] {
             return None;
         }
         let s = &self.seg[at];
-        if self.format != Format::Bc1 {
-            // One channel: every texel is at least its distance from the endpoints' interval
-            // away from any palette entry (a bound at least as tight as the mean's).
-            let (lo, hi) = (s[3 + h].min(s[h]), s[3 + h].max(s[h]));
-            let mut e = 0f32;
-            for &x in &px[h] {
-                let d = (lo - x).max(x - hi).max(0.0);
-                e += d * d;
-            }
-            return Some(e as f64 / 16.0);
-        }
         let ab = [s[3] - s[0], s[4] - s[1], s[5] - s[2]];
         let am = [m[0] - s[0], m[1] - s[1], m[2] - s[2]];
         let ll = ab[0] * ab[0] + ab[1] * ab[1] + ab[2] * ab[2];
@@ -2260,6 +2253,82 @@ impl Far7Pre {
 /// A candidate's luma error term from its bytes, distortion and decoding (if already decoded).
 type LumaPen<'a> = dyn FnMut(&[u8; 16], f64, Option<&Block>) -> f64 + 'a;
 
+/// An 8-value BC4 palette (`e0 > e1`) as [`SortedHalf::sse`] reads it: per boundary between
+/// ascending entries m and m + 1 (m = 0..7), the midpoint, the step and whether the two entries'
+/// sum is odd.
+#[derive(Clone, Copy, Default)]
+struct Pal8 {
+    e0: u8,
+    mid: [u8; 7],
+    dq: [u8; 7],
+    odd: [u8; 7],
+}
+
+impl Pal8 {
+    fn new(e0: u8, e1: u8) -> Self {
+        let (a, b) = (u32::from(e0), u32::from(e1));
+        // The palette ascending: entry m is (m e0 + (7 - m) e1) / 7, truncated.
+        let q: [u32; 8] = std::array::from_fn(|m| (m as u32 * a + (7 - m as u32) * b) / 7);
+        Self {
+            e0,
+            // A texel at the midpoint errs the same either way.
+            mid: std::array::from_fn(|m| ((q[m] + q[m + 1]) / 2) as u8),
+            dq: std::array::from_fn(|m| (q[m + 1] - q[m]) as u8),
+            odd: std::array::from_fn(|m| ((q[m] + q[m + 1]) & 1) as u8),
+        }
+    }
+}
+
+/// One channel of a source block, for the exact error of any 8-value BC4 endpoint pair with its
+/// best indices in a few operations: each palette entry takes the texels nearer it than its
+/// neighbours, a run of the sorted values, so the error is Σx² plus, per entry q with run count
+/// n and run sum S, n q² − 2 q S. Summed by parts over the 7 boundaries, each boundary between
+/// entries a < b with midpoint v = ⌊(a + b) / 2⌋ takes away (b − a) (r (a + b) − 2 S), r and S
+/// the count and sum of the texels at or below v; with a + b = 2v + odd that is
+/// (b − a) (2 G + odd r), G = r v − S = Σ (v − x) over those texels.
+#[derive(Clone, Copy)]
+struct SortedHalf {
+    /// Per value v: G | r << 16 (G ≤ 16 · 255).
+    gr: [u32; 256],
+    sum: i32,
+    sq: i32,
+}
+
+impl SortedHalf {
+    fn new(s: &Block, h: usize) -> Self {
+        let mut hist = [0u8; 256];
+        let (mut sum, mut sq) = (0, 0);
+        for t in s {
+            let x = t[h];
+            hist[usize::from(x)] += 1;
+            sum += i32::from(x);
+            sq += i32::from(x) * i32::from(x);
+        }
+        let mut gr = [0u32; 256];
+        let (mut r, mut g) = (0u32, 0u32);
+        for (x, e) in gr.iter_mut().enumerate() {
+            // Every texel below x is one further from x than from x - 1.
+            g += r;
+            r += u32::from(hist[x]);
+            *e = g | r << 16;
+        }
+        Self { gr, sum, sq }
+    }
+
+    /// Unweighted squared error of palette `p`, each texel at its nearest entry: what
+    /// [`bc4::reindex_channel_err`] reports for its endpoints.
+    #[inline]
+    fn sse(&self, p: &Pal8) -> u64 {
+        let top = i32::from(p.e0);
+        let mut e = self.sq + 16 * top * top - 2 * top * self.sum;
+        for m in 0..7 {
+            let t = self.gr[usize::from(p.mid[m])];
+            e -= i32::from(p.dq[m]) * (2 * (t & 0xffff) + (t >> 16) * u32::from(p.odd[m])) as i32;
+        }
+        e as u64
+    }
+}
+
 /// BC7 far back-references, `back + 1..=far_back` blocks back: the whole-block copy and, for a
 /// mode-6 prev, its endpoints re-indexed, the candidates that win there. Re-indexing the other
 /// modes' heads too costs about 5% more CPU for no gain (Kodak-24 vs Oodle within 0.02%).
@@ -2421,7 +2490,12 @@ fn optimize_chunk(
     };
     let mut cands = Vec::with_capacity(64);
     // Up to ~50 candidates per back-reference (BC5).
-    let far_back = p.far_back_for(format).min(window / n);
+    // BC4/BC5 far endpoints are re-indexed, so their bytes rarely match and the window does not
+    // bound them; BC1's and BC7's stay within it.
+    let far_back = match format {
+        Format::Bc4 | Format::Bc5 => p.far_back_for(format),
+        _ => p.far_back_for(format).min(window / n),
+    };
     let max_back = p.max_back_for(format).min(window / n);
     let far_on = match format {
         Format::Bc1 => w[3] == 0,
@@ -2464,9 +2538,20 @@ fn optimize_chunk(
     let mut gains: Vec<f32> = Vec::new();
     // A BC7 dump block searches the whole chunk.
     let all = if bc7 && dump { blocks.len() } else { 0 };
-    let mut seen = Seen::new((max_back + local_k + row_n + all) * 50 + if far_on { far_back } else { 0 });
+    // BC4/BC5 far candidates reach it only when they would enter the top K, a few per block (a
+    // larger table slows every insert).
+    let far_seen = match format {
+        Format::Bc1 => far_back,
+        _ => 8 * FAR_TOP_K,
+    };
+    let mut seen = Seen::new((max_back + local_k + row_n + all) * 50 + if far_on { far_seen } else { 0 });
     let mut seen_prev = Seen::new(max_back + local_k + row_n + all);
-    let mut fields = FieldsSeen::new(max_back.max(far_back) + local_k + row_n + all);
+    // Only BC7's far search memoizes fields (BC4/BC5: a larger table slows every lookup).
+    let fields_back = match format {
+        Format::Bc4 | Format::Bc5 => max_back,
+        _ => max_back.max(far_back),
+    };
+    let mut fields = FieldsSeen::new(fields_back + local_k + row_n + all);
     let mut dec = [[0u8; 4]; 16];
     let mut cdec = [[0u8; 4]; 16];
     let lambda = p.lambda as f64;
@@ -2494,6 +2579,7 @@ fn optimize_chunk(
     let mut phase = Phase::Free;
     let fast_b = defer_eps > 0.0;
     let mut pool: Vec<([u8; 16], u64)> = Vec::new();
+    let mut far_top: Vec<(f64, [u8; 16], u64)> = Vec::with_capacity(FAR_TOP_K);
     let mut la_js: Vec<usize> = Vec::new();
     // The last committed block's undo record: model snapshot, its previous bytes, base bits, bits,
     // and whether it counted as changed.
@@ -2831,8 +2917,11 @@ fn optimize_chunk(
 
         model.hint = 0;
         // Far endpoints: earlier blocks' endpoints beyond the main search, re-indexed. Each
-        // distinct pair is tried at its nearest position only, and only when a lower bound on its
-        // error (the block mean's distance from the endpoints' segment) leaves it a chance.
+        // distinct pair is tried at its nearest position only. BC1: only when a lower bound on its
+        // error (the block mean's distance from the endpoints' segment) leaves it a chance. BC4/BC5:
+        // the exact error of each pair comes cheap ([`SortedHalf`]), and only the `FAR_TOP_K`
+        // lowest-error candidates are built and LZ-costed (and pooled for the deferred pass), and
+        // only when the near search left J above `FAR4_GATE` of its start.
         if fast {
             for k in 0..pool.len() {
                 let (c, err) = pool[k];
@@ -2859,22 +2948,73 @@ fn optimize_chunk(
                 }
             }
         }
-        if far_on && i > back && !fast {
-            let (m, slack) = far.mean(s);
-            let px: [[f32; 16]; 2] = [0, 1].map(|c| std::array::from_fn(|t| s[t][c] as f32 * far.sw[c]));
+        if far_on && i > back && !fast && format != Format::Bc1 && best.0 >= FAR4_GATE * j_start {
+            far_top.clear();
+            // The FAR_TOP_K-th lowest distortion so far.
+            let mut kth = f64::INFINITY;
+            let half0 = SortedHalf::new(s, 0);
+            let halves = [half0, if far.fields == 2 { SortedHalf::new(s, 1) } else { half0 }];
+            // Fixed over the scan: best and runner change only below.
+            let t = thr(&best, &runner);
             for d in back + 1..=far_back.min(i) {
                 let j = i - d;
                 for h in 0..far.fields {
-                    let Some(lb) = far.lower_bound(j, h, &m, slack, &px) else {
+                    if !far.latest[j * far.fields + h] {
+                        continue;
+                    }
+                    // A BC5 candidate keeps base's other half.
+                    let err = u64::from(w[h]) * halves[h].sse(&far.pal[j * far.fields + h])
+                        + if far.fields == 2 { base_half[1 - h] } else { 0 };
+                    let dist = smooth * err as f64 / 16.0;
+                    if err > limit || dist >= t.min(kth) {
+                        continue;
+                    }
+                    let c = far.candidate(&base, &blocks[j], h, s, w);
+                    if same_bytes(&c, &base, 0, n)
+                        || !seen.insert(&c)
+                        || (dist + min_bits >= t && !model.may_continue(&c[..n]))
+                    {
+                        continue;
+                    }
+                    if far_top.len() < FAR_TOP_K {
+                        far_top.push((dist, c, err));
+                    } else {
+                        let worst = (0..far_top.len()).max_by(|&a, &b| far_top[a].0.total_cmp(&far_top[b].0));
+                        far_top[worst.unwrap()] = (dist, c, err);
+                    }
+                    if far_top.len() == FAR_TOP_K {
+                        kth = far_top.iter().map(|e| e.0).fold(f64::NEG_INFINITY, f64::max);
+                    }
+                }
+            }
+            far_top.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
+            for &(dist, c, err) in &far_top {
+                let t = thr(&best, &runner);
+                if dist >= t || (dist + min_bits >= t && !model.may_continue(&c[..n])) {
+                    continue;
+                }
+                if collecting {
+                    pool.push((c, err));
+                }
+                let Some((bits, rep)) = model.cost_until(&c[..n], bit_budget(t, dist, lambda)) else {
+                    continue;
+                };
+                let jj = dist + lambda * bits as f64;
+                if jj < best.0 {
+                    runner = best;
+                    best = (jj, c, bits, rep);
+                } else if jj < runner.0 {
+                    runner = (jj, c, bits, rep);
+                }
+            }
+        } else if far_on && i > back && !fast && format == Format::Bc1 {
+            let (m, slack) = far.mean(s);
+            for d in back + 1..=far_back.min(i) {
+                let j = i - d;
+                for h in 0..far.fields {
+                    let Some(lb) = far.lower_bound(j, h, &m, slack) else {
                         continue;
                     };
-                    // A BC5 candidate keeps base's other half.
-                    let lb = lb
-                        + if far.fields == 2 {
-                            base_half[1 - h] as f64 / 16.0
-                        } else {
-                            0.0
-                        };
                     let t = thr(&best, &runner);
                     if smooth * lb >= t || (16.0 * lb) as u64 > limit {
                         continue;
@@ -3262,6 +3402,17 @@ pub(crate) const VERIFY_QUICK: f64 = 0.9;
 /// BC7 far search: skipped when the near search and the picks already cut J to this fraction
 /// of its start.
 const FAR7_GATE: f64 = 0.8;
+
+/// BC4/BC5 far endpoints: skipped when the near search already cut J to this fraction of its
+/// start (Kodak-24 BD-rate, λ 0.5-8: BC4 −0.204% against −0.219% ungated, BC5 −0.555% against
+/// −0.556%, for 1.13× / 1.08× the time against 1.19× / 1.16× ungated, λ 2, ±5%; 0.8: BC4 −0.203%,
+/// BC5 −0.533%; 0.9: −0.185% / −0.418%).
+const FAR4_GATE: f64 = 0.7;
+
+/// BC4/BC5 far endpoints: how many of the lowest-error candidates are LZ-costed. Most far wins
+/// are a better endpoint pair, not cheaper bytes: BC4 Kodak-24 BD-rate (λ 0.5-8, 1024 blocks deep)
+/// −0.18% / −0.22% / −0.23% at 4 / 8 / 16.
+const FAR_TOP_K: usize = 8;
 
 /// BC1 lookahead: upcoming blocks whose base endpoints are tried (6 Kodak images: BD-rate −0.42%
 /// with the blocks around the one below, within noise of the time).
@@ -3839,6 +3990,35 @@ mod tests {
             }
         }
         assert!(ones > 1000 && twos > 1000, "copies {ones} re-indexes {twos}");
+    }
+
+    /// The sorted-run error of a BC4 endpoint pair is what re-indexing it reports.
+    #[test]
+    fn sorted_half_matches_reindex() {
+        let mut x = 0x2545_F491_4F6C_DD1Du64;
+        let mut next = move || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        for _ in 0..2000 {
+            let mut src = [[0u8; 4]; 16];
+            // Narrow and full-range blocks.
+            let (lo, span) = (next() as u8, (next() % 256) as u16 + 1);
+            for t in &mut src {
+                t[1] = (u16::from(lo) + (next() % u64::from(span)) as u16).min(255) as u8;
+            }
+            let half = SortedHalf::new(&src, 1);
+            for _ in 0..8 {
+                let (a, b) = (next() as u8, next() as u8);
+                if a <= b {
+                    continue;
+                }
+                let (_, want) = bc4::reindex_channel_err(&[a, b, 0, 0, 0, 0, 0, 0], &bc4::channel(&src, 1));
+                assert_eq!(half.sse(&Pal8::new(a, b)), want, "{a} {b} {src:?}");
+            }
+        }
     }
 
     #[test]

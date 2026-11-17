@@ -27,10 +27,29 @@ CPU times come from paired runs on the same core.
   155H: the join for each block waits for the slowest core.
 - **Frozen (non-adaptive) LZ costs in the rate model.** They score even in `mipple check`
   (λ ≤ 4) but worse at λ 2-8 (−19.8% → −19.2% against the competitor).
-- **Far index-pattern reuse via refit candidates.** Refitting endpoints to index patterns from
-  2048 blocks gains −0.17%, at several times the time. It needs a cheap way to find patterns that
-  fit before this is worth retrying.
-- **Far endpoints for BC4 without a tighter bound.** −0.38% at 1.4× the time.
+- **Far index-pattern reuse via refit candidates (BC1).** Refitting endpoints to index patterns from
+  2048 blocks gains −0.17%, at several times the time. A cheap filter did not rescue it: a lower bound
+  on the error of each pattern with any endpoints (each channel's least-squares line fit, from popcounts
+  and byte-indexed subset sums, two lookups per mask, less a slack for the truncated interpolation)
+  lets only some patterns of the 1024-block window be refit, for −0.083% (only the 8 lowest bounds:
+  −0.088%; 4: −0.069%; with a 16 KiB window: −0.060%), and the pattern search still costs about 1.4×
+  the far-endpoint search, about 1.18× the RDO time.
+- **BC4/BC5 far endpoints with only a lower bound.** Each texel's distance from the endpoint interval
+  passes 77% of the distinct pairs, even with the top-K pruning below: BC4 −0.38% at 1.4× the time
+  (−0.344% with an 8 KiB window, 1024 blocks). An O(1) form of the same bound (prefix sums over the
+  sorted texels) gave the same output and was no faster. The kept search (`FAR_TOP_K` in rdo.rs) uses
+  the exact error instead. Variants of it that did no better (BC4, 8 KiB window, interval bound,
+  against −0.295% for the 8 lowest errors): 2 / 4 / 16 candidates −0.262% / −0.275% / −0.321%;
+  ranking by error plus λ times the endpoints' literal cost −0.308%. With the exact error, pooling
+  every candidate for the deferred pass instead of the top 8: −0.230% against −0.219% (2 KiB window),
+  but every candidate must then be built. BC4's 2 KiB window had clamped the depth to 256 blocks
+  (−0.098%); an 8 KiB window adds −0.07% on top of the kept search (−0.292%) for a little more time,
+  but alone it is −0.030%, and BC5's 16 KiB window alone is +0.051%. Halving the depth to 512 blocks
+  instead of gating (`FAR4_GATE`): BC4 −0.165% for 1.14× the time, against −0.203% for 1.12× gated at 0.8.
+- **Steering BC4 far candidates towards an LZ match.** Keeping the far block's first index byte, so
+  the candidate's first 3 bytes match there: +0.285% against the plain re-index when only candidates
+  whose re-index already matched were kept, +0.187% when the byte was forced (texel 2's high index bit
+  re-picked). The matches are too short to pay for the worse indices.
 - **A 12x12 (3x3-block) window for the neighbourhood smoothness weight.** Against the four
   overlapping 8x8 windows at the same k it loses 0.5-0.9 points of BC7 size at Oodle Texture's
   RMSE (λ 10-20 fall behind Oodle) for no SSIM gain at λ ≥ 20. Large windows mask texels next to

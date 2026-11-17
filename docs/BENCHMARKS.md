@@ -101,8 +101,21 @@ distance from the block's mean color to that segment (less a slack for the trunc
 5 distinct pairs passes; 3-color pairs are skipped. Kodak-24 BD-rate (`mipple check`) −0.55% for 1.09× the
 time (2048 blocks with a 16 KiB window: −0.59%, 1.16×; trying every far block's endpoints and indices without
 the bound: −0.69%, 4×); vs bc7enc_rdo −19.8% → −20.4%. Far index patterns (refit endpoints) add only
-−0.17% at several times the cost. Not on by default for BC4, where the bound (each texel's distance from the
-endpoint interval) passes too many pairs: −0.38% for 1.4× the time. BC5 is limited by depth instead.
+−0.17% at several times the cost; a cheap lower bound on each pattern's error brings that to −0.08% for
+1.18× the RDO time (see DEADENDS).
+
+BC4/BC5 far endpoints (`--far-back` 1024, also on by default; past the 2-3 KiB windows, since a re-indexed
+block rarely matches bytes anyway). For BC4 the bound above (each texel's distance from the endpoint interval)
+passed 77% of the distinct pairs, for −0.38% at 1.4× the time. Instead, each pair's exact error with its best
+indices takes a few operations: per source block and channel, a 256-entry table gives the count of the texels at
+or below each value and the sum of their distances below it, and summing by parts over the 7 midpoints of the
+8-entry palette (stored per far block) gives the error exactly. Only the 8 lowest-error candidates are built and
+LZ-costed (4 / 16: −0.18% / −0.23% against −0.22%; most far wins are a better endpoint pair, not cheaper
+bytes), and the scan is skipped when the near search has already cut J to 0.7 of its start (as the BC7 far
+search is gated at 0.8). Kodak-24 BD-rate (λ 0.5-8): BC4 −0.20% Zstd / −0.20% Deflate, BC5 −0.56% / −0.54%,
+for 1.13× / 1.08× the time (λ 2, 3 images, one loaded P-core, ±5%; ungated 1.19× / 1.16× for −0.22% / −0.56%).
+The gain is at λ ≤ 2; at λ 8 the size is up to 0.14% larger at 0.03-0.04 dB more PSNR. The compete times
+above predate it; BC5's slowest setting (9.8 s) was only 9% under bc7enc_rdo's fastest.
 
 Deeper BC5 search: BC5's window is now 3072 bytes, so its search reaches 192 blocks instead of 128 (Kodak-24
 BD-rate −2.8%; 256 blocks: −3.6%). It became affordable by making each back-reference cheaper, all
@@ -1286,6 +1299,7 @@ Later changes:
 | Smooth weight `1 + 3 · 12² / (12² + σ²)` (was 5× ramping linearly to 1 at σ 14) | PASS: BD-rate Zstd BC1 −1.15%, BC4 −2.34%, BC5 −2.79%, BC7 −1.43% (synthetic), BC7 −3.82% (Kodak-4); same speed head-to-head on Kodak; both baselines updated |
 | BC4/BC5 RDO from an effort-8 base (`base_block_opts`) | PASS: BD-rate Zstd BC4 −0.48%, BC5 −0.49%, BC1/BC7 identical (synthetic; Kodak-24: BC4 −0.95%, BC5 −1.20%), total time 0.98× (Kodak-24 1.00×); synthetic baseline updated |
 | Deferred decision (`--defer` 0.3), neighbourhood smooth weight (`--smooth-window-std` 16), BC1 lookahead, BC7 far-search gate | PASS: BD-rate Zstd BC1 −1.67%, BC3 −1.41%, BC4 −0.18%, BC5 −1.00%, BC6H −1.00%, BC7 −1.10%, ETC2 RGB / RGBA −1.39% / −1.43%, EAC R11 / RG11 −0.21% / −0.94% (synthetic; Kodak-4 BC7 −1.47%), λ = 0 and ASTC identical, total time 1.01-1.03× (loaded machine); both baselines updated |
+| BC4/BC5 far endpoints (`--far-back` 1024 past the window, exact errors, 8 lowest LZ-costed, gate 0.7) | PASS: BD-rate Zstd BC4 −0.15%, BC5 −0.14% (Deflate −0.18% / −0.13%; synthetic; Kodak-24: BC4 −0.20%, BC5 −0.56%), λ = 0 and other formats identical; synthetic baseline BC4/BC5 rows updated |
 
 ## How to reproduce
 

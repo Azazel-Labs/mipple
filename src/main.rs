@@ -122,8 +122,8 @@ struct RdoArgs {
     #[arg(long)]
     refine_back: Option<usize>,
     /// Beyond --max-back, earlier blocks whose endpoints are tried re-indexed, each distinct pair
-    /// once (BC7 also tries whole-block copies; 0 disables; capped by --window) [default: 1024
-    /// for BC1/BC7, 0 otherwise].
+    /// once (BC7 also tries whole-block copies; 0 disables; capped by --window except for
+    /// BC4/BC5) [default: 1024 for BC1/BC4/BC5/BC7, 0 otherwise].
     #[arg(long)]
     far_back: Option<usize>,
     /// Localized search: beyond --max-back, earlier blocks of the chunk picked by the learned
