@@ -712,6 +712,18 @@ impl LzModel {
             k
         };
         let rep_of = |reps: &[usize; 3], off: usize| reps.iter().position(|&r| r == off);
+        // Every position's bucket is known up front: start loading them all. The table (512 KiB) is
+        // larger than L1 and the parse visits one bucket per position, so the loads overlap instead
+        // of stalling one by one. Local estimates on a loaded machine: ASTC 4x4's light pass spends
+        // about a third less in `cost`, BC7 RDO at λ 1 takes about 5% less time.
+        #[cfg(target_arch = "x86_64")]
+        for w in cand.windows(3) {
+            let h = hash3(w[0], w[1], w[2]);
+            // SAFETY: a prefetch is only a hint; `h` is in bounds of `head` anyway.
+            unsafe {
+                std::arch::x86_64::_mm_prefetch::<{ std::arch::x86_64::_MM_HINT_T0 }>(self.head.as_ptr().add(h).cast())
+            };
+        }
         let mut bits = 0.0;
         let mut reps = self.state.reps;
         let mut tail = false;
