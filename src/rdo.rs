@@ -55,6 +55,12 @@ const ASTC_E0_LAMBDA: [(f32, f32); 6] = [
     (80.0, 3.0),
 ];
 
+/// The largest ASTC footprint, in texels, whose light pass runs [`RdoParams::light`]'s quick form.
+/// On Kodak-24 at effort 0 (local, one thread) the quick form's files are 0.08-0.29% smaller than
+/// the full pass's at 4x4-8x5, for 0.004-0.006 dB, in 0.2-0.4 s less; at 8x8, 10x10 and 12x12 they
+/// are 0.15-0.33% larger, and it saves only 0.05-0.2 s.
+const LIGHT_MAX_TEXELS: u32 = 40;
+
 /// Piecewise linear through `knots` (sorted by x), flat beyond the ends.
 fn knot_interp(knots: &[(f32, f32)], x: f32) -> f32 {
     if x <= knots[0].0 {
@@ -157,6 +163,12 @@ pub struct RdoParams {
     /// reconstructed normal, 0 plain XY error. The default 4 over-weights tilted blocks, which
     /// lit PSNR on Poly Haven normal maps favors (BD-rate -1.2% vs 0, -0.3% vs 1).
     pub normal_weight: f32,
+    /// ASTC: run the light pass's quick form, set by [`RdoParams::light_astc`] when it leaves
+    /// `max_back` and `refine_back` at 1, at 4x4-8x5 (up to 40 texels). Each block tries only the
+    /// previous block: copied whole, its endpoints with this block's weights, and its weights with
+    /// endpoints refitted to this block. Rates come from a proxy rather than the LZ model's parse
+    /// (see `astc::encode::rdo`).
+    pub light: bool,
 }
 
 impl Default for RdoParams {
@@ -196,6 +208,7 @@ impl Default for RdoParams {
             defer: None,
             normal_map: false,
             normal_weight: 4.0,
+            light: false,
         }
     }
 }
@@ -240,10 +253,15 @@ impl RdoParams {
         if !format.is_astc() {
             return self;
         }
+        let (max_back, refine_back) = (self.max_back.or(Some(1)), self.refine_back.or(Some(1)));
         Self {
             lambda: Self::astc_default_lambda(format, effort),
-            max_back: self.max_back.or(Some(1)),
-            refine_back: self.refine_back.or(Some(1)),
+            max_back,
+            refine_back,
+            light: max_back == Some(1) && refine_back == Some(1) && {
+                let (bw, bh) = format.block_dims();
+                bw * bh <= LIGHT_MAX_TEXELS
+            },
             ..self
         }
     }
@@ -470,6 +488,29 @@ pub struct LzUndo {
     total: u32,
 }
 
+/// The cost in bits of a literal byte seen `count` times in `total` bytes (order-0, add-one
+/// smoothed, at most 10 bits), as [`LzModel`] prices literals.
+pub(crate) fn literal_bits(count: u32, total: u32) -> f32 {
+    let p = (count as f32 + 1.0) / (total as f32 + 256.0);
+    (-p.log2()).min(10.0)
+}
+
+/// [`literal_bits`] for every byte value, with the statistics of `sample` (as
+/// [`LzModel::set_literals`] fixes them).
+pub(crate) fn literal_costs(sample: &[u8]) -> [f32; 256] {
+    let mut counts = [0u32; 256];
+    for &b in sample {
+        counts[b as usize] += 1;
+    }
+    std::array::from_fn(|b| literal_bits(counts[b], sample.len() as u32))
+}
+
+/// The cost in bits of a match's length, `1 + 2·log2(len − 1)`, as [`LzModel`] prices it (the
+/// offset is extra).
+pub(crate) fn match_len_bits(len: usize) -> f32 {
+    1.0 + 2.0 * (len.max(1) as f32 - 1.0).log2()
+}
+
 /// A crude model of an LZ77 + entropy coder: greedy parse, order-0 literal costs,
 /// offset cost ~ log2(distance), cheaper repeat-offset matches, and near-free extension of a
 /// match that runs across block boundaries.
@@ -511,7 +552,7 @@ impl LzModel {
             total: 0,
             lit: Box::new([(256f32).log2(); 256]),
             off_log2: (0..=window.max(16)).map(|o| (o as f32).log2()).collect(),
-            len: std::array::from_fn(|l| 1.0 + 2.0 * (l.max(1) as f32 - 1.0).log2()),
+            len: std::array::from_fn(match_len_bits),
             rem: [0.0; 17],
             state: LzState::default(),
             window,
@@ -570,8 +611,7 @@ impl LzModel {
 
     fn refresh_literals(&mut self) {
         for b in 0..256 {
-            let p = (self.counts[b] as f32 + 1.0) / (self.total as f32 + 256.0);
-            self.lit[b] = (-p.log2()).min(10.0);
+            self.lit[b] = literal_bits(self.counts[b], self.total);
         }
         self.refresh_rem();
     }

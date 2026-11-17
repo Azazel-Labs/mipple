@@ -259,7 +259,12 @@ Open for v0.9.x:
     level at 5x5 and 6x5 (cloud A/B 44043405979). Layouts, QuadSums and the light pass's previous-block
     fields filled in place (f129d7b): 1.055× less time at 4x4 effort 0, 1.040× at 6x5, 1.033× at 4x4
     effort 2 (cloud A/B 44058354730, Xeon 8573C); the dominant-axis iteration as lanes (4e03e6c): 1.011-1.013×
-    (cloud A/B 44061093046, EPYC 7763). All output identical.
+    (cloud A/B 44061093046, EPYC 7763); block texels in kept memory and the RDO pass's SSE as lanes
+    (bc905be): 1.038× at 4x4 effort 0, 1.027× at 5x5, 1.028× at 6x5, 1.016× at 4x4 effort 2 (cloud A/B
+    44073666086, EPYC 9V74). All output identical. The light pass's quick form at 4x4-8x5 (each block tries
+    the previous block whole, reweighted and refitted, priced by literal costs and prefix / suffix matches
+    instead of the LZ model's parse) makes files 0.08-0.29% smaller for 0.004-0.006 dB and takes 0.2-0.4 s
+    less on Kodak-24 (local, one thread; cloud bench pending).
   - [ ] A GPU kernel, a SIMD batch encoder, HDR.
 - [x] ETC2 / EAC for mobile fallbacks: ETC2 RGB (all five modes), ETC2 RGBA8 and EAC R11 / RG11 (unsigned),
   KTX2 only, with the RDO pass. On Kodak, one thread, effort 0 is 0.37 dB ahead of Compressonator in an

@@ -23,7 +23,7 @@ use super::{
 use crate::astc::lanes::{I16x8, I32x4};
 use crate::astc::{COLOR_UNQUANT, PartitionFn, Symbolic, color_range, decode_block, decode_symbolic_tw};
 use crate::format::Format;
-use crate::rdo::{LzModel, LzState, RdoParams, RdoStats, bit_budget};
+use crate::rdo::{LzModel, LzState, RdoParams, RdoStats, bit_budget, match_len_bits};
 use crate::surface::{Rgba, Surface};
 
 /// How far back the reweight and refit candidates look (whole copies look `max_back` far). On Kodak,
@@ -495,6 +495,9 @@ fn optimize_chunk(
     srgb: bool,
     p: &RdoParams,
 ) -> RdoStats {
+    if p.light {
+        return optimize_chunk_light(fp, s, nx, first, data, srgb, p);
+    }
     let count = data.len() / 16;
     let n = fp.texels();
     let (bw, bh) = (fp.bw, fp.bh);
@@ -696,6 +699,219 @@ fn optimize_chunk(
     stats
 }
 
+/// [`RdoParams::light`]'s pass. Each block tries the previous block's encoding three ways: copied
+/// whole, its endpoints with weights chosen for this block ([`reweight`]), and its weights with
+/// endpoints refitted to this block ([`refit_to`]). Instead of the LZ model's parse, rates come from
+/// a proxy: order-0 literal costs over the chunk, plus one match each for a prefix and a suffix of
+/// 3 or more bytes shared with the previous block. A match after a match in this block or the
+/// previous one costs a repeat offset (3 bits), otherwise [`LIGHT_NEW_MATCH`], plus its length.
+///
+/// The full pass at the same settings (`-l` with `--max-back 1 --refine-back 1`) builds the same
+/// three candidates but prices each with the LZ model, which costs more than they do. On Kodak-24 at
+/// effort 0 (local, one thread) this pass gives files 0.08-0.29% smaller at 4x4-8x5 for 0.004-0.006
+/// dB (5x5: 4.554 bpt and 40.788 dB against 4.567 and 40.794), in 0.2-0.4 s less of the full
+/// pass's 0.8-1 s.
+/// Without the refit candidate it does as well on Kodak, but the synthetic gradient at 6x6 comes
+/// out 2.7 times the size (smooth ramps take the previous block's weights with new endpoints);
+/// without whole copies, files at 8x5-12x12 are 0.9-4% larger.
+fn optimize_chunk_light(
+    fp: &Footprint,
+    s: &Surface,
+    nx: usize,
+    first: usize,
+    data: &mut [u8],
+    srgb: bool,
+    p: &RdoParams,
+) -> RdoStats {
+    let count = data.len() / 16;
+    let n = fp.texels();
+    let (bw, bh) = (fp.bw, fp.bh);
+    let lit = crate::rdo::literal_costs(data);
+    let min_lit = lit.iter().copied().fold(f32::MAX, f32::min);
+    // A match's bits: a repeat offset after a match in this block or the previous one, else new.
+    let mbits = |rep: bool, l: usize| if rep { 3.0 } else { LIGHT_NEW_MATCH } + match_len_bits(l);
+    // rem[r]: the fewest bits `r` bytes can cost (cheapest literals and repeat-offset matches).
+    let mut rem = [0f32; 17];
+    for r in 1..=16 {
+        rem[r] = (3..=r).fold(min_lit + rem[r - 1], |b, l| b.min(mbits(true, l) + rem[r - l]));
+    }
+    // head_lb[rep][h]: the fewest bits a block sharing its first `h` bytes with the previous block's
+    // can cost (a match of at least `h` bytes, then any cover of the rest).
+    let head_lb: [[f32; 17]; 2] = std::array::from_fn(|r| {
+        std::array::from_fn(|h| {
+            if h < 3 {
+                rem[16]
+            } else {
+                (h..=16)
+                    .map(|l| mbits(r == 1, l) + rem[16 - l])
+                    .fold(f32::MAX, f32::min)
+            }
+        })
+    });
+    let lambda = p.lambda as f64;
+    let ratio2 = (p.max_rms_ratio as f64).powi(2);
+    let floor = (n * 4) as f64 * (p.min_rms as f64).powi(2);
+    let original = p.verify_zstd_level.map(|_| data.to_vec());
+    let mut stats = RdoStats {
+        blocks: count,
+        ..Default::default()
+    };
+    let mut px = vec![[0u8; 4]; n];
+    let mut tbuf = Box::<TexelBuf>::default();
+    let mut dec = [[0u8; 4]; MAX_TEXELS];
+    // The previous block's decode, for copying it whole.
+    let mut pdec = [[0u8; 4]; MAX_TEXELS];
+    let mut dec_tw = [[0u8; MAX_TEXELS]; 2];
+    let mut best_tw = [[0u8; MAX_TEXELS]; 2];
+    let mut prev: Option<Box<PrevSym>> = None;
+    let mut prev_bytes = [0u8; 16];
+    let mut prev_matched = false;
+    let mut spare: Vec<Box<PrevSym>> = Vec::new();
+    /// Which encoding a block keeps.
+    enum Pick {
+        Base,
+        /// The previous block's, whole.
+        Copy,
+        Built(Symbolic),
+    }
+    for i in 0..count {
+        let bi = first + i;
+        read_block(s, bw, bh, (bi % nx) as u32, (bi / nx) as u32, &mut px);
+        let t = tbuf.texels(&px, 4);
+        let bs = BlockSums::of(&t);
+        let smooth = smooth_factor(&px, p);
+        let score = |err: u64, bits: f32| smooth * err as f64 / 16.0 + lambda * bits as f64;
+        // A prefix of 3 or more bytes shared with the previous block is one match, and so is such
+        // a suffix; the bytes between are literals. Also returns whether there was a match.
+        let bits = |x: &[u8; 16]| -> (f32, bool) {
+            if i == 0 {
+                return (x.iter().map(|&b| lit[b as usize]).sum(), false);
+            }
+            let lp = x.iter().zip(&prev_bytes).take_while(|(a, b)| a == b).count();
+            if lp == 16 {
+                return (mbits(prev_matched, 16), true);
+            }
+            let ls = x
+                .iter()
+                .rev()
+                .zip(prev_bytes.iter().rev())
+                .take_while(|(a, b)| a == b)
+                .count();
+            let (mut b, mut rep, mut k0, mut k1) = (0.0, prev_matched, 0, 16);
+            if lp >= 3 {
+                (b, rep, k0) = (mbits(rep, lp), true, lp);
+            }
+            if ls >= 3 {
+                (b, rep, k1) = (b + mbits(rep, ls), true, 16 - ls);
+            }
+            (b + x[k0..k1].iter().map(|&b| lit[b as usize]).sum::<f32>(), rep)
+        };
+        // The largest error a candidate can have and still beat the best, if it costs at least
+        // `lb` bits.
+        let cap_for = |best: f64, lb: f32, limit: u64| {
+            (limit as f64).min((best - lambda * lb as f64).max(0.0) * 16.0 / smooth) as f32 * 1.001 + 1.0
+        };
+        let base: [u8; 16] = data[i * 16..i * 16 + 16].try_into().unwrap();
+        let base_sym = Symbolic::read(u128::from_le_bytes(base), bw, bh);
+        match &base_sym {
+            Some(sym) => decode_symbolic_tw(sym, bw, bh, srgb, &mut dec[..n], &mut dec_tw),
+            None => decode_block(&base, bw, bh, srgb, &mut dec[..n]),
+        }
+        let base_err = sse(&px, &dec[..n]);
+        let (base_bits, base_m) = bits(&base);
+        let limit = (base_err as f64 * ratio2 + floor) as u64;
+        let mut best = (score(base_err, base_bits), base, base_bits, base_m, Pick::Base);
+        if i > 0 && base != prev_bytes {
+            let err = sse(&px, &pdec[..n]);
+            let cb = mbits(prev_matched, 16);
+            let j = score(err, cb);
+            if err <= limit && j < best.0 {
+                best = (j, prev_bytes, cb, true, Pick::Copy);
+            }
+        }
+        if let Some(ps) = &prev {
+            let v = u128::from_le_bytes(prev_bytes);
+            let b0 = u128::from_le_bytes(base);
+            let mut cands = [None, None];
+            // The previous block's endpoints with weights for this block, unless the base has them.
+            let below = 128 - ps.sym.mode.weight_bits();
+            let mask = (1u128 << below) - 1;
+            if b0 & mask != v & mask {
+                let cap = cap_for(best.0, head_lb[prev_matched as usize][below / 8], limit);
+                cands[0] = reweight(fp, &t, &ps.lay, ps.gi, &ps.sym, &ps.eps, &bs, cap);
+            }
+            // Its weights with endpoints refitted to this block, unless the base has them.
+            if let Some(rb) = &ps.refit
+                && b0 & !mask != v & !mask
+            {
+                cands[1] = refit_to(
+                    fp,
+                    &t,
+                    &ps.lay,
+                    ps.gi,
+                    &ps.sym,
+                    rb,
+                    &bs,
+                    cap_for(best.0, rem[16], limit),
+                );
+            }
+            for (c, err) in cands.into_iter().flatten() {
+                let Some(b) = c.write() else { continue };
+                let b = b.to_le_bytes();
+                debug_assert_eq!(err as u64, {
+                    let mut d = [[0u8; 4]; MAX_TEXELS];
+                    decode_block(&b, bw, bh, srgb, &mut d[..n]);
+                    sse(&px, &d[..n])
+                });
+                let (cb, cm) = bits(&b);
+                let j = score(err as u64, cb);
+                if (err as u64) <= limit && j < best.0 {
+                    best = (j, b, cb, cm, Pick::Built(c));
+                }
+            }
+        }
+        stats.est_bits_before += base_bits as f64;
+        stats.est_bits_after += best.2 as f64;
+        if best.1 != base {
+            stats.changed += 1;
+        }
+        data[i * 16..i * 16 + 16].copy_from_slice(&best.1);
+        prev_matched = best.3;
+        // A copy leaves the previous block's fields and decode as they are.
+        let (sym, tw) = match best.4 {
+            Pick::Copy => continue,
+            Pick::Base => (base_sym, &dec_tw),
+            Pick::Built(c) => {
+                decode_symbolic_tw(&c, bw, bh, srgb, &mut dec[..n], &mut best_tw);
+                (Some(c), &best_tw)
+            }
+        };
+        pdec[..n].copy_from_slice(&dec[..n]);
+        if let Some(old) = prev.take() {
+            spare.push(old);
+        }
+        prev = sym.and_then(|s| prev_sym(fp, s, tw, &mut spare));
+        prev_bytes = best.1;
+    }
+    if let (Some(level), Some(original), true) = (p.verify_zstd_level, original, stats.changed > 0) {
+        let level = level.min(VERIFY_MAX_LEVEL);
+        let size = crate::rdo::zstd_size;
+        let (now, was) = (size(data, 1), size(&original, 1));
+        if now > was && (level == 1 || now > was + VERIFY_SLACK && size(data, level) >= size(&original, level)) {
+            data.copy_from_slice(&original);
+            stats.changed = 0;
+            stats.est_bits_after = stats.est_bits_before;
+            stats.reverted_chunks = 1;
+        }
+    }
+    stats
+}
+
+/// Bits [`optimize_chunk_light`] adds for a match's offset when no match comes just before it (a
+/// repeat offset costs 3). 6 came out smaller than 10 on Kodak-24 at 5x5 effort 0, at the same
+/// PSNR.
+const LIGHT_NEW_MATCH: f32 = 6.0;
+
 /// The check runs at most at this level, a fraction of level 19's time. It keeps or reverts the same
 /// chunks as level 19 for all 24 Kodak images (6x6, λ 0.25, window 1) and for 146 of 150 encodes of
 /// 16 Poly Haven, 6 synthetic and 8 Kodak images (4x4 to 8x8, λ 0.5 to 4); the other four end up
@@ -757,22 +973,44 @@ pub(crate) fn chunk_tasks<'a>(
 mod tests {
     use super::*;
 
-    /// Every candidate's error matches its real decode (the debug assertion in [`optimize_chunk`]),
-    /// and RDO moves blocks and lowers the estimated rate, at every footprint, with and without alpha.
+    /// Every candidate's error matches its real decode (the debug assertions in [`optimize_chunk`]
+    /// and [`optimize_chunk_light`]), and RDO moves blocks and lowers the estimated rate, at every
+    /// footprint, with and without alpha, in the full pass and the light pass.
     #[test]
     fn candidates_score_their_decode() {
-        for s in [crate::synth::bricks(64), crate::synth::cutout(64)] {
-            for format in Format::ALL.into_iter().filter(|f| f.is_astc()) {
-                let (bw, bh) = format.block_dims();
-                let mut data = super::super::encode_surface(&s, bw, bh, true, 0);
+        let images = [crate::synth::bricks(64), crate::synth::cutout(64)];
+        for format in Format::ALL.into_iter().filter(|f| f.is_astc()) {
+            for light in [false, true] {
                 let p = RdoParams {
                     lambda: 4.0,
                     verify_zstd_level: None,
                     ..Default::default()
                 };
-                let st = optimize(format, &s, true, &mut data, &p);
-                assert!(st.changed > 0, "{format}");
-                assert!(st.est_bits_after < st.est_bits_before, "{format}");
+                // The light pass's settings, at this λ rather than its default.
+                let p = if light {
+                    RdoParams {
+                        lambda: 4.0,
+                        ..p.light_astc(format, 0)
+                    }
+                } else {
+                    p
+                };
+                if p.light != light {
+                    continue;
+                }
+                // Summed over the images: the light pass, trying only the previous block, can
+                // leave the small cutout as it is.
+                let (mut changed, mut before, mut after) = (0, 0.0, 0.0);
+                for s in &images {
+                    let (bw, bh) = format.block_dims();
+                    let mut data = super::super::encode_surface(s, bw, bh, true, 0);
+                    let st = optimize(format, s, true, &mut data, &p);
+                    changed += st.changed;
+                    before += st.est_bits_before;
+                    after += st.est_bits_after;
+                }
+                assert!(changed > 0, "{format} light {light}");
+                assert!(after < before, "{format} light {light}");
             }
         }
     }

@@ -473,6 +473,16 @@ Measured on Kodak images 1-3, single thread, effort 0, unless noted. ISPC fast t
   saves, in 1.26-1.34x the time of `-l 0`. With `-l 0.15` added it is still behind at 5x5 (4.628) and
   6x5 (3.899), and takes 3.2-4.5 s per run. Whole-block copies alone barely help: the reweight and refit
   candidates carry the size win.
+- **The light pass's quick form with fewer candidates.** The quick form (`RdoParams::light`: the previous
+  block whole, reweighted and refitted, priced by literal costs and prefix / suffix matches) needs all three.
+  With the reweight alone, priced by a shared prefix only, Kodak-24 effort 0 (local, one thread) matched the
+  full pass (5x5: 4.562 bpt / 40.790 dB against 4.567 / 40.794; 6x6: 3.205 / 37.662 against 3.204 / 37.665)
+  in about 0.15 s less than with refit, but the synthetic gradient came out 97,066 bytes at 6x6 against the
+  full pass's 36,097, and 58,691 against 20,786 at 8x8: smooth ramps take the previous block's weights with
+  new endpoints. Without whole copies, Kodak-24 files at 8x5 / 8x8 / 10x10 / 12x12 were 0.9 / 4.0 / 2.9 /
+  2.8% larger than the full pass's. With all three, 8x8-12x12 still come out 0.15-0.33% larger than the
+  full pass for 0.05-0.2 s, so those footprints keep the full pass. A new match costing 10 bits instead of 6
+  was larger at 5x5.
 
 ## ETC2 / EAC
 
