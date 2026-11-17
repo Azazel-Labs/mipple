@@ -2060,12 +2060,22 @@ fn dominant(cov: &[[f32; 4]; 4]) -> [f32; 4] {
     // Scaled by the trace, no eigenvalue is above 1, so eight steps neither overflow nor need
     // normalizing on the way.
     let k = 1.0 / tr;
-    let a = cov.map(|r| r.map(|x| x * k));
+    // The scaled matrix's columns, as lanes: a step sums them weighted by `v`, in the order a row
+    // by row product would (so to the same bits).
+    let cols: [F32x4; 4] = std::array::from_fn(|j| {
+        let c: [f32; 4] = std::array::from_fn(|i| cov[i][j] * k);
+        F32x4::load(&c)
+    });
     let mut v = [0f32; 4];
     let top = (0..4).max_by(|&i, &j| cov[i][i].total_cmp(&cov[j][j])).unwrap();
     v[top] = 1.0;
     for _ in 0..8 {
-        v = std::array::from_fn(|i| a[i][0] * v[0] + a[i][1] * v[1] + a[i][2] * v[2] + a[i][3] * v[3]);
+        let s = cols[0]
+            .mul(F32x4::splat(v[0]))
+            .add(cols[1].mul(F32x4::splat(v[1])))
+            .add(cols[2].mul(F32x4::splat(v[2])))
+            .add(cols[3].mul(F32x4::splat(v[3])));
+        s.store(&mut v);
     }
     let len = v.iter().map(|x| x * x).sum::<f32>().sqrt();
     if len < 1e-20 {
@@ -2730,10 +2740,15 @@ pub fn encode_block(fp: &Footprint, px: &[Rgba], srgb: bool, effort: u8) -> [u8;
                     if x >= top[short - 1] {
                         continue;
                     }
-                    // In order (keys are unique but for the `empty` ones); the last drops out.
-                    let at = top.partition_point(|&k| k < x);
-                    top.copy_within(at..short - 1, at + 1);
-                    top[at] = x;
+                    // In order (keys are unique but for the `empty` ones); the last drops out. Moved
+                    // down from the end: a few places, where a slice move is a library call.
+                    let mut k = short - 1;
+                    top[k] = x;
+                    while k > 0 && top[k - 1] > x {
+                        top[k] = top[k - 1];
+                        top[k - 1] = x;
+                        k -= 1;
+                    }
                     thr = (top[short - 1] >> 32) as u32;
                 }
             }
