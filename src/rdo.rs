@@ -717,8 +717,8 @@ impl LzModel {
         let rep_of = |reps: &[usize; 3], off: usize| reps.iter().position(|&r| r == off);
         // Every position's bucket is known up front: start loading them all. The table (512 KiB) is
         // larger than L1 and the parse visits one bucket per position, so the loads overlap instead
-        // of stalling one by one. Local estimates on a loaded machine: ASTC 4x4's light pass spends
-        // about a third less in `cost`, BC7 RDO at λ 1 takes about 5% less time.
+        // of stalling one by one. It pays only where the table falls out of L2: a cloud A/B on a
+        // Xeon 6975P-C (2 MB L2) measured 1.00-1.01x on BC7, BC1 and ASTC RDO (DEADENDS.md).
         #[cfg(target_arch = "x86_64")]
         for w in cand.windows(3) {
             let h = hash3(w[0], w[1], w[2]);

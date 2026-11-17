@@ -10,6 +10,12 @@ CPU times come from paired runs on the same core.
 
 ## RDO (all formats)
 
+- **Prefetching the LZ model's hash buckets.** `LzModel::cost_until` prefetches each
+  position's bucket before the parse (9868e5d). On a busy local 155H it looked like 5% off BC7
+  λ 1 and a third off ASTC 4x4's `cost` phase. A cloud A/B on a Xeon 6975P-C, whose 2 MB L2 holds
+  the 512 KiB table, measured 1.008x BC7 λ 1, 1.001x BC1 λ 1, 1.011x / 1.006x ASTC 4x4 / 6x5
+  effort 0 (Kodak-24, 24/24 identical). The local gain was cache contention from other work. The
+  prefetch stays, since it costs nothing, but table layout is not where the RDO time goes.
 - **Whole-chunk or very large searches for BC1.** Searching the whole chunk (2048 blocks) for
   BC1 gains only −0.09% BD-rate at 4.65× the time, so a learned BC1 ranker has nothing to find.
   BC1 blocks carry too little structure for distant matches to beat near ones.
