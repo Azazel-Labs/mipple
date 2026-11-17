@@ -642,11 +642,52 @@ fn tables() -> &'static Tables {
 /// One block's texels as floats, with the channel count that matters (3, or 4 with alpha).
 struct Texels<'a> {
     px: &'a [Rgba],
-    f: [[f32; 4]; MAX_TEXELS],
-    /// Each channel of the texels (zero past `n`), for eight-lane kernels.
-    xl: [[i16; MAX_TEXELS]; 4],
+    /// The texels as floats (only the first `n` are this block's).
+    f: &'a [[f32; 4]; MAX_TEXELS],
+    /// Each channel of the texels (zero from `n` to the next multiple of eight), for eight-lane
+    /// kernels.
+    xl: &'a [[i16; MAX_TEXELS]; 4],
     n: usize,
     ch: usize,
+}
+
+/// The memory [`Texels`] point into, kept from block to block: each block fills its texels (and
+/// the lanes past them to the next multiple of eight), not 3.4 KB afresh.
+struct TexelBuf {
+    f: [[f32; 4]; MAX_TEXELS],
+    xl: [[i16; MAX_TEXELS]; 4],
+}
+
+impl Default for TexelBuf {
+    fn default() -> Self {
+        TexelBuf {
+            f: [[0.0; 4]; MAX_TEXELS],
+            xl: [[0; MAX_TEXELS]; 4],
+        }
+    }
+}
+
+impl TexelBuf {
+    /// `px`'s texels, with `ch` channels that matter.
+    fn texels<'a>(&'a mut self, px: &'a [Rgba], ch: usize) -> Texels<'a> {
+        let n = px.len();
+        for (i, p) in px.iter().enumerate() {
+            self.f[i] = p.map(f32::from);
+            for c in 0..4 {
+                self.xl[c][i] = p[c] as i16;
+            }
+        }
+        for x in &mut self.xl {
+            x[n..n.next_multiple_of(8)].fill(0);
+        }
+        Texels {
+            px,
+            f: &self.f,
+            xl: &self.xl,
+            n,
+            ch,
+        }
+    }
 }
 
 /// No channel on a second weight plane.
@@ -2600,24 +2641,12 @@ pub fn encode_block(fp: &Footprint, px: &[Rgba], srgb: bool, effort: u8) -> [u8;
         return void_extent(px[0]);
     }
     let alpha = px.iter().any(|p| p[3] != 255);
-    let mut t = Texels {
-        px,
-        f: [[0.0; 4]; MAX_TEXELS],
-        xl: [[0; MAX_TEXELS]; 4],
-        n,
-        ch: if alpha { 4 } else { 3 },
-    };
-    for (i, p) in px.iter().enumerate() {
-        t.f[i] = p.map(|x| x as f32);
-        for c in 0..4 {
-            t.xl[c][i] = p[c] as i16;
-        }
-    }
     let cem = if alpha { 12u8 } else { 8 };
     let ce = alpha as usize;
     let es = effort_settings(effort, n);
     let mut scratch = SCRATCH.take().unwrap_or_default();
     let Scratch {
+        texels,
         layouts,
         quad,
         short_top,
@@ -2627,6 +2656,7 @@ pub fn encode_block(fp: &Footprint, px: &[Rgba], srgb: bool, effort: u8) -> [u8;
         decimated,
         finals,
     } = &mut *scratch;
+    let t = texels.texels(px, if alpha { 4 } else { 3 });
     layouts.reset(n);
     // One partition's moments and principal axis, shared by the one-partition layouts and k-means.
     let lab1: [i16; MAX_TEXELS] = std::array::from_fn(|i| if i < n { 0 } else { -1 });
@@ -2977,6 +3007,7 @@ type Cand = (f32, f32, u16, u16, u16, u8);
 /// instead of allocating its own (a few kilobytes of layouts and lists per block).
 #[derive(Default)]
 struct Scratch {
+    texels: Box<TexelBuf>,
     layouts: Layouts,
     quad: Option<Box<QuadSums>>,
     short_top: Vec<u64>,

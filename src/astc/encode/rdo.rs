@@ -17,9 +17,10 @@
 //! real Zstd does not shrink goes back to its base encoding.
 
 use super::{
-    Footprint, Layout, MAX_TEXELS, NO_CCS, Texels, polish_parts, quantize, read_block, refit, round_pos, sym_endpoints,
-    tables,
+    Footprint, Layout, MAX_TEXELS, NO_CCS, TexelBuf, Texels, polish_parts, quantize, read_block, refit, round_pos,
+    sym_endpoints, tables,
 };
+use crate::astc::lanes::{I16x8, I32x4};
 use crate::astc::{COLOR_UNQUANT, PartitionFn, Symbolic, color_range, decode_block, decode_symbolic_tw};
 use crate::format::Format;
 use crate::rdo::{LzModel, LzState, RdoParams, RdoStats, bit_budget};
@@ -72,33 +73,19 @@ impl BlockSums {
             sx: [0; 4],
             sxx: [0; 4],
         };
+        // Eight texels at a time: the lanes past `n` are zero.
+        let ones = I16x8::splat(1);
         for c in 0..4 {
-            for &x in &t.xl[c][..t.n] {
-                b.sx[c] += x as i32;
-                b.sxx[c] += x as i32 * x as i32;
+            let (mut s, mut ss) = (I32x4::zero(), I32x4::zero());
+            for k in (0..t.n.next_multiple_of(8)).step_by(8) {
+                let x = I16x8::load(&t.xl[c][k..]);
+                s = s.add(x.madd(ones));
+                ss = ss.add(x.sq_pairs());
             }
+            (b.sx[c], b.sxx[c]) = (s.sum(), ss.sum());
         }
         b
     }
-}
-
-/// One block's texels for the error kernels, all four channels counted (a copied block may carry
-/// alpha the source lacks, or lack alpha the source has).
-fn texels(px: &[Rgba]) -> Texels<'_> {
-    let mut t = Texels {
-        px,
-        f: [[0.0; 4]; MAX_TEXELS],
-        xl: [[0; MAX_TEXELS]; 4],
-        n: px.len(),
-        ch: 4,
-    };
-    for (i, p) in px.iter().enumerate() {
-        t.f[i] = p.map(f32::from);
-        for c in 0..4 {
-            t.xl[c][i] = p[c] as i16;
-        }
-    }
-    t
 }
 
 /// Makes `lay` the labels of `sym`'s partitioning (the only parts of a layout polish and refit
@@ -458,13 +445,19 @@ fn refit_to(
     Some((out, err))
 }
 
-/// Squared error over all four channels.
+/// Squared error over all four channels, two texels at a time.
 fn sse(a: &[Rgba], b: &[Rgba]) -> u64 {
-    let mut s = 0u32;
-    for (x, y) in a.iter().zip(b) {
-        for c in 0..4 {
-            s += (x[c] as i32 - y[c] as i32).pow(2) as u32;
-        }
+    let n = a.len().min(b.len());
+    let (a, b) = (a[..n].as_flattened(), b[..n].as_flattened());
+    let mut acc = I32x4::zero();
+    let mut k = 0;
+    while k + 8 <= a.len() {
+        acc = acc.add(I16x8::load_u8(&a[k..]).sub(I16x8::load_u8(&b[k..])).sq_pairs());
+        k += 8;
+    }
+    let mut s = acc.sum() as u32;
+    for (x, y) in a[k..].iter().zip(&b[k..]) {
+        s += (*x as i32 - *y as i32).pow(2) as u32;
     }
     s as u64
 }
@@ -528,6 +521,7 @@ fn optimize_chunk(
     // Each chosen block's decoded channel sums.
     let mut dsums: Vec<[i32; 4]> = Vec::with_capacity(count);
     let mut px = vec![[0u8; 4]; n];
+    let mut tbuf = Box::<TexelBuf>::default();
     let mut dec = [[0u8; 4]; MAX_TEXELS];
     // The base's and the chosen block's weights infilled to the texels, from their decodes.
     let mut dec_tw = [[0u8; MAX_TEXELS]; 2];
@@ -538,7 +532,9 @@ fn optimize_chunk(
     for i in 0..count {
         let bi = first + i;
         read_block(s, bw, bh, (bi % nx) as u32, (bi / nx) as u32, &mut px);
-        let t = texels(&px);
+        // All four channels counted: a copied block may carry alpha the source lacks, or lack
+        // alpha the source has.
+        let t = tbuf.texels(&px, 4);
         let bs = BlockSums::of(&t);
         let smooth = smooth_factor(&px, p);
         let score = |err: u64, bits: f32| smooth * err as f64 / 16.0 + lambda * bits as f64;
