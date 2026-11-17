@@ -118,6 +118,9 @@ Open for v0.9.x:
   - Kept: the ranker prefilter keeps each top-8 list sorted by insertion, with an exact cut-off, instead of a
     32-entry buffer trimmed by selection, so more SIMD lanes skip the test: byte-identical, 2.3-2.5% less time
     (cloud A/B).
+  - Kept: mode 6's per-texel error table (`Mode6Lo::new`) built by channel under AVX2, and the 16-texel nearest
+    search stopping at the caller's error bound after the first eight texels: byte-identical, 1.005× / 1.017×
+    less time at λ 1 / 10 (cloud A/B, EPYC 7763, 24/24 identical).
   - Tooling: `.github/workflows/ab.yml` (paired timing, `head_args` to time one build against itself with other
     settings), `profile.yml` (perf on one pinned core) and `oodle.yml` (the Oodle table re-run with extra
     arguments) run on fresh GitHub-hosted VMs, so speed and quality settings can be checked off the dev machine.

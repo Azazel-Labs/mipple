@@ -122,6 +122,14 @@ CPU times come from paired runs on the same core.
     the rate-model skip already covers the chunks where it would cost);
   - deduplicating refinement candidates after their error test (+4-5%, since refinement
     candidates often repeat earlier ones).
+  - matching lengths in `LzModel::cost_until` with one 16-byte compare (history and candidate spliced
+    into a buffer, length from the first differing byte) instead of the byte pre-checks and byte loop:
+    cloud A/B 0.960× / 0.957× the speed at λ 1 / 10, 24/24 identical. The parse is bound by the bucket
+    loads' latency, and the one-byte pre-checks reject most heads before any compare;
+  - a texel error bound for the far search's mode-6 heads in the prefilter (each texel's distance to
+    the head's palette line, replacing `SegBound::rejects` there): cloud A/B 0.999× / 1.007× at λ 1 / 10,
+    24/24 identical. It is computed for every head that passes the segment test (about 830k on kodim05)
+    rather than the 477k that reach `texels_far`, which cancels what dropping the segment test saves.
 - **Exact (greedy) pruning with the deferred decision kept.** Deferring needs the search's pruning relaxed by
   the same margin, so the runner-up is found. With exact pruning, the runner-up is whatever survives by
   chance: on 8 Kodak images at λ 1 that keeps 31% of deferral's size gain (1,599,944 bytes against 1,590,486
