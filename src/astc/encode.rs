@@ -1248,12 +1248,53 @@ fn polish_in<const W: bool, const E: bool>(
     // passes would only repeat those tries: stop there, mid-pass, with the same result.
     let steps = if W { kk } else { 0 } + if E { nvals } else { 0 };
     let mut idle = 0;
+    // The tries that could come out differently from when they were last made, as bits: weight `j`
+    // reads its texels' sums and their partitions' endpoints, endpoint value `at[p] + v` its
+    // partition's weights and endpoints. A clear bit's try would fail again, so it is skipped
+    // (still counted in `idle`), with the same result.
+    let mut wdirty = u64::MAX;
+    let mut edirty = u32::MAX;
+    let mut at = [0usize; 3];
+    for p in 1..parts {
+        at[p] = at[p - 1] + spans[p - 1].1;
+    }
+    // Per partition and plane, the weights that reach its texels and the endpoint values that read
+    // its weights on that plane.
+    let mut touch = [[0u64; 2]; 3];
+    let mut emask = [[0u32; 2]; 3];
+    if W && E {
+        for (i, tap) in grid.taps[..n].iter().enumerate() {
+            let p = lay.labels[i] as usize;
+            for k in 0..4 {
+                if tap.w[k] > 0 {
+                    for (pl, m) in touch[p].iter_mut().enumerate().take(planes) {
+                        *m |= 1 << (planes * tap.idx[k] as usize + pl);
+                    }
+                }
+            }
+        }
+        for p in 0..parts {
+            for v in 0..spans[p].1 {
+                for (pl, m) in emask[p].iter_mut().enumerate().take(planes) {
+                    if !direct || plane_of(v / 2) == pl {
+                        *m |= 1 << (at[p] + v);
+                    }
+                }
+            }
+        }
+    }
+    // Partition `p`'s endpoint values.
+    let part_vals = |p: usize| ((1u32 << spans[p].1) - 1) << at[p];
     'passes: for _ in 0..passes {
         for j in 0..if W { kk } else { 0 } {
             if idle >= steps {
                 break 'passes;
             }
             idle += 1;
+            if wdirty & (1 << j) == 0 {
+                continue;
+            }
+            wdirty &= !(1 << j);
             // `planes` is 1 or 2: a shift, not a division.
             let (gp, pl) = (j >> (planes - 1), j & (planes - 1));
             let old = sym.weights[j];
@@ -1286,6 +1327,13 @@ fn polish_in<const W: bool, const E: bool>(
                 let w = sums[pl][i] >> 4;
                 wl[pl][pos[i] as usize] = w as i16;
                 errp[pl][i] = texel_err(&base, &slope, i, pl, w);
+                let tap = &grid.taps[i];
+                for k in 0..4 {
+                    if tap.w[k] > 0 {
+                        wdirty |= 1 << (planes * tap.idx[k] as usize + pl);
+                    }
+                }
+                edirty |= emask[lay.labels[i] as usize][pl];
             }
             idle = 0;
         }
@@ -1295,6 +1343,10 @@ fn polish_in<const W: bool, const E: bool>(
                     break 'passes;
                 }
                 idle += 1;
+                if edirty & (1 << (at[p] + v)) == 0 {
+                    continue;
+                }
+                edirty &= !(1 << (at[p] + v));
                 if !direct {
                     // Partition `p`'s error over every channel with endpoints `e`.
                     let part_err = |e: &([i32; 4], [i32; 4])| -> i32 {
@@ -1346,6 +1398,8 @@ fn polish_in<const W: bool, const E: bool>(
                             }
                         }
                     }
+                    wdirty |= touch[p][0] | touch[p][1];
+                    edirty |= part_vals(p);
                     idle = 0;
                     continue;
                 }
@@ -1404,6 +1458,8 @@ fn polish_in<const W: bool, const E: bool>(
                         errp[pl][i] = texel_err(&base, &slope, i, pl, sums[pl][i] >> 4);
                     }
                 }
+                wdirty |= touch[p][pl];
+                edirty |= part_vals(p);
                 idle = 0;
             }
         }
