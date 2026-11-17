@@ -724,7 +724,7 @@ impl LzModel {
             let h = hash3(w[0], w[1], w[2]);
             // SAFETY: a prefetch is only a hint; `h` is in bounds of `head` anyway.
             unsafe {
-                std::arch::x86_64::_mm_prefetch::<{ std::arch::x86_64::_MM_HINT_T0 }>(self.head.as_ptr().add(h).cast())
+                std::arch::x86_64::_mm_prefetch::<{ std::arch::x86_64::_MM_HINT_T0 }>(self.head.as_ptr().add(h).cast());
             };
         }
         let mut bits = 0.0;
