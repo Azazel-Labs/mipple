@@ -25,6 +25,9 @@ on:
       annotate:
         description: "Instruction-level hot spots of these symbols (`|`-separated substrings of their names)"
         default: ""
+      repeat:
+        description: Encodes of each image in one recording (more samples for short encodes)
+        default: "1"
 
 permissions:
   contents: read
@@ -39,6 +42,7 @@ jobs:
       IMAGES: ${{ inputs.images }}
       CALLERS: ${{ inputs.callers }}
       ANNOTATE: ${{ inputs.annotate }}
+      REPEAT: ${{ inputs.repeat }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -63,7 +67,9 @@ jobs:
           read -ra args <<< "$ARGS"
           for img in $IMAGES; do
             g=(); [ -n "$CALLERS" ] && g=(--call-graph dwarf,32768)
+            # One recording over REPEAT encodes of the image: a short encode alone leaves few samples.
             RAYON_NUM_THREADS=1 taskset -c 1 perf record -e cpu-clock -F 4000 "${g[@]}" -o "perf-$img.data" -- \
+              sh -c 'for _ in $(seq "$0"); do "$@" || exit 1; done' "${REPEAT:-1}" \
               target/release/mipple encode "test-images/kodak/$img.png" -o "out.$EXT" "${args[@]}"
           done
           {
