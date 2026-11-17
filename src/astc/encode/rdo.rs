@@ -688,11 +688,15 @@ fn optimize_chunk(
     model.give_back();
     // Safety net: the rate model is an estimate. If real Zstd says RDO did not help this chunk,
     // keep the base encoding.
-    if let (Some(level), Some(original)) = (p.verify_zstd_level, original) {
+    if let (Some(level), Some(original), true) = (p.verify_zstd_level, original, stats.changed > 0) {
         let level = level.min(VERIFY_MAX_LEVEL);
         let size = crate::rdo::zstd_size;
-        // Only a chunk Zstd level 1 says RDO grew gets the check at `level` (see [`VERIFY_MAX_LEVEL`]).
-        if size(data, 1) > size(&original, 1) && (level == 1 || size(data, level) >= size(&original, level)) {
+        // Only a chunk Zstd level 1 says RDO grew by more than a few bytes gets the check at `level`
+        // (see [`VERIFY_MAX_LEVEL`] and [`VERIFY_SLACK`]).
+        let (now, was) = (size(data, 1), size(&original, 1));
+        if now > was
+            && (level == 1 || now > was + VERIFY_SLACK && size(data, level) >= size(&original, level))
+        {
             data.copy_from_slice(&original);
             stats.changed = 0;
             stats.est_bits_after = stats.est_bits_before;
@@ -713,6 +717,13 @@ fn optimize_chunk(
 /// check across all of them. Checking every chunk level 1 did not shrink by about the rate model's
 /// estimate (1,461 chunks) came to 766, and no check at all to 491, with one chunk 8.2% larger.
 const VERIFY_MAX_LEVEL: i32 = 15;
+
+/// Bytes a chunk may grow at Zstd level 1 and still be kept without the check at the output's level.
+/// At the small default λ most chunks the check reads grew this little, and level 19 keeps nearly all
+/// of them. Over 62 images (24 Kodak, 32 Poly Haven, 6 synthetic) at the defaults (4x4, 5x5, 6x5, 8x8)
+/// it skips 314 of 463 level-15 checks and lands 56 bytes over a perfect level-19 check, against 78
+/// for checking all of them. At λ 0.5 (4x4) and 2 (6x6) no chunk grows at level 1.
+const VERIFY_SLACK: usize = 4;
 
 /// Runs RDO in place over one level's ASTC blocks (`data`, raster order, as
 /// [`super::encode_surface`] writes them) of surface `s`.
