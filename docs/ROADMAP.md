@@ -251,7 +251,9 @@ Open for v0.9.x:
     own floor on λ from 8x5 to 10x8 (0.85-3), so it beats fast on all five there too, level on time at 8x5
     (BENCHMARKS.md, b7b5f20).
   - [ ] Effort 0's default light pass against fast's time at 4x4-6x6: it wins PSNR, SSIM and both sizes but
-    takes 1.0-1.3× fast's time (`-l 0` is faster than fast, with files up to 2% larger).
+    takes 1.0-1.3× fast's time (`-l 0` is faster than fast, with files up to 2% larger). The Zstd check
+    skips chunks level 1 says grew by 4 bytes or fewer (3691688): 1.011× less time at 4x4, level at 5x5
+    and 6x5 (cloud A/B 44043405979, Kodak-24), and slightly smaller files.
   - [ ] A GPU kernel, a SIMD batch encoder, HDR.
 - [x] ETC2 / EAC for mobile fallbacks: ETC2 RGB (all five modes), ETC2 RGBA8 and EAC R11 / RG11 (unsigned),
   KTX2 only, with the RDO pass. On Kodak, one thread, effort 0 is 0.37 dB ahead of Compressonator in an
