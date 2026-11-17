@@ -43,6 +43,21 @@ mod imp {
             Self(unsafe { _mm_unpacklo_epi8(_mm_loadl_epi64(v.as_ptr().cast()), _mm_setzero_si128()) })
         }
 
+        /// `v` in lanes 0..4 and again in 4..8, narrowed (each value must fit in i16).
+        #[inline]
+        pub fn dup4(v: [i32; 4]) -> Self {
+            // SAFETY: 16 bytes, unaligned load.
+            let x = unsafe { _mm_loadu_si128(v.as_ptr().cast()) };
+            Self(unsafe { _mm_packs_epi32(x, x) })
+        }
+
+        /// The four channels of `p`, widened, in lanes 0..4 and again in 4..8.
+        #[inline]
+        pub fn dup_rgba(p: [u8; 4]) -> Self {
+            let x = unsafe { _mm_unpacklo_epi8(_mm_cvtsi32_si128(i32::from_le_bytes(p)), _mm_setzero_si128()) };
+            Self(unsafe { _mm_unpacklo_epi64(x, x) })
+        }
+
         /// All ones in the lanes equal to `o`'s, zero elsewhere.
         #[inline]
         pub fn eq(self, o: Self) -> Self {
@@ -198,6 +213,18 @@ mod imp {
         #[inline]
         pub fn load_u8(v: &[u8]) -> Self {
             Self(std::array::from_fn(|l| v[l] as i16))
+        }
+
+        /// `v` in lanes 0..4 and again in 4..8, narrowed (each value must fit in i16).
+        #[inline]
+        pub fn dup4(v: [i32; 4]) -> Self {
+            Self(std::array::from_fn(|l| v[l % 4] as i16))
+        }
+
+        /// The four channels of `p`, widened, in lanes 0..4 and again in 4..8.
+        #[inline]
+        pub fn dup_rgba(p: [u8; 4]) -> Self {
+            Self(std::array::from_fn(|l| p[l % 4] as i16))
         }
 
         /// All ones in the lanes equal to `o`'s, zero elsewhere.

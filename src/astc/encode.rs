@@ -1041,6 +1041,29 @@ fn polish_parts<const W: bool, const E: bool>(
     })
 }
 
+/// Per channel count (1..=4) and second-plane channel ([`NO_CCS`] for none), per plane, all ones in
+/// the lanes (0..4, and again 4..8) of the channels that plane drives.
+const PLANE_MASKS: [[[[i16; 8]; 2]; NO_CCS + 1]; 4] = {
+    let mut m = [[[[0i16; 8]; 2]; NO_CCS + 1]; 4];
+    let mut ch = 1;
+    while ch <= 4 {
+        let mut ccs = 0;
+        while ccs <= NO_CCS {
+            let mut l = 0;
+            while l < 8 {
+                let c = l % 4;
+                if c < ch {
+                    m[ch - 1][ccs][(c == ccs) as usize][l] = -1;
+                }
+                l += 1;
+            }
+            ccs += 1;
+        }
+        ch += 1;
+    }
+    m
+};
+
 /// [`polish_parts`]'s lanes: partition `p`'s texels are lanes `seg[p]..seg[p + 1]`, each start a
 /// multiple of eight.
 const LANES: usize = MAX_TEXELS + 24;
@@ -1096,9 +1119,7 @@ fn polish_in<const W: bool, const E: bool>(
     // The plane that drives channel `c`; per plane, a mask of the channel lanes it drives (lanes
     // 0..4 and 4..8 are the same four channels).
     let plane_of = |c: usize| (c == ccs) as usize;
-    let mask: [I16x8; 2] = std::array::from_fn(|pl| {
-        I16x8::from_array(std::array::from_fn(|l| -((l % 4 < ch && plane_of(l % 4) == pl) as i16)))
-    });
+    let mask = PLANE_MASKS[ch - 1][ccs].map(I16x8::from_array);
     // Each texel's infill sum (16 times its weight, plus the rounding 8), so a grid point's step
     // moves its texels' sums by its tap weight times the step.
     for (pl, sp) in sums.iter_mut().enumerate().take(planes) {
@@ -1113,8 +1134,8 @@ fn polish_in<const W: bool, const E: bool>(
     // Per partition, `64 e0 + 32` and `e1 - e0` in each channel lane.
     let lanes_of = |e: &([i32; 4], [i32; 4])| {
         (
-            I16x8::from_array(std::array::from_fn(|l| (64 * e.0[l % 4] + 32) as i16)),
-            I16x8::from_array(std::array::from_fn(|l| (e.1[l % 4] - e.0[l % 4]) as i16)),
+            I16x8::dup4(e.0.map(|v| 64 * v + 32)),
+            I16x8::dup4(std::array::from_fn(|c| e.1[c] - e.0[c])),
         )
     };
     let mut eps = [([0i32; 4], [0i32; 4]); 3];
@@ -1125,7 +1146,7 @@ fn polish_in<const W: bool, const E: bool>(
         (base[p], slope[p]) = lanes_of(&eps[p]);
     }
     for (x, p) in xs.iter_mut().zip(&t.px[..n]) {
-        *x = I16x8::from_array(std::array::from_fn(|l| p[l % 4] as i16));
+        *x = I16x8::dup_rgba(*p);
     }
     // Texel `i`'s error at weight `w` over the channels of plane `pl`.
     let texel_err = |base: &[I16x8; 3], slope: &[I16x8; 3], i: usize, pl: usize, w: u16| -> i32 {
@@ -1192,7 +1213,8 @@ fn polish_in<const W: bool, const E: bool>(
                 break 'passes;
             }
             idle += 1;
-            let (gp, pl) = (j / planes, j % planes);
+            // `planes` is 1 or 2: a shift, not a division.
+            let (gp, pl) = (j >> (planes - 1), j & (planes - 1));
             let old = sym.weights[j];
             let nb = [tb.wnb[q][0][old as usize], tb.wnb[q][1][old as usize]];
             let d = nb.map(|c| wu[c as usize] as i32 - g[j] as i32);
