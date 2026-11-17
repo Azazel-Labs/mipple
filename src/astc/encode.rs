@@ -2411,14 +2411,57 @@ struct Effort {
     top: usize,
 }
 
+/// Tuning runs: settings replacing every effort's, from [`set_tune`].
+static TUNE: std::sync::OnceLock<Effort> = std::sync::OnceLock::new();
+
+/// Tuning runs (the CLI's hidden `--astc-tune`): replaces every effort's search settings with
+/// `p2,p3,candidates,refine,polish,dual,line2,line3,line_dual,shortlist,rerank,top[,alts]`
+/// (alts 2 when left out; rerank not halved above 16 texels). Only the first call counts.
+pub fn set_tune(spec: &str) -> Result<(), String> {
+    let mut v = spec
+        .split(',')
+        .map(|x| x.trim().parse::<f64>().map_err(|e| format!("--astc-tune {x:?}: {e}")))
+        .collect::<Result<Vec<f64>, _>>()?;
+    if v.len() < 12 {
+        return Err(format!("--astc-tune needs 12 or 13 values, got {}", v.len()));
+    }
+    let alts = v.get(12).map_or(2, |&a| a as u8);
+    v.truncate(12);
+    let u = |i: usize| v[i] as usize;
+    let _ = TUNE.set(Effort {
+        patterns: [u(0), u(1)],
+        candidates: u(2).max(1),
+        shortlist: u(9),
+        refine: u(3),
+        polish: u(4),
+        dual: u(5),
+        line: [v[6] as f32, v[7] as f32, v[8] as f32],
+        rerank: u(10),
+        alts,
+        top: u(11).max(1),
+    });
+    Ok(())
+}
+
 /// The settings for `effort` on a footprint of `texels` texels.
 fn effort_settings(effort: u8, texels: usize) -> Effort {
-    let mut e = effort_table(effort, texels);
-    // Larger footprints gain less from line-fit re-ranking: on 8 Kodak images at effort 2, 32
-    // patterns score as 64 at 8x8 (at 4x4, 64 gains 0.05 dB over 32).
-    if texels > 16 && effort != u8::MAX {
-        e.rerank /= 2;
+    #[cfg(test)]
+    if effort == u8::MAX && TUNE.get().is_none() {
+        // Tuning runs: `MIPPLE_ASTC_EFFORT=<the spec of set_tune>`.
+        set_tune(&std::env::var("MIPPLE_ASTC_EFFORT").unwrap()).unwrap();
     }
+    let mut e = match TUNE.get() {
+        Some(t) => *t,
+        None => {
+            let mut e = effort_table(effort, texels);
+            // Larger footprints gain less from line-fit re-ranking: on 8 Kodak images at effort 2,
+            // 32 patterns score as 64 at 8x8 (at 4x4, 64 gains 0.05 dB over 32).
+            if texels > 16 {
+                e.rerank /= 2;
+            }
+            e
+        }
+    };
     if e.shortlist == 0 {
         e.shortlist = e.candidates * SHORTLIST;
     }
@@ -2426,33 +2469,6 @@ fn effort_settings(effort: u8, texels: usize) -> Effort {
 }
 
 fn effort_table(effort: u8, texels: usize) -> Effort {
-    #[cfg(test)]
-    if effort == u8::MAX {
-        // Tuning runs:
-        // `MIPPLE_ASTC_EFFORT=p2,p3,candidates,refine,polish,dual,line2,line3,line_dual,shortlist,rerank,top`.
-        static E: std::sync::OnceLock<Effort> = std::sync::OnceLock::new();
-        return *E.get_or_init(|| {
-            let mut v: Vec<f64> = std::env::var("MIPPLE_ASTC_EFFORT")
-                .unwrap()
-                .split(',')
-                .map(|x| x.parse().unwrap())
-                .collect();
-            v.resize(12, 0.0);
-            let u = |i: usize| v[i] as usize;
-            Effort {
-                patterns: [u(0), u(1)],
-                candidates: u(2),
-                shortlist: u(9),
-                refine: u(3),
-                polish: u(4),
-                dual: u(5),
-                line: [v[6] as f32, v[7] as f32, v[8] as f32],
-                rerank: u(10),
-                alts: 2,
-                top: u(11).max(1),
-            }
-        });
-    }
     match effort {
         // Above 30 texels, two polish passes and no alternative endpoint modes for the candidate's
         // weights: on Kodak (tiled, one thread), 16% / 6% less time at 6x6 / 8x8 for 0.10 / 0.03 dB,

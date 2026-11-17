@@ -260,6 +260,9 @@ struct EncodeArgs {
     /// Zstd level for KTX2 supercompression; 0 stores raw blocks.
     #[arg(long, default_value_t = 19)]
     zstd: i32,
+    /// Tuning only: ASTC search settings replacing every effort's (see `astc::encode::set_tune`).
+    #[arg(long, hide = true)]
+    astc_tune: Option<String>,
     /// Entropy-reduced BC7 base encoding (bc7enc `-e` style): off, on, or auto (on when λ ≥ 1).
     #[arg(long, value_enum, default_value_t = EntropyMode::default())]
     entropy: EntropyMode,
@@ -754,6 +757,9 @@ fn encode_bc6h(a: &EncodeArgs) -> Result<()> {
 }
 
 fn encode(a: EncodeArgs) -> Result<()> {
+    if let Some(t) = &a.astc_tune {
+        mipple::astc::encode::set_tune(t).map_err(anyhow::Error::msg)?;
+    }
     if a.format.is_bc6h() {
         return encode_bc6h(&a);
     }
