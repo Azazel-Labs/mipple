@@ -498,6 +498,14 @@ Measured on Kodak images 1-3, single thread, effort 0, unless noted. ISPC fast t
   cloud A/B 44119063356 (EPYC 7763, Kodak-24 effort 0, 4x4-6x5) 0.985-0.990x. Adding lazily built masks
   and keeping each partition's current error between endpoint tries instead of recomputing it was still
   0.982-0.989x (A/B 44128583645, Xeon 6975P). Both were reverted.
+- **Settings trades at 17-30 texels, timed in the cloud.** With `--astc-tune` on one SHA (A/Bs
+  44158420589-44158515192, Kodak-24 effort 0 with the light pass, 5x4 / 5x5 / 6x5; PSNR from the local
+  base encode): two partitions only off a line by 16 instead of 8, 1.05x for -0.032 / -0.024 / -0.020 dB;
+  the dual plane only off by 4 instead of 2, 1.02-1.03x for -0.031 / -0.016 / -0.009 dB; both with
+  base+offset and base+scale tried on the final weights, 1.02-1.05x for -0.038 / -0.020 / -0.019 dB; those
+  endpoint modes alone, 0.94-0.97x for +0.026 / +0.021 / +0.011 dB. Polish 2 instead of 3 saved no time
+  locally (later passes stop early). At most 5% for about 0.03 dB, against a 4-13% gap to astcenc fast and
+  a 0.05-0.14 dB lead, so effort 0 keeps its settings.
 
 ## ETC2 / EAC
 
