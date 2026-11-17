@@ -146,6 +146,8 @@ Open for v0.9.x:
     −3.6% / −2.2% / −1.7% / −1.2% (was −3.7% / −2.3% / −1.9% / −1.4%); λ 0 and 1 unchanged. 96 deep was 1.034×
     / 1.045× for 0.1 point in the same cells, the same rate. A shallower depth for the endpoint half alone
     gained 1.02-1.07× (noisy local timing; see DEADENDS).
+  - The luma term (default since 96cae40) costs 1.082× at λ 1 in the same cloud A/B, which puts λ 1
+    back at about 20 CPU-seconds by this estimate, level with Oodle's 20-22 (at higher quality per λ).
   - Next: structural cuts to the far re-indexing and the second base, using the cross-domain research
     sweep's ideas (hash-based block matching from screen-content video coding, lower-bound cascades).
 - [x] BC7 mode 4 in the fast encoder, p-bit search in quantization, and a faster uber step. Kodak-24, λ 0, one
@@ -187,7 +189,8 @@ Open for v0.9.x:
   equal PSNR −8.5% → −8.3% (bc7f: +15.7% → +12.6%, −11.6% → −11.3%); every image gains (kodim15 +6.2% →
   +3.1%, kodim20 −3.7% → −9.1%), but XUBC7 still wins 23 of 24. Every Oodle cell stays ahead: equal RMSE λ
   20 −1.0% → −0.7% is the thinnest, equal SSIM widens 0.4-0.9 points. At equal quality it costs
-  1.04-1.05× the BC7 RDO time (λ 1 / 4). More weight trades further (0.5: +10.4%
+  1.04-1.05× the BC7 RDO time (λ 1 / 4; local). At the same λ, where it also lands at higher
+  quality, a cloud A/B (Kodak-24, fd244b0 against dbc6856) takes 1.082× / 1.064× the time at λ 1 / 10. More weight trades further (0.5: +10.4%
   with λ 20 RMSE at −0.1%). A contrast-loss term, a stronger or sharper smoothness weight and per-block
   error caps all bought a third as much SSIM or less per point of the Oodle lead (DEADENDS.md). Still
   open: the remaining 13%. SSIM's loss sits in near-flat windows (luma variance below 8: a fifth of the

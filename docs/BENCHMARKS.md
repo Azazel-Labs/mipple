@@ -605,8 +605,9 @@ process per image) now takes 31.2-31.6 CPU-seconds on one pinned P-core, about 1
 Later byte-identical speedups and cheaper defaults have not been re-timed side by side (the UE install is
 gone and the dev machine is under load), but paired cloud A/Bs on Kodak-24 put them at 1.557× less time
 than that build at λ 1 (7c3c514 against 941af16), and refinement 64 deep instead of 128 at another 1.080×.
-Scaled from the 31.2-31.6 CPU-seconds, λ 1 is about 18.5 CPU-seconds against Oodle's 20-22: an estimate,
-not a side-by-side measurement.
+Scaled from the 31.2-31.6 CPU-seconds, λ 1 was about 18.5 CPU-seconds against Oodle's 20-22. The BC7
+luma term since then takes 1.082× the time at λ 1 (cloud A/B, at higher quality per λ), which puts it at
+about 20: level with Oodle. An estimate, not a side-by-side measurement.
 
 mipple is now smaller at both of Oodle's quality measures at every λ in every format. Per image it is not a
 sweep: BC1 loses 1 of 288 image/λ/metric cells (kodim05 at λ 40 on SSIM, +0.3%); BC7 at λ 10-40 is behind on
