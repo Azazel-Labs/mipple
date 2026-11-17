@@ -694,9 +694,7 @@ fn optimize_chunk(
         // Only a chunk Zstd level 1 says RDO grew by more than a few bytes gets the check at `level`
         // (see [`VERIFY_MAX_LEVEL`] and [`VERIFY_SLACK`]).
         let (now, was) = (size(data, 1), size(&original, 1));
-        if now > was
-            && (level == 1 || now > was + VERIFY_SLACK && size(data, level) >= size(&original, level))
-        {
+        if now > was && (level == 1 || now > was + VERIFY_SLACK && size(data, level) >= size(&original, level)) {
             data.copy_from_slice(&original);
             stats.changed = 0;
             stats.est_bits_after = stats.est_bits_before;
