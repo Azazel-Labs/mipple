@@ -463,6 +463,13 @@ weights and per-block error caps bought a third as much SSIM or less per point o
 (DEADENDS.md). The remaining gap sits in near-flat windows: windows with luma variance below 8 are a fifth
 of all windows and hold 69% of the SSIM loss.
 
+The term moves each λ to a higher quality (λ 1: 41.64 → 42.06 dB, 3.868 → 4.086 bpt), so it is timed at
+equal quality. γ 0.25 at λ 1.19 / 4 is compared against γ 0 at λ 1 / 3.36, the λ values that match PSNR and
+Zstd size on the Kodak-24 sweep. On all 24 images, on one pinned P-core with the builds interleaved and the
+best of 3 per image, it takes 1.037× / 1.054× the time. At the same λ it takes 1.08-1.13× at λ 1 and
+0.95-1.05× at λ 4 (6-8 images, busy machine). mipple's times in the committed rows and in the table
+below are from before the term; only sizes and quality were re-encoded.
+
 ### Time
 
 The machine was busy with other jobs, so the full run measured each encoder process's CPU time (user plus

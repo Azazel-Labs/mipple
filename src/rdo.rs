@@ -349,7 +349,8 @@ impl RdoParams {
         if self.normal_map || w[..3].contains(&0) {
             return 0.0;
         }
-        self.luma_weight.unwrap_or(if format == Format::Bc7 { BC7_LUMA_WEIGHT } else { 0.0 })
+        self.luma_weight
+            .unwrap_or(if format == Format::Bc7 { BC7_LUMA_WEIGHT } else { 0.0 })
     }
 
     /// Deferred-decision margin: by default 0.3 (a runner-up within 30% of the best), 0.15 for
@@ -405,7 +406,9 @@ impl RdoStats {
 /// from −8.5% to −8.3%; against Oodle Texture 2.9.16 at λ 10-40 every cell stays ahead (equal RMSE
 /// λ 20 −1.0% → −0.7%, the thinnest; equal SSIM gains 0.4-0.9 points). 0.3 / 0.5 close the SSIM gap
 /// to +12.4% / +10.4% for a λ 20 RMSE lead of −0.6% / −0.1%; weighting only the mean-removed luma
-/// error, or by flatness instead of the smooth weight, did no better for the same lead.
+/// error, or by flatness instead of the smooth weight, did no better for the same lead. At the same
+/// λ it encodes at higher quality (λ 1: 41.64 → 42.06 dB) and takes longer; at equal PSNR and size
+/// it costs 1.04× / 1.05× the time at λ 1 / 4 (λ 1.19 / 4 against λ 1 / 3.36 without it).
 pub const BC7_LUMA_WEIGHT: f32 = 0.25;
 
 const HASH_BITS: u32 = 13;
@@ -2172,6 +2175,9 @@ impl Far7Pre {
     }
 }
 
+/// A candidate's luma error term from its bytes, distortion and decoding (if already decoded).
+type LumaPen<'a> = dyn FnMut(&[u8; 16], f64, Option<&Block>) -> f64 + 'a;
+
 /// BC7 far back-references, `back + 1..=far_back` blocks back: the whole-block copy and, for a
 /// mode-6 prev, its endpoints re-indexed, the candidates that win there. Re-indexing the other
 /// modes' heads too costs about 5% more CPU for no gain (Kodak-24 vs Oodle within 0.02%).
@@ -2194,7 +2200,7 @@ fn bc7_far(
     model: &mut LzModel,
     best: &mut (f64, [u8; 16], f32, LzState),
     pool: Option<&mut Vec<([u8; 16], u64)>>,
-    pen: &mut dyn FnMut(&[u8; 16], f64, Option<&Block>) -> f64,
+    pen: &mut LumaPen<'_>,
 ) {
     let mut pool = pool;
     let (fin, fin_sums, far_back, w, lambda) = (f7.fin, f7.fin_sums, f7.far_back, f7.w, f7.lambda);
@@ -2478,12 +2484,7 @@ fn optimize_chunk(
         // Error budget: a multiple of the base error, plus a floor so near-lossless blocks still
         // have room to move.
         let limit = p.error_limit(base_err, channels);
-        let mut best = (
-            score(base_err, base_bits) + base_pen,
-            base,
-            base_bits,
-            base_rep,
-        );
+        let mut best = (score(base_err, base_bits) + base_pen, base, base_bits, base_rep);
         let j_start = best.0;
 
         let back = max_back.min(i);

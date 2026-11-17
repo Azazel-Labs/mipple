@@ -228,6 +228,12 @@ CPU times come from paired runs on the same core.
     +19.01%, but −5.17% → −2.89% at equal PSNR and λ 20-40 behind Oodle at RMSE (up to +3.4%). Ratio 3-5
     with min-rms 1, ratio 2 alone, or `--min-rms 1.5` alone: within 0.1 point. The SSIM loss is not
     in a few blocks with large errors.
+  - *Adding the luma term before the bit cost (speed).* For candidates already decoded by the block-error
+    pass, the term was added to the distortion before the `dist ≥ t` cut and `cost_until`'s bit budget, so
+    both are tighter. On kodim01-08, the output was byte-identical at λ 1 and 4. It changed on kodim20 at λ 1
+    and kodim23 at λ 4, both within 0.01 dB. It was no faster: 1.15× / 1.01× the time of the committed form
+    at λ 1 / 4 (one pinned P-core, 8 images, best of 5). The kernels' error bound, which comes from the best
+    score, stays as loose as before.
 
 ## BC7 base encoder (`bc7::fast`)
 

@@ -186,7 +186,8 @@ Open for v0.9.x:
   RMSE loses only second-order. Kodak-24, Zstd-19, against XUBC7 bc7e level 2: equal SSIM +16.2% → +12.9%,
   equal PSNR −8.5% → −8.3% (bc7f: +15.7% → +12.6%, −11.6% → −11.3%); every image gains (kodim15 +6.2% →
   +3.1%, kodim20 −3.7% → −9.1%), but XUBC7 still wins 23 of 24. Every Oodle cell stays ahead: equal RMSE λ
-  20 −1.0% → −0.7% is the thinnest, equal SSIM widens 0.4-0.9 points. More weight trades further (0.5: +10.4%
+  20 −1.0% → −0.7% is the thinnest, equal SSIM widens 0.4-0.9 points. At equal quality it costs
+  1.04-1.05× the BC7 RDO time (λ 1 / 4). More weight trades further (0.5: +10.4%
   with λ 20 RMSE at −0.1%). A contrast-loss term, a stronger or sharper smoothness weight and per-block
   error caps all bought a third as much SSIM or less per point of the Oodle lead (DEADENDS.md). Still
   open: the remaining 13%. SSIM's loss sits in near-flat windows (luma variance below 8: a fifth of the
