@@ -618,14 +618,40 @@ pub struct Mode6Lo {
 
 impl Mode6Lo {
     pub fn new(raw: &[u8; 16], src: &Block, w: &[u32; 4]) -> Self {
+        #[cfg(target_arch = "x86_64")]
+        if crate::simd::level() == crate::simd::Level::Avx2 {
+            // SAFETY: AVX2 and FMA were detected.
+            return unsafe { Self::new_avx2(raw, src, w) };
+        }
+        Self::new_body(raw, src, w)
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2,fma")]
+    fn new_avx2(raw: &[u8; 16], src: &Block, w: &[u32; 4]) -> Self {
+        Self::new_body(raw, src, w)
+    }
+
+    /// [`texel_sse`] of every texel against every palette entry, with the palette by channel so a
+    /// texel's row of 16 errors is a few vector multiplies.
+    #[inline(always)]
+    fn new_body(raw: &[u8; 16], src: &Block, w: &[u32; 4]) -> Self {
         let lo = u64::from_le_bytes(raw[..8].try_into().unwrap());
         let mut err = [[[0u32; 16]; 16]; 2];
         for (p1, tab) in err.iter_mut().enumerate() {
-            let pal = mode6_palette(lo, p1 as u64);
+            let e = mode6_endpoints(lo, p1 as u64);
+            let pal: [[i32; 16]; 4] =
+                std::array::from_fn(|c| std::array::from_fn(|k| i32::from(interp(e[0][c], e[1][c], W4[k]))));
             for (row, t) in tab.iter_mut().zip(src) {
-                for (e, p) in row.iter_mut().zip(&pal) {
-                    *e = texel_sse(t, p, w);
+                let mut acc = [0u32; 16];
+                for c in 0..4 {
+                    let (x, wc) = (i32::from(t[c]), w[c]);
+                    for (a, &p) in acc.iter_mut().zip(&pal[c]) {
+                        let d = x - p;
+                        *a += wc * (d * d) as u32;
+                    }
                 }
+                *row = acc;
             }
         }
         Self { err }
@@ -970,10 +996,12 @@ impl LinePal {
 
     /// [`Self::nearest`] for all 16 texels of `px` at once, for a 16-entry palette and weights
     /// of at most 128: the same projection (the same operations in the same order), window and
-    /// tie-breaking, so the same indices and errors exactly.
+    /// tie-breaking, so the same indices and errors exactly. None, after the first eight texels,
+    /// when texels 1-7 alone already cost more than `stop` (a caller's error bound, which the
+    /// whole block's error then exceeds too; texel 0, an anchor, is searched again by callers).
     #[cfg(target_arch = "x86_64")]
     #[target_feature(enable = "avx2")]
-    fn nearest16_avx2(&self, px: &Block, w: &[u32; 4]) -> ([u8; 16], [u32; 16]) {
+    fn nearest16_avx2(&self, px: &Block, w: &[u32; 4], stop: u64) -> Option<([u8; 16], [u32; 16])> {
         use std::arch::x86_64::*;
         debug_assert!(self.n == 16 && w.iter().all(|&x| x <= 128));
         let pal: [u32; 16] = self.pal.map(u32::from_le_bytes);
@@ -1047,8 +1075,11 @@ impl LinePal {
                     idx[i] = k as u8;
                     err[i] = es[l];
                 }
+                if h == 0 && err[1..8].iter().map(|&e| u64::from(e)).sum::<u64>() > stop {
+                    return None;
+                }
             }
-            (idx, err)
+            Some((idx, err))
         }
     }
 }
@@ -1601,7 +1632,7 @@ fn reindex_bounded_mode<const MODE: u8>(
     if MODE == 6 && crate::simd::level() == crate::simd::Level::Avx2 && w.iter().all(|&x| x <= 128) {
         let lp = pals[0].unwrap();
         // SAFETY: AVX2 was detected; the palette has 16 entries and the weights are in range.
-        let (idx, errs) = unsafe { lp.nearest16_avx2(px, w) };
+        let (idx, errs) = unsafe { lp.nearest16_avx2(px, w, bound) }?;
         for i in 0..16 {
             let (k, e) = if i == 0 {
                 best_index(&px[0], &lp.pal, lp.n / 2, w)
@@ -2194,7 +2225,7 @@ mod tests {
                 })
             });
             // SAFETY: AVX2 was detected; 16 entries; weights at most 128.
-            let (idx, err) = unsafe { lp.nearest16_avx2(&px, &w) };
+            let (idx, err) = unsafe { lp.nearest16_avx2(&px, &w, u64::MAX) }.unwrap();
             for i in 0..16 {
                 assert_eq!((idx[i], err[i]), lp.nearest(&px[i], &w), "case {k} texel {i}");
             }
