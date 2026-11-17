@@ -1199,31 +1199,34 @@ fn polish_in<const W: bool, const E: bool>(
     // The texels by partition, eight lanes at a time: partition `p`'s are lanes `seg[p]..seg[p +
     // 1]` (each start a multiple of eight; `live` masks off the padding), texel `i` is lane
     // `pos[i]`, with its weight per plane in `wl` and its channels in `xl`.
+    // Only the endpoint steps read them.
     let mut seg = [0usize; 4];
-    let mut cnt = [0usize; 3];
-    for &l in &lay.labels[..n] {
-        cnt[l as usize] += 1;
-    }
-    for p in 0..parts {
-        seg[p + 1] = seg[p] + cnt[p].next_multiple_of(8);
-    }
-    let used = seg[parts];
-    live[..used].fill(0);
-    for v in wl.iter_mut().chain(xl.iter_mut()) {
-        v[..used].fill(0);
-    }
-    let mut fill = seg;
-    for i in 0..n {
-        let p = lay.labels[i] as usize;
-        let k = fill[p];
-        fill[p] += 1;
-        pos[i] = k as u8;
-        live[k] = -1;
-        for pl in 0..planes {
-            wl[pl][k] = (sums[pl][i] >> 4) as i16;
+    if E {
+        let mut cnt = [0usize; 3];
+        for &l in &lay.labels[..n] {
+            cnt[l as usize] += 1;
         }
-        for c in 0..4 {
-            xl[c][k] = t.px[i][c] as i16;
+        for p in 0..parts {
+            seg[p + 1] = seg[p] + cnt[p].next_multiple_of(8);
+        }
+        let used = seg[parts];
+        live[..used].fill(0);
+        for v in wl.iter_mut().chain(xl.iter_mut()) {
+            v[..used].fill(0);
+        }
+        let mut fill = seg;
+        for i in 0..n {
+            let p = lay.labels[i] as usize;
+            let k = fill[p];
+            fill[p] += 1;
+            pos[i] = k as u8;
+            live[k] = -1;
+            for pl in 0..planes {
+                wl[pl][k] = (sums[pl][i] >> 4) as i16;
+            }
+            for c in 0..4 {
+                xl[c][k] = t.px[i][c] as i16;
+            }
         }
     }
     // Each texel's error over the channels of each plane.
@@ -1284,7 +1287,9 @@ fn polish_in<const W: bool, const E: bool>(
                 let i = i as usize;
                 sums[pl][i] = (sums[pl][i] as i32 + tw as i32 * d[dir]) as u16;
                 let w = sums[pl][i] >> 4;
-                wl[pl][pos[i] as usize] = w as i16;
+                if E {
+                    wl[pl][pos[i] as usize] = w as i16;
+                }
                 errp[pl][i] = texel_err(&base, &slope, i, pl, w);
             }
             idle = 0;

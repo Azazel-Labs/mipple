@@ -101,6 +101,15 @@ mod imp {
         pub fn madd(self, o: Self) -> I32x4 {
             I32x4(unsafe { _mm_madd_epi16(self.0, o.0) })
         }
+
+        /// The lanes as bytes, clamped to 0..=255.
+        #[inline]
+        pub fn to_u8(self) -> [u8; 8] {
+            let mut v = [0u8; 8];
+            // SAFETY: 8 bytes, unaligned store.
+            unsafe { _mm_storel_epi64(v.as_mut_ptr().cast(), _mm_packus_epi16(self.0, self.0)) };
+            v
+        }
     }
 
     impl I32x4 {
@@ -270,6 +279,12 @@ mod imp {
         pub fn madd(self, o: Self) -> I32x4 {
             let s = |k: usize| self.0[k] as i32 * o.0[k] as i32;
             I32x4(std::array::from_fn(|l| s(2 * l).wrapping_add(s(2 * l + 1))))
+        }
+
+        /// The lanes as bytes, clamped to 0..=255.
+        #[inline]
+        pub fn to_u8(self) -> [u8; 8] {
+            self.0.map(|x| x.clamp(0, 255) as u8)
         }
     }
 

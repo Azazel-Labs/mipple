@@ -1,5 +1,6 @@
 //! Decoding ASTC LDR blocks to RGBA8.
 
+use super::lanes::I16x8;
 use super::{COLOR_UNQUANT, PartitionFn, Symbolic, WEIGHT_UNQUANT, cem_is_hdr, cem_values};
 use crate::surface::{Rgba, Surface};
 
@@ -251,13 +252,67 @@ pub fn decode_symbolic_tw(sym: &Symbolic, bw: u32, bh: u32, srgb: bool, out: &mu
             ((c0 * (64 - ws[c]) + c1 * ws[c] + 32) >> sh) as u8
         })
     };
+    let pf = PartitionFn::new(sym.seed as u32, sym.partitions as u32, bw * bh);
+    if !srgb {
+        // Linear: (64 c0 + 32 + (c1 - c0) w) >> 6, the same value, fits in i16 lanes (0 to
+        // 16352, the product within ±16320): two texels at a time.
+        let half = |e: &([i32; 4], [i32; 4])| -> ([i16; 4], [i16; 4]) {
+            (
+                e.0.map(|v| (64 * v + 32) as i16),
+                std::array::from_fn(|c| (e.1[c] - e.0[c]) as i16),
+            )
+        };
+        let parts: [([i16; 4], [i16; 4]); 4] = std::array::from_fn(|q| half(&eps[q]));
+        if p == 1 && !sym.mode.dual {
+            let (b, d) = (
+                I16x8::dup4(eps[0].0.map(|v| 64 * v + 32)),
+                I16x8::dup4(std::array::from_fn(|c| eps[0].1[c] - eps[0].0[c])),
+            );
+            for k in (0..n).step_by(2) {
+                // Lanes past `n` read `tw`'s padding and are not written.
+                let (w0, w1) = (tw[0][k] as i16, tw[0][k + 1] as i16);
+                let w = I16x8::from_array([w0, w0, w0, w0, w1, w1, w1, w1]);
+                let v = b.add(w.mul(d)).shr::<6>().to_u8();
+                out[k] = [v[0], v[1], v[2], v[3]];
+                if k + 1 < n {
+                    out[k + 1] = [v[4], v[5], v[6], v[7]];
+                }
+            }
+            return;
+        }
+        let lanes = |i: usize, s: u32, t: u32| -> ([i16; 4], [i16; 4], [i16; 4]) {
+            let (b, d) = parts[if p == 1 { 0 } else { pf.at(s, t) as usize }];
+            let mut w = [tw[0][i] as i16; 4];
+            if sym.mode.dual {
+                w[sym.ccs as usize] = tw[1][i] as i16;
+            }
+            (b, d, w)
+        };
+        let at = |i: usize| ((i as u32) % bw, (i as u32) / bw);
+        for k in (0..n).step_by(2) {
+            let (s0, t0) = at(k);
+            let (b0, d0, w0) = lanes(k, s0, t0);
+            let (b1, d1, w1) = if k + 1 < n {
+                let (s1, t1) = at(k + 1);
+                lanes(k + 1, s1, t1)
+            } else {
+                (b0, d0, w0)
+            };
+            let cat = |a: [i16; 4], b: [i16; 4]| I16x8::from_array([a[0], a[1], a[2], a[3], b[0], b[1], b[2], b[3]]);
+            let v = cat(b0, b1).add(cat(w0, w1).mul(cat(d0, d1))).shr::<6>().to_u8();
+            out[k] = [v[0], v[1], v[2], v[3]];
+            if k + 1 < n {
+                out[k + 1] = [v[4], v[5], v[6], v[7]];
+            }
+        }
+        return;
+    }
     if p == 1 && !sym.mode.dual {
         for (o, &w) in out[..n].iter_mut().zip(&tw[0][..n]) {
             *o = texel(&lin[0], [w as u32; 4]);
         }
         return;
     }
-    let pf = PartitionFn::new(sym.seed as u32, sym.partitions as u32, bw * bh);
     for t in 0..bh {
         for s in 0..bw {
             let i = (t * bw + s) as usize;

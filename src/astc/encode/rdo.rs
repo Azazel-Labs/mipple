@@ -730,24 +730,36 @@ fn optimize_chunk_light(
     let min_lit = lit.iter().copied().fold(f32::MAX, f32::min);
     // A match's bits: a repeat offset after a match in this block or the previous one, else new.
     let mbits = |rep: bool, l: usize| if rep { 3.0 } else { LIGHT_NEW_MATCH } + match_len_bits(l);
-    // rem[r]: the fewest bits `r` bytes can cost (cheapest literals and repeat-offset matches).
-    let mut rem = [0f32; 17];
-    for r in 1..=16 {
-        rem[r] = (3..=r).fold(min_lit + rem[r - 1], |b, l| b.min(mbits(true, l) + rem[r - l]));
-    }
-    // head_lb[rep][h]: the fewest bits a block sharing its first `h` bytes with the previous block's
-    // can cost (a match of at least `h` bytes, then any cover of the rest).
-    let head_lb: [[f32; 17]; 2] = std::array::from_fn(|r| {
-        std::array::from_fn(|h| {
-            if h < 3 {
-                rem[16]
-            } else {
-                (h..=16)
-                    .map(|l| mbits(r == 1, l) + rem[16 - l])
-                    .fold(f32::MAX, f32::min)
+    // cost(rep, lp, ls): what `bits` charges a block sharing exactly its first `lp` and last `ls`
+    // bytes with the previous block's, with each literal at the cheapest literal's cost.
+    let cost = |rep: bool, lp: usize, ls: usize| -> f32 {
+        if lp == 16 {
+            return mbits(rep, 16);
+        }
+        let (mut b, mut rep, mut k0, mut k1) = (0.0, rep, 0, 16);
+        if lp >= 3 {
+            (b, rep, k0) = (mbits(rep, lp), true, lp);
+        }
+        if ls >= 3 {
+            (b, k1) = (b + mbits(rep, ls), 16 - ls);
+        }
+        b + (k1 - k0) as f32 * min_lit
+    };
+    // The fewest bits `bits` can charge a block sharing at least its first `h` and last `t` bytes
+    // with the previous block's (a block that is not all shared differs in a byte between them),
+    // a little under, for the order `bits` sums its literals in.
+    let lb = |rep: bool, h: usize, t: usize| -> f32 {
+        let mut m = cost(rep, 16, 16);
+        for lp in h..16 {
+            for ls in t..16 - lp {
+                m = m.min(cost(rep, lp, ls));
             }
-        })
-    });
+        }
+        m * 0.9999 - 0.001
+    };
+    // head_lb[rep][h] and tail_lb[rep][t]: that bound with only a prefix or only a suffix known.
+    let head_lb: [[f32; 17]; 2] = std::array::from_fn(|r| std::array::from_fn(|h| lb(r == 1, h, 0)));
+    let tail_lb: [[f32; 17]; 2] = std::array::from_fn(|r| std::array::from_fn(|t| lb(r == 1, 0, t)));
     let lambda = p.lambda as f64;
     let ratio2 = (p.max_rms_ratio as f64).powi(2);
     let floor = (n * 4) as f64 * (p.min_rms as f64).powi(2);
@@ -836,26 +848,25 @@ fn optimize_chunk_light(
             // The previous block's endpoints with weights for this block, unless the base has them.
             let below = 128 - ps.sym.mode.weight_bits();
             let mask = (1u128 << below) - 1;
+            // The fewest bits each candidate can cost: the reweighted block keeps the previous
+            // block's first `below / 8` bytes, the refitted one its last `weight_bits / 8`.
+            let pm = prev_matched as usize;
+            let lbs = [head_lb[pm][below / 8], tail_lb[pm][(128 - below) / 8]];
             if b0 & mask != v & mask {
-                let cap = cap_for(best.0, head_lb[prev_matched as usize][below / 8], limit);
+                let cap = cap_for(best.0, lbs[0], limit);
                 cands[0] = reweight(fp, &t, &ps.lay, ps.gi, &ps.sym, &ps.eps, &bs, cap);
             }
             // Its weights with endpoints refitted to this block, unless the base has them.
             if let Some(rb) = &ps.refit
                 && b0 & !mask != v & !mask
             {
-                cands[1] = refit_to(
-                    fp,
-                    &t,
-                    &ps.lay,
-                    ps.gi,
-                    &ps.sym,
-                    rb,
-                    &bs,
-                    cap_for(best.0, rem[16], limit),
-                );
+                cands[1] = refit_to(fp, &t, &ps.lay, ps.gi, &ps.sym, rb, &bs, cap_for(best.0, lbs[1], limit));
             }
-            for (c, err) in cands.into_iter().flatten() {
+            for (k, (c, err)) in cands.into_iter().enumerate().filter_map(|(k, c)| c.map(|c| (k, c))) {
+                // Not written if it loses even at its fewest bits.
+                if err as u64 > limit || score(err as u64, lbs[k]) >= best.0 {
+                    continue;
+                }
                 let Some(b) = c.write() else { continue };
                 let b = b.to_le_bytes();
                 debug_assert_eq!(err as u64, {
