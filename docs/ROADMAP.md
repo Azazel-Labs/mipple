@@ -250,10 +250,16 @@ Open for v0.9.x:
     on PSNR, SSIM, Zstd and Deflate size and time at once (BENCHMARKS.md, e570c02). Effort 0 has its
     own floor on λ from 8x5 to 10x8 (0.85-3), so it beats fast on all five there too, level on time at 8x5
     (BENCHMARKS.md, b7b5f20).
-  - [ ] Effort 0's default light pass against fast's time at 4x4-6x6: it wins PSNR, SSIM and both sizes but
-    takes 1.0-1.3× fast's time (`-l 0` is faster than fast, with files up to 2% larger). The Zstd check
-    skips chunks level 1 says grew by 4 bytes or fewer (3691688): 1.011× less time at 4x4, level at 5x5
-    and 6x5 (cloud A/B 44043405979, Kodak-24), and slightly smaller files.
+  - [ ] Effort 0's default light pass against fast's time at 4x4-6x6: it wins PSNR and SSIM everywhere, and
+    both sizes except Zstd at 6x5 (3.837 against 3.825 bpt), but at 4e03e6c (cloud bench 44061144254,
+    EPYC 7763, Kodak-24, one pinned thread) it takes 3.08 s against fast's 3.05 s at 4x4, 2.78 / 2.32 at
+    5x4, 2.69 / 2.16 at 5x5, 2.61 / 2.21 at 6x5 and 2.31 / 2.47 at 6x6. `-l 0` is faster than fast at
+    every footprint (1.42-1.89 s), with files up to 2% larger, so the light pass costs 0.9-1.2 s. The
+    Zstd check skips chunks level 1 says grew by 4 bytes or fewer (3691688): 1.011× less time at 4x4,
+    level at 5x5 and 6x5 (cloud A/B 44043405979). Layouts, QuadSums and the light pass's previous-block
+    fields filled in place (f129d7b): 1.055× less time at 4x4 effort 0, 1.040× at 6x5, 1.033× at 4x4
+    effort 2 (cloud A/B 44058354730, Xeon 8573C); the dominant-axis iteration as lanes (4e03e6c): 1.011-1.013×
+    (cloud A/B 44061093046, EPYC 7763). All output identical.
   - [ ] A GPU kernel, a SIMD batch encoder, HDR.
 - [x] ETC2 / EAC for mobile fallbacks: ETC2 RGB (all five modes), ETC2 RGBA8 and EAC R11 / RG11 (unsigned),
   KTX2 only, with the RDO pass. On Kodak, one thread, effort 0 is 0.37 dB ahead of Compressonator in an
