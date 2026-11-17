@@ -178,15 +178,13 @@ impl Reader {
         Reader { v, pos }
     }
 
-    /// The next `n` (at most 31) bits.
-    fn take(&mut self, n: u32) -> u32 {
-        let out = if self.pos >= 128 {
+    /// The next 64 bits (zero past the end), without moving on.
+    fn peek(&self) -> u64 {
+        if self.pos >= 128 {
             0
         } else {
-            (self.v >> self.pos) as u32 & ((1u32 << n) - 1)
-        };
-        self.pos += n;
-        out
+            (self.v >> self.pos) as u64
+        }
     }
 }
 
@@ -198,18 +196,31 @@ pub fn ise_decode(v: u128, start: u32, q: usize, out: &mut [u8]) {
     let mut r = Reader::new(v, start, start + ise_bits(n, q) as u32);
     match kind {
         0 => {
-            for o in out.iter_mut() {
-                *o = r.take(bits) as u8;
+            // As many values as fit in one 64-bit read at a time.
+            let per = (64 / bits.max(1)) as usize;
+            let mask = (1u64 << bits) - 1;
+            for c in out.chunks_mut(per) {
+                let x = r.peek();
+                for (j, o) in c.iter_mut().enumerate() {
+                    *o = (x >> (j as u32 * bits) & mask) as u8;
+                }
+                r.pos += c.len() as u32 * bits;
             }
         }
         1 => {
+            // A whole trit block (at most 38 bits) per read.
+            let b = bits;
+            let mask = (1u64 << b) - 1;
             for g in 0..n.div_ceil(5) {
-                let mut m = [0u32; 5];
-                let mut t = 0;
-                for (j, (shift, w)) in [(0, 2), (2, 2), (4, 1), (5, 2), (7, 1)].into_iter().enumerate() {
-                    m[j] = r.take(bits);
-                    t |= r.take(w) << shift;
-                }
+                let x = r.peek();
+                r.pos += 5 * b + 8;
+                let f = |at: u32| (x >> at & mask) as u32;
+                let m = [f(0), f(b + 2), f(2 * b + 4), f(3 * b + 5), f(4 * b + 7)];
+                let t = (x >> b & 3)
+                    | (x >> (2 * b + 2) & 3) << 2
+                    | (x >> (3 * b + 4) & 1) << 4
+                    | (x >> (4 * b + 5) & 3) << 5
+                    | (x >> (5 * b + 7) & 1) << 7;
                 let tr = TRITS.0[t as usize];
                 for j in 0..5 {
                     if let Some(o) = out.get_mut(5 * g + j) {
@@ -219,13 +230,15 @@ pub fn ise_decode(v: u128, start: u32, q: usize, out: &mut [u8]) {
             }
         }
         _ => {
+            // A whole quint block (at most 22 bits) per read.
+            let b = bits;
+            let mask = (1u64 << b) - 1;
             for g in 0..n.div_ceil(3) {
-                let mut m = [0u32; 3];
-                let mut t = 0;
-                for (j, (shift, w)) in [(0, 3), (3, 2), (5, 2)].into_iter().enumerate() {
-                    m[j] = r.take(bits);
-                    t |= r.take(w) << shift;
-                }
+                let x = r.peek();
+                r.pos += 3 * b + 7;
+                let f = |at: u32| (x >> at & mask) as u32;
+                let m = [f(0), f(b + 3), f(2 * b + 5)];
+                let t = (x >> b & 7) | (x >> (2 * b + 3) & 3) << 3 | (x >> (3 * b + 5) & 3) << 5;
                 let qu = QUINTS.0[t as usize];
                 for j in 0..3 {
                     if let Some(o) = out.get_mut(3 * g + j) {
@@ -244,21 +257,31 @@ pub fn ise_encode(v: &mut u128, start: u32, q: usize, vals: &[u8]) {
     let bits = bits as u32;
     let len = ise_bits(n, q) as u32;
     // Fields go into `acc` from bit 0, which is cut to the sequence's length at the end (the last
-    // trit or quint block is truncated).
+    // trit or quint block is truncated). They are gathered in 64 bits first (a whole trit or quint
+    // block, or as many plain values as fit), so `acc` takes one shift per group instead of one per
+    // field.
     let mut acc = 0u128;
     let mut pos = 0u32;
-    let mut put = |x: u32, w: u32, _: &mut u128| {
+    let mut put = |x: u64, w: u32| {
         if pos < 128 {
-            acc |= ((x & ((1u32 << w) - 1)) as u128) << pos;
+            acc |= (x as u128) << pos;
         }
         pos += w;
     };
     let mask = (1u32 << bits) - 1;
+    let m = |g: &[u8], j: usize| g.get(j).map_or(0, |&x| (x as u32 & mask) as u64);
     match kind {
         0 => {
+            let (mut buf, mut w) = (0u64, 0u32);
             for &x in vals {
-                put(x as u32, bits, v);
+                if w + bits > 64 {
+                    put(buf, w);
+                    (buf, w) = (0, 0);
+                }
+                buf |= ((x as u32 & mask) as u64) << w;
+                w += bits;
             }
+            put(buf, w);
         }
         1 => {
             for g in vals.chunks(5) {
@@ -268,11 +291,22 @@ pub fn ise_encode(v: &mut u128, start: u32, q: usize, vals: &[u8]) {
                     k += (x as usize >> bits) * mul;
                     mul *= 3;
                 }
-                let t = TRITS.1[k] as u32;
-                for (j, (shift, w)) in [(0, 2), (2, 2), (4, 1), (5, 2), (7, 1)].into_iter().enumerate() {
-                    put(g.get(j).map_or(0, |&x| x as u32 & mask), bits, v);
-                    put(t >> shift, w, v);
-                }
+                let t = TRITS.1[k] as u64;
+                let b = bits;
+                // Each value's bits, then its share of the trit block's eight bits: 2, 2, 1, 2, 1.
+                put(
+                    m(g, 0)
+                        | (t & 3) << b
+                        | m(g, 1) << (b + 2)
+                        | (t >> 2 & 3) << (2 * b + 2)
+                        | m(g, 2) << (2 * b + 4)
+                        | (t >> 4 & 1) << (3 * b + 4)
+                        | m(g, 3) << (3 * b + 5)
+                        | (t >> 5 & 3) << (4 * b + 5)
+                        | m(g, 4) << (4 * b + 7)
+                        | (t >> 7 & 1) << (5 * b + 7),
+                    5 * b + 8,
+                );
             }
         }
         _ => {
@@ -283,11 +317,18 @@ pub fn ise_encode(v: &mut u128, start: u32, q: usize, vals: &[u8]) {
                     k += (x as usize >> bits) * mul;
                     mul *= 5;
                 }
-                let t = QUINTS.1[k] as u32;
-                for (j, (shift, w)) in [(0, 3), (3, 2), (5, 2)].into_iter().enumerate() {
-                    put(g.get(j).map_or(0, |&x| x as u32 & mask), bits, v);
-                    put(t >> shift, w, v);
-                }
+                let t = QUINTS.1[k] as u64;
+                let b = bits;
+                // Each value's bits, then its share of the quint block's seven bits: 3, 2, 2.
+                put(
+                    m(g, 0)
+                        | (t & 7) << b
+                        | m(g, 1) << (b + 3)
+                        | (t >> 3 & 3) << (2 * b + 3)
+                        | m(g, 2) << (2 * b + 5)
+                        | (t >> 5 & 3) << (3 * b + 5),
+                    3 * b + 7,
+                );
             }
         }
     }
