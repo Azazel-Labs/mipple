@@ -101,35 +101,30 @@ fn texels(px: &[Rgba]) -> Texels<'_> {
     t
 }
 
-/// The labels of `sym`'s partitioning (the only parts of a layout polish and refit read).
-fn layout_of(fp: &Footprint, sym: &Symbolic) -> Layout {
+/// Makes `lay` the labels of `sym`'s partitioning (the only parts of a layout polish and refit
+/// read), over `fp`'s texels: those past them are left as [`Layout::blank`] leaves them.
+fn set_labels(fp: &Footprint, sym: &Symbolic, lay: &mut Layout) {
     let n = fp.texels();
-    let mut lay = Layout {
-        count: sym.partitions,
-        seed: sym.seed,
-        labels: [0; MAX_TEXELS],
-        lab16: [-1; MAX_TEXELS],
-        ccs: if sym.mode.dual { sym.ccs as usize } else { NO_CCS },
-        u: [0.0; MAX_TEXELS],
-        scale: [0.0; MAX_TEXELS],
-        u2: [0.0; MAX_TEXELS],
-        scale2: 0.0,
-        orth: 0.0,
-        scaled: [(f32::MAX, 0); 3],
-    };
+    lay.count = sym.partitions;
+    lay.seed = sym.seed;
+    lay.ccs = if sym.mode.dual { sym.ccs as usize } else { NO_CCS };
+    if sym.partitions == 1 {
+        lay.labels[..n].fill(0);
+        lay.lab16[..n].fill(0);
+        return;
+    }
     let pf = PartitionFn::new(sym.seed as u32, sym.partitions as u32, n as u32);
     for i in 0..n {
         let l = pf.at(i as u32 % fp.bw, i as u32 / fp.bw);
         lay.labels[i] = l;
         lay.lab16[i] = l as i16;
     }
-    lay
 }
 
 /// `sym`'s fields, labels and grid, if the candidates can build on them: up to three partitions,
 /// each luminance (0), direct (8, 12), base+offset (9, 13) or base+scale (6, 10), as the encoder
-/// writes. `tw` holds its weights infilled to the texels, as its decode left them. Boxed in one of
-/// `spare`'s boxes if it has one.
+/// writes. `tw` holds its weights infilled to the texels, as its decode left them. Filled in one of
+/// `spare`'s boxes if it has one (all from `fp`, so their labels past its texels are blank).
 #[allow(clippy::vec_box, reason = "spare recycles the boxes it hands out")]
 fn prev_sym(
     fp: &Footprint,
@@ -149,26 +144,27 @@ fn prev_sym(
         .grids
         .iter()
         .position(|g| g.gx == sym.mode.gx && g.gy == sym.mode.gy)?;
-    let lay = layout_of(fp, &sym);
-    let refit = refit_base(fp, &lay, gi, &sym, tw);
-    let mut eps = [([0i32; 4], [0i32; 4]); 3];
-    for (q, e) in eps.iter_mut().enumerate().take(p) {
-        *e = sym_endpoints(&sym, q);
+    let mut b = spare.pop().unwrap_or_else(|| {
+        Box::new(PrevSym {
+            sym: sym.clone(),
+            lay: Layout::blank(),
+            gi,
+            eps: [([0; 4], [0; 4]); 3],
+            refit: None,
+        })
+    });
+    set_labels(fp, &sym, &mut b.lay);
+    b.refit = refit_base(fp, &b.lay, gi, &sym, tw);
+    for (q, e) in b.eps.iter_mut().enumerate() {
+        *e = if q < p {
+            sym_endpoints(&sym, q)
+        } else {
+            ([0; 4], [0; 4])
+        };
     }
-    let v = PrevSym {
-        sym,
-        lay,
-        gi,
-        eps,
-        refit,
-    };
-    Some(match spare.pop() {
-        Some(mut b) => {
-            *b = v;
-            b
-        }
-        None => Box::new(v),
-    })
+    b.sym = sym;
+    b.gi = gi;
+    Some(b)
 }
 
 /// The texel-independent parts of refitting endpoints to `sym`'s weights (see [`RefitBase`]), given

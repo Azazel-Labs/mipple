@@ -1329,10 +1329,32 @@ struct Layout {
 }
 
 impl Layout {
-    /// The layout of partitions 0..`count` by labels `lab` (as lanes: -1 past the texels; whose
-    /// moments are `ms`), with channel `ccs` on a second plane; `axis0`, when given, is partition
-    /// 0's dominant axis (of its scatter without channel `ccs`), already computed.
-    fn new(
+    /// A layout of no texels: every per-texel entry zero (`lab16` -1), as [`Layout::fill`] leaves
+    /// those past the texels.
+    fn blank() -> Self {
+        Layout {
+            count: 0,
+            seed: 0,
+            labels: [0; MAX_TEXELS],
+            lab16: [-1; MAX_TEXELS],
+            ccs: NO_CCS,
+            u: [0.0; MAX_TEXELS],
+            scale: [0.0; MAX_TEXELS],
+            u2: [0.0; MAX_TEXELS],
+            scale2: 0.0,
+            orth: 0.0,
+            scaled: [(f32::MAX, 0); 3],
+        }
+    }
+
+    /// Makes this the layout of partitions 0..`count` by labels `lab` (as lanes: -1 past the
+    /// texels; whose moments are `ms`), with channel `ccs` on a second plane; `axis0`, when given,
+    /// is partition 0's dominant axis (of its scatter without channel `ccs`), already computed.
+    /// Writes the per-texel entries of the first `t.n` texels only: those past them must already
+    /// be as [`Layout::blank`] leaves them (a layout last filled for the same texel count is).
+    #[allow(clippy::too_many_arguments, reason = "the layout's inputs, as the encoder has them")]
+    fn fill(
+        &mut self,
         t: &Texels,
         count: u8,
         seed: u16,
@@ -1340,21 +1362,16 @@ impl Layout {
         ccs: usize,
         ms: &[Moments; 3],
         axis0: Option<[f32; 4]>,
-    ) -> Self {
+    ) {
         let n = t.n;
-        let mut l = Layout {
-            count,
-            seed,
-            labels: [0; MAX_TEXELS],
-            lab16: *lab,
-            ccs,
-            u: [0.0; MAX_TEXELS],
-            scale: [0.0; MAX_TEXELS],
-            u2: [0.0; MAX_TEXELS],
-            scale2: 0.0,
-            orth: 0.0,
-            scaled: [(f32::MAX, 0); 3],
-        };
+        let l = self;
+        l.count = count;
+        l.seed = seed;
+        l.lab16 = *lab;
+        l.ccs = ccs;
+        l.scale2 = 0.0;
+        l.orth = 0.0;
+        l.scaled = [(f32::MAX, 0); 3];
         let rgb = t.ch == 3 && ccs == NO_CCS;
         // Per partition, the squared distance from its line and from its line through black.
         let mut off = [(0f32, 0f32); 3];
@@ -1420,7 +1437,8 @@ impl Layout {
                 l.scaled[k] = (orth, mask);
             }
         }
-        let mut u = [0f32; MAX_TEXELS];
+        // Each texel's position along its partition's axis, made weights below.
+        let u = &mut l.u;
         for i in 0..n {
             let p = labels[i] as usize;
             let (m, a, q) = (&means[p], &axes[p], &t.f[i]);
@@ -1455,8 +1473,8 @@ impl Layout {
             inv[p] = 64.0 / len;
         }
         for i in 0..n {
-            let p = l.labels[i] as usize;
-            l.u[i] = (u[i] - lo[p]) * inv[p];
+            let p = labels[i] as usize;
+            l.u[i] = (l.u[i] - lo[p]) * inv[p];
             l.scale[i] = sc[p];
         }
         if ccs < NO_CCS {
@@ -1468,8 +1486,9 @@ impl Layout {
             for i in 0..n {
                 l.u2[i] = (t.f[i][ccs] - lo) * (64.0 / len);
             }
+        } else {
+            l.u2[..n].fill(0.0);
         }
-        l
     }
 }
 
@@ -1552,19 +1571,20 @@ fn off_lines(ms: &[Moments; 3], count: usize, ch: usize) -> f32 {
 
 /// Each run of four texels' RGB moments (count, three sums, six products) for every subset of the
 /// run, so a texel mask's moments take one lookup per four texels instead of a pass over the
-/// texels. Built once per block for [`off_lines_rgb`].
+/// texels. Built once per block for [`off_lines_rgb`], in memory kept from block to block (23 KB,
+/// of which a 4x4 block's four runs use 2.5).
 struct QuadSums {
     tab: [[[u32; 10]; 16]; MAX_TEXELS / 4],
     groups: usize,
 }
 
 impl QuadSums {
-    fn new(t: &Texels) -> Self {
-        let mut q = QuadSums {
-            tab: [[[0; 10]; 16]; MAX_TEXELS / 4],
-            groups: t.n.div_ceil(4),
-        };
+    /// Makes this `t`'s table: the runs past its texels are left as they were, and not read.
+    fn fill(&mut self, t: &Texels) {
+        let q = self;
+        q.groups = t.n.div_ceil(4);
         for g in 0..q.groups {
+            q.tab[g][0] = [0; 10];
             let v: [[u32; 10]; 4] = std::array::from_fn(|j| {
                 let i = 4 * g + j;
                 let [r, gr, b] = [0, 1, 2].map(|c| t.xl[c][i] as u32);
@@ -1575,7 +1595,6 @@ impl QuadSums {
                 q.tab[g][m] = std::array::from_fn(|x| q.tab[g][rest][x] + v[low][x]);
             }
         }
-        q
     }
 
     /// The moments of the texels in `mask` (one bit per texel).
@@ -2518,6 +2537,7 @@ pub fn encode_block(fp: &Footprint, px: &[Rgba], srgb: bool, effort: u8) -> [u8;
     let mut scratch = SCRATCH.take().unwrap_or_default();
     let Scratch {
         layouts,
+        quad,
         short_top,
         spans,
         cands,
@@ -2525,15 +2545,15 @@ pub fn encode_block(fp: &Footprint, px: &[Rgba], srgb: bool, effort: u8) -> [u8;
         decimated,
         finals,
     } = &mut *scratch;
-    layouts.clear();
+    layouts.reset(n);
     // One partition's moments and principal axis, shared by the one-partition layouts and k-means.
     let lab1: [i16; MAX_TEXELS] = std::array::from_fn(|i| if i < n { 0 } else { -1 });
     let ms1 = Moments::of(&t, &lab1, 1);
     let (mean1, cov) = ms1[0].mean_cov();
     let axis1 = dominant(&cov);
-    layouts.push(Layout::new(&t, 1, 0, &lab1, NO_CCS, &ms1, Some(axis1)));
+    layouts.next().fill(&t, 1, 0, &lab1, NO_CCS, &ms1, Some(axis1));
     // The texels' mean squared distance from their line, per channel.
-    let off_line = layouts[0].orth / (n * t.ch) as f32;
+    let off_line = layouts.all()[0].orth / (n * t.ch) as f32;
     if es.dual > 0 && off_line >= es.line[2] {
         // Channels for the second plane, those leaving the rest closest to a line first: the
         // variance of the other channels off their dominant axis.
@@ -2553,10 +2573,10 @@ pub fn encode_block(fp: &Footprint, px: &[Rgba], srgb: bool, effort: u8) -> [u8;
             .collect();
         off.sort_by(|a, b| a.0.total_cmp(&b.0));
         for &(_, c, v) in off.iter().take(es.dual) {
-            layouts.push(Layout::new(&t, 1, 0, &lab1, c, &ms1, Some(v)));
+            layouts.next().fill(&t, 1, 0, &lab1, c, &ms1, Some(v));
         }
     }
-    let mut quad: Option<QuadSums> = None;
+    let mut have_quad = false;
     for (pi, &want) in es.patterns.iter().enumerate() {
         let k = pi + 2;
         if want == 0 || off_line < es.line[pi] {
@@ -2583,7 +2603,16 @@ pub fn encode_block(fp: &Footprint, px: &[Rgba], srgb: bool, effort: u8) -> [u8;
                 by.truncate(want);
             };
             if t.ch == 3 {
-                let q = quad.get_or_insert_with(|| QuadSums::new(&t));
+                let q = quad.get_or_insert_with(|| {
+                    Box::new(QuadSums {
+                        tab: [[[0; 10]; 16]; MAX_TEXELS / 4],
+                        groups: 0,
+                    })
+                });
+                if !have_quad {
+                    q.fill(&t);
+                    have_quad = true;
+                }
                 let (nw, stride) = (fp.nw, fp.nw * (pi + 1));
                 for chunk in ranked.chunks(RR_LANES) {
                     let masks = std::array::from_fn(|l| {
@@ -2604,7 +2633,9 @@ pub fn encode_block(fp: &Footprint, px: &[Rgba], srgb: bool, effort: u8) -> [u8;
         }
         for &i in ranked.iter().take(want) {
             let ms = Moments::of(&t, &pats[i].lab, k as u8);
-            layouts.push(Layout::new(&t, k as u8, pats[i].seed, &pats[i].lab, NO_CCS, &ms, None));
+            layouts
+                .next()
+                .fill(&t, k as u8, pats[i].seed, &pats[i].lab, NO_CCS, &ms, None);
         }
     }
     // Score every (partitioning, grid, weight range): the error of the ideal weights decimated to
@@ -2626,6 +2657,7 @@ pub fn encode_block(fp: &Footprint, px: &[Rgba], srgb: bool, effort: u8) -> [u8;
     let top = short_top;
     top.clear();
     top.resize(short, empty);
+    let layouts = layouts.all();
     assert!(layouts.len() < 256 && fp.grids.len() < 256);
     // Each layout's span (below) and estimate kind.
     spans.clear();
@@ -2858,13 +2890,48 @@ type Cand = (f32, f32, u16, u16, u16, u8);
 /// instead of allocating its own (a few kilobytes of layouts and lists per block).
 #[derive(Default)]
 struct Scratch {
-    layouts: Vec<Layout>,
+    layouts: Layouts,
+    quad: Option<Box<QuadSums>>,
     short_top: Vec<u64>,
     spans: Vec<(f32, usize)>,
     cands: Vec<Cand>,
     measured: Vec<(u16, u16, f32)>,
     decimated: Vec<[[f32; 64]; 2]>,
     finals: Vec<(u32, Symbolic, (usize, usize))>,
+}
+
+/// A block's layouts, their memory kept from block to block: each refilled in place (see
+/// [`Layout::fill`]), not built afresh (kilobytes of zeros per layout, for 16 texels at 4x4).
+#[derive(Default)]
+struct Layouts {
+    v: Vec<Layout>,
+    len: usize,
+    /// The texel count the layouts in `v` were filled for.
+    n: usize,
+}
+
+impl Layouts {
+    /// Empties the list for a block of `n` texels.
+    fn reset(&mut self, n: usize) {
+        if self.n != n {
+            self.v.clear();
+            self.n = n;
+        }
+        self.len = 0;
+    }
+
+    /// A layout added to the list, to fill.
+    fn next(&mut self) -> &mut Layout {
+        if self.len == self.v.len() {
+            self.v.push(Layout::blank());
+        }
+        self.len += 1;
+        &mut self.v[self.len - 1]
+    }
+
+    fn all(&self) -> &[Layout] {
+        &self.v[..self.len]
+    }
 }
 
 thread_local! {
