@@ -7,9 +7,10 @@ milestone in progress; every green push to main is released as the next patch (`
 ## Next up
 
 1. ~~ASTC LDR (4x4, 6x6, 8x8) output, with the same RDO pass.~~ Done (v1.0 below); next for it: a GPU kernel,
-   ~~more footprints~~ (all 14 2D footprints done), a faster RDO pass.
+   ~~more footprints~~ (all 14 2D footprints done), ~~a faster RDO pass~~ (the light pass's quick form,
+   1e03746), effort 0 faster than astcenc fast at 5x4-6x5.
 2. BC6H: ~~RDO with a log-space distortion~~ (done: 42% smaller Zstd files at λ 2), ~~signed BC6H~~ (done),
-   a GPU kernel.
+   a GPU kernel (tried: not merged, it slowed the CPU path; DEADENDS, branch `wt/bc6h-gpu`).
 3. ~~ETC2 / EAC for mobile fallbacks.~~ Done (v1.0 below), with ~~punch-through alpha (ETC2 RGB A1)~~ and
    ~~signed EAC~~ and ~~a faster CPU encoder and RDO candidate error~~ (1.3-2x, byte-identical); next for it: a
    SIMD batch encoder and a GPU kernel.
@@ -250,21 +251,27 @@ Open for v0.9.x:
     on PSNR, SSIM, Zstd and Deflate size and time at once (BENCHMARKS.md, e570c02). Effort 0 has its
     own floor on λ from 8x5 to 10x8 (0.85-3), so it beats fast on all five there too, level on time at 8x5
     (BENCHMARKS.md, b7b5f20).
-  - [ ] Effort 0's default light pass against fast's time at 4x4-6x6: it wins PSNR and SSIM everywhere, and
-    both sizes except Zstd at 6x5 (3.837 against 3.825 bpt), but at 4e03e6c (cloud bench 44061144254,
-    EPYC 7763, Kodak-24, one pinned thread) it takes 3.08 s against fast's 3.05 s at 4x4, 2.78 / 2.32 at
-    5x4, 2.69 / 2.16 at 5x5, 2.61 / 2.21 at 6x5 and 2.31 / 2.47 at 6x6. `-l 0` is faster than fast at
-    every footprint (1.42-1.89 s), with files up to 2% larger, so the light pass costs 0.9-1.2 s. The
-    Zstd check skips chunks level 1 says grew by 4 bytes or fewer (3691688): 1.011× less time at 4x4,
-    level at 5x5 and 6x5 (cloud A/B 44043405979). Layouts, QuadSums and the light pass's previous-block
-    fields filled in place (f129d7b): 1.055× less time at 4x4 effort 0, 1.040× at 6x5, 1.033× at 4x4
-    effort 2 (cloud A/B 44058354730, Xeon 8573C); the dominant-axis iteration as lanes (4e03e6c): 1.011-1.013×
-    (cloud A/B 44061093046, EPYC 7763); block texels in kept memory and the RDO pass's SSE as lanes
-    (bc905be): 1.038× at 4x4 effort 0, 1.027× at 5x5, 1.028× at 6x5, 1.016× at 4x4 effort 2 (cloud A/B
-    44073666086, EPYC 9V74). All output identical. The light pass's quick form at 4x4-8x5 (each block tries
-    the previous block whole, reweighted and refitted, priced by literal costs and prefix / suffix matches
-    instead of the LZ model's parse) makes files 0.08-0.29% smaller for 0.004-0.006 dB and takes 0.2-0.4 s
-    less on Kodak-24 (local, one thread; cloud bench pending).
+  - [ ] Effort 0's default light pass against fast's time at 4x4-6x6. At 1e03746 (cloud bench 44094984522,
+    EPYC 9V45, Kodak-24, one pinned thread) it wins PSNR and SSIM at every footprint and both sizes except
+    Zstd at 6x5 (3.826 against 3.825 bpt, at +0.14 dB), and it is faster than fast at 4x4 (1.65 against
+    1.88 s) and 6x6 (1.29 / 1.45), but still slower at 5x4 (1.47 / 1.41), 5x5 (1.48 / 1.29) and 6x5
+    (1.47 / 1.34). The base encode is about 70% of that time and polish about 30% of the base encode.
+    Steps since 4e03e6c (where cloud bench 44061144254, EPYC 7763, had it slower than fast at every
+    footprint but 6x6):
+    - The Zstd check skips chunks level 1 says grew by 4 bytes or fewer (3691688): 1.011× less time at 4x4,
+      level at 5x5 and 6x5 (cloud A/B 44043405979).
+    - Layouts, QuadSums and the light pass's previous-block fields filled in place (f129d7b): 1.055× at 4x4
+      effort 0, 1.040× at 6x5, 1.033× at 4x4 effort 2 (cloud A/B 44058354730, Xeon 8573C).
+    - The dominant-axis iteration as lanes (4e03e6c): 1.011-1.013× (cloud A/B 44061093046, EPYC 7763).
+    - Block texels in kept memory and the RDO pass's SSE as lanes (bc905be): 1.038× at 4x4 effort 0, 1.027×
+      at 5x5, 1.028× at 6x5, 1.016× at 4x4 effort 2 (cloud A/B 44073666086, EPYC 9V74).
+    - All of those output identical. Then the light pass's quick form at 4x4-8x5 (1e03746): each block tries
+      the previous block whole, reweighted and refitted, priced by literal costs and prefix / suffix matches
+      instead of the LZ model's parse. Files 0.08-0.29% smaller for 0.004-0.006 dB, 0.2-0.4 s less on
+      Kodak-24 (local, one thread).
+    - Tried and dropped: a lighter effort-0 search at 5x4-6x5 paid for with a lower λ. The search cuts cost
+      0.016-0.153 dB, and a lower λ buys back only 0.012-0.021 dB for files 0.7-1.6% larger (DEADENDS).
+      Next: a cheaper polish and base search at 17-30 texels, output identical or better.
   - [ ] A GPU kernel, a SIMD batch encoder, HDR.
 - [x] ETC2 / EAC for mobile fallbacks: ETC2 RGB (all five modes), ETC2 RGBA8 and EAC R11 / RG11 (unsigned),
   KTX2 only, with the RDO pass. On Kodak, one thread, effort 0 is 0.37 dB ahead of Compressonator in an
