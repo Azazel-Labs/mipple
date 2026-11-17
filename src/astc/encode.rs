@@ -1258,33 +1258,31 @@ fn polish_in<const W: bool, const E: bool>(
     for p in 1..parts {
         at[p] = at[p - 1] + spans[p - 1].1;
     }
-    // Per partition and plane, the weights that reach its texels and the endpoint values that read
-    // its weights on that plane.
-    let mut touch = [[0u64; 2]; 3];
-    let mut emask = [[0u32; 2]; 3];
-    if W && E {
-        for (i, tap) in grid.taps[..n].iter().enumerate() {
-            let p = lay.labels[i] as usize;
-            for k in 0..4 {
-                if tap.w[k] > 0 {
-                    for (pl, m) in touch[p].iter_mut().enumerate().take(planes) {
-                        *m |= 1 << (planes * tap.idx[k] as usize + pl);
-                    }
-                }
-            }
-        }
-        for p in 0..parts {
-            for v in 0..spans[p].1 {
-                for (pl, m) in emask[p].iter_mut().enumerate().take(planes) {
-                    if !direct || plane_of(v / 2) == pl {
-                        *m |= 1 << (at[p] + v);
-                    }
-                }
-            }
-        }
-    }
     // Partition `p`'s endpoint values.
     let part_vals = |p: usize| ((1u32 << spans[p].1) - 1) << at[p];
+    // Those that read its weights on plane `pl`: all, except that direct endpoints on two planes
+    // read the second plane in channel `ccs` and the first in the others.
+    let emask = |p: usize, pl: usize| {
+        let all = part_vals(p);
+        if planes == 1 || !direct {
+            return all;
+        }
+        let second = (0b11 << (at[p] + 2 * ccs)) & all;
+        if pl == 1 { second } else { all & !second }
+    };
+    // Marks the weights that reach texel `i` on plane `pl`.
+    let reach = |wdirty: &mut u64, i: usize, pl: usize| {
+        let tap = &grid.taps[i];
+        for k in 0..4 {
+            if tap.w[k] > 0 {
+                *wdirty |= 1 << (planes * tap.idx[k] as usize + pl);
+            }
+        }
+    };
+    // Each partition's current error over every channel (other endpoint modes) or per channel
+    // (direct), kept from try to try until a weight step on its texels changes it; -1 when unknown.
+    let mut pcur = [-1i32; 3];
+    let mut ccur = [[-1i32; 4]; 3];
     'passes: for _ in 0..passes {
         for j in 0..if W { kk } else { 0 } {
             if idle >= steps {
@@ -1327,13 +1325,11 @@ fn polish_in<const W: bool, const E: bool>(
                 let w = sums[pl][i] >> 4;
                 wl[pl][pos[i] as usize] = w as i16;
                 errp[pl][i] = texel_err(&base, &slope, i, pl, w);
-                let tap = &grid.taps[i];
-                for k in 0..4 {
-                    if tap.w[k] > 0 {
-                        wdirty |= 1 << (planes * tap.idx[k] as usize + pl);
-                    }
-                }
-                edirty |= emask[lay.labels[i] as usize][pl];
+                reach(&mut wdirty, i, pl);
+                let p = lay.labels[i] as usize;
+                edirty |= emask(p, pl);
+                pcur[p] = -1;
+                ccur[p] = [-1; 4];
             }
             idle = 0;
         }
@@ -1373,7 +1369,10 @@ fn polish_in<const W: bool, const E: bool>(
                     for i in 0..k {
                         vals[i] = cu[sym.colors[at + i] as usize] as i32;
                     }
-                    let cur = part_err(&eps[p]);
+                    if pcur[p] < 0 {
+                        pcur[p] = part_err(&eps[p]);
+                    }
+                    let cur = pcur[p];
                     let mut take = None;
                     for dir in 0..2 {
                         let nc = tb.cnb[cq][dir][old as usize];
@@ -1382,8 +1381,10 @@ fn polish_in<const W: bool, const E: bool>(
                         }
                         vals[v] = cu[nc as usize] as i32;
                         let e = super::decode::endpoints(sym.cems[p], &vals[..k]).expect("LDR mode");
-                        if part_err(&e) < cur {
+                        let err = part_err(&e);
+                        if err < cur {
                             take = Some((nc, e));
+                            pcur[p] = err;
                             break;
                         }
                     }
@@ -1395,10 +1396,10 @@ fn polish_in<const W: bool, const E: bool>(
                         if lay.labels[i] as usize == p {
                             for pl in 0..planes {
                                 errp[pl][i] = texel_err(&base, &slope, i, pl, sums[pl][i] >> 4);
+                                reach(&mut wdirty, i, pl);
                             }
                         }
                     }
-                    wdirty |= touch[p][0] | touch[p][1];
                     edirty |= part_vals(p);
                     idle = 0;
                     continue;
@@ -1434,31 +1435,37 @@ fn polish_in<const W: bool, const E: bool>(
                 // The partition's error in channel `c` now and after each step.
                 let bs = pairs.map(|(e0, _)| I16x8::splat((64 * e0 + 32) as i16));
                 let ss = pairs.map(|(e0, e1)| I16x8::splat((e1 - e0) as i16));
+                let known = ccur[p][c] >= 0;
                 let mut acc = [I32x4::zero(); 3];
                 for k in (seg[p]..seg[p + 1]).step_by(8) {
                     let w = I16x8::load(&wl[pl][k..]);
                     let x = I16x8::load(&xl[c][k..]);
                     let m = I16x8::load(&live[k..]);
-                    for s in 0..3 {
+                    for s in known as usize..3 {
                         let y = bs[s].add(w.mul(ss[s])).shr::<6>();
                         acc[s] = acc[s].add(y.sub(x).and(m).sq_pairs());
                     }
                 }
-                let err = acc.map(|a| a.to_array().iter().sum::<i32>());
+                let mut err = acc.map(|a| a.to_array().iter().sum::<i32>());
+                if known {
+                    err[0] = ccur[p][c];
+                }
+                ccur[p][c] = err[0];
                 let Some(dir) = (0..2).find(|&dir| cand[dir].is_some() && err[dir + 1] < err[0]) else {
                     continue;
                 };
                 let nc = cand[dir].unwrap();
                 sym.colors[slot] = nc;
                 (eps[p].0[c], eps[p].1[c]) = pairs[dir + 1];
+                ccur[p][c] = err[dir + 1];
                 let e = eps[p];
                 (base[p], slope[p]) = lanes_of(&e);
                 for i in 0..n {
                     if lay.labels[i] as usize == p {
                         errp[pl][i] = texel_err(&base, &slope, i, pl, sums[pl][i] >> 4);
+                        reach(&mut wdirty, i, pl);
                     }
                 }
-                wdirty |= touch[p][pl];
                 edirty |= part_vals(p);
                 idle = 0;
             }
