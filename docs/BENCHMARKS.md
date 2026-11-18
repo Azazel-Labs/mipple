@@ -1134,6 +1134,27 @@ and 6x6 at de44939 (44239094693, identical output at those footprints) and 5x4-6
 - **Against ISPC fast:** +0.10 to +0.90 dB with files 3.4-4.3% smaller after Zstd (3.1-4.1% after Deflate),
   but 1.00-1.14× its time.
 
+At e697b25 effort 0 at 6x5 takes the settings above 30 texels (16% less time with RDO off, 0.117 dB), and
+effort 0 with RDO off (`-l 0`) beats ISPC fast on all five columns from 4x4 to 6x6, while the default effort
+0 (light pass on) still beats astcenc fast on all five. Cloud bench 44248429239 (EPYC 9V74, same setup):
+
+| footprint | ISPC fast | astcenc fast | mipple effort 0 | mipple effort 0 `-l 0` |
+| --- | --- | --- | --- | --- |
+| 4x4 | 43.790 / .99677 / 7.286 / 7.431 / 1.80 | 44.580 / .99722 / 7.216 / 7.362 / 2.45 | 44.685 / .99747 / 7.039 / 7.201 / 1.89 | 44.685 / .99748 / 7.094 / 7.263 / 1.53 |
+| 5x4 | 42.204 / .99521 / 5.884 / 5.984 / 1.72 | 42.679 / .99577 / 5.853 / 5.974 / 1.87 | 42.732 / .99605 / 5.636 / 5.748 / 1.71 | 42.741 / .99610 / 5.720 / 5.840 / 1.38 |
+| 5x5 | 40.532 / .99236 / 4.741 / 4.813 / 1.65 | 40.697 / .99290 / 4.625 / 4.719 / 1.75 | 40.788 / .99338 / 4.550 / 4.626 / 1.69 | 40.799 / .99347 / 4.645 / 4.728 / 1.37 |
+| 6x5 | 39.010 / .98873 / 3.976 / 4.028 / 1.48 | 39.080 / .98912 / 3.825 / 3.902 / 1.80 | 39.097 / .98983 / 3.806 / 3.866 / 1.46 | 39.107 / .98999 / 3.905 / 3.972 / 1.14 |
+| 6x6 | 37.563 / .98365 / 3.332 / 3.368 / 1.37 | 37.657 / .98337 / 3.205 / 3.262 / 2.01 | 37.660 / .98512 / 3.189 / 3.230 / 1.53 | 37.659 / .98530 / 3.287 / 3.334 / 1.14 |
+
+- **`-l 0` against ISPC fast:** +0.10 to +0.90 dB, higher SSIM, files 1.4-2.8% smaller after Zstd (1.0-2.4%
+  after Deflate), in 77-85% of its time.
+- **Effort 0 against astcenc fast:** +0.003 to +0.105 dB (6x5 now +0.017), higher SSIM, files 0.5-3.7%
+  smaller after Zstd (0.9-3.8% after Deflate), in 76-97% of its time. Against ISPC fast it is 0.09-0.90 dB
+  ahead with files 3.4-4.3% smaller after Zstd, in 99-112% of its time.
+- Timing margins depend on the CPU. On a Zen 5 EPYC 9V45 at 2ab9c93 (cloud bench 44243279811, before this
+  change) ISPC fast took 0.97 s at 6x5 against `-l 0`'s 1.01 s, and effort 0 at 5x5 was level with astcenc
+  fast (1.27 / 1.26 s); 5x5 is unchanged by e697b25.
+
 Scoring astcenc's files exposed a decoder bug, fixed: a 2- or 3-partition block may spell equal CEMs the long
 way (with the extra CEM bits below the weights), and the decoder read those blocks with the short form's
 endpoint range. mipple's own files never use the long form, so earlier mipple scores are unchanged.

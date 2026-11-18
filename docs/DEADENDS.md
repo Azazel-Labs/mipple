@@ -491,6 +491,8 @@ Measured on Kodak images 1-3, single thread, effort 0, unless noted. ISPC fast t
   little: λ 0.1 / 0.06 / 0.03 against the default 0.15 gave +0.012 / +0.017 / +0.021 dB for files 0.7 /
   1.2 / 1.6% larger, the same for the lighter settings. In the light pass's reweight, polish matters
   (without it files are 0.27% larger at the same PSNR); in its refit it doesn't (4.5539 against 4.5538 bpt).
+  Later, 6x5 alone took the settings above 30 texels (e697b25) to beat ISPC fast's time with RDO off; it kept
+  astcenc fast's PSNR by 0.017 dB. 5x4 and 5x5 keep their search.
 - **Skipping polish tries that would fail again.** Polish retries every weight and endpoint code each
   pass. Marking a code dirty only once something its try reads has changed (its texels' weight sums, its
   partition's endpoints or weights) and skipping clean ones leaves output identical, but an endpoint step

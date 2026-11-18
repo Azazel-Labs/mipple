@@ -287,6 +287,12 @@ Open for v0.9.x:
       44241505134), with 6x5 now 3.812 against 3.825 bpt after Zstd. Intel ISPC fast is faster at 4x4,
       5x4, 5x5 and 6x5 (2.21, 2.11, 2.02, 1.82 s), but 0.20-0.90 dB behind, with effort 0's files 3.4-4.2%
       smaller after Zstd.
+    - [x] Effort 0 with RDO off (`-l 0`) faster than ISPC fast at 4x4-6x6 with higher PSNR and SSIM and
+      smaller files: 6x5 takes effort 0's settings above 30 texels (e697b25; 16% less time for 0.117 dB).
+      Cloud bench 44248429239 (EPYC 9V74, Kodak-24): `-l 0` in 77-85% of ISPC fast's time, +0.10 to
+      +0.90 dB, files 1.4-2.8% smaller after Zstd; the default effort 0 still beats astcenc fast on all
+      five columns (6x5 39.097 / 39.080 dB, 1.46 / 1.80 s). On a Zen 5 EPYC 9V45 (44243279811, before
+      e697b25) 5x5 effort 0 was level with astcenc fast on time (1.27 / 1.26 s): margin left to widen.
   - [ ] A GPU kernel, a SIMD batch encoder, HDR.
 - [x] ETC2 / EAC for mobile fallbacks: ETC2 RGB (all five modes), ETC2 RGBA8 and EAC R11 / RG11 (unsigned),
   KTX2 only, with the RDO pass. On Kodak, one thread, effort 0 is 0.37 dB ahead of Compressonator in an
