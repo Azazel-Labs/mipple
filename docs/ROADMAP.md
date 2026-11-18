@@ -293,6 +293,11 @@ Open for v0.9.x:
       +0.90 dB, files 1.4-2.8% smaller after Zstd; the default effort 0 still beats astcenc fast on all
       five columns (6x5 39.097 / 39.080 dB, 1.46 / 1.80 s). On a Zen 5 EPYC 9V45 (44243279811, before
       e697b25) 5x5 effort 0 was level with astcenc fast on time (1.27 / 1.26 s): margin left to widen.
+    - [ ] Some setting beats astcenc thorough on all five columns at every footprint (BENCHMARKS.md, ee1dd5a):
+      done at 4x4-8x8 (earlier runs), 5x4 and 5x5 (effort 4, 50-56% of its time), 10x8 (effort 6, light
+      pass λ 0.5, 70%) and 10x10 and 12x10 (effort 7, light λ 0.5, 81-89%). Open at 12x12: effort 7 at λ 1
+      wins on quality and size but took 110% of thorough's time on a Xeon 6975P. The gap at 10x8 and up is in
+      the base encode (even `-l 0` at effort 5 is 0.015-0.055 dB short).
   - [ ] A GPU kernel, a SIMD batch encoder, HDR.
 - [x] ETC2 / EAC for mobile fallbacks: ETC2 RGB (all five modes), ETC2 RGBA8 and EAC R11 / RG11 (unsigned),
   KTX2 only, with the RDO pass. On Kodak, one thread, effort 0 is 0.37 dB ahead of Compressonator in an

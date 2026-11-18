@@ -1155,6 +1155,31 @@ effort 0 with RDO off (`-l 0`) beats ISPC fast on all five columns from 4x4 to 6
   change) ISPC fast took 0.97 s at 6x5 against `-l 0`'s 1.01 s, and effort 0 at 5x5 was level with astcenc
   fast (1.27 / 1.26 s); 5x5 is unchanged by e697b25.
 
+Some setting beats astcenc thorough on all five columns at every footprint but 12x12 at ee1dd5a (same setup,
+one run each). At 5x4 and 5x5 that is effort 4 with the default λ (cloud bench 44259632980, EPYC 7763). At
+10x8 to 12x10 it is effort 6 or 7 with the light pass at λ 0.5 (`-l 0.5 --max-back 1 --refine-back 1`,
+cloud bench 44264020722, EPYC 7763). Each cell is mipple / thorough:
+
+| footprint | mipple setting | PSNR dB | SSIM | Zstd-19 bpt | Deflate-9 bpt | time s |
+| --- | --- | --- | --- | --- | --- | --- |
+| 5x4 | effort 4 | 43.520 / 43.497 | .99654 / .99619 | 5.907 / 6.020 | 5.969 / 6.093 | 19.58 / 34.95 |
+| 5x5 | effort 4 | 41.505 / 41.499 | .99413 / .99379 | 4.722 / 4.827 | 4.763 / 4.879 | 18.16 / 36.61 |
+| 10x8 | effort 6 light λ 0.5 | 33.449 / 33.438 | .95454 / .95402 | 1.525 / 1.543 | 1.530 / 1.550 | 31.39 / 44.80 |
+| 10x10 | effort 7 light λ 0.5 | 32.386 / 32.361 | .94049 / .93992 | 1.228 / 1.239 | 1.231 / 1.243 | 43.07 / 48.41 |
+| 12x10 | effort 7 light λ 0.5 | 31.579 / 31.565 | .92785 / .92737 | 1.027 / 1.030 | 1.028 / 1.032 | 40.27 / 49.88 |
+
+- **5x4 and 5x5:** effort 4 takes 50-56% of thorough's time, with files 1.9-2.2% smaller after Zstd. Effort 3
+  was 0.03-0.05 dB short of thorough, in 34-38% of its time.
+- **10x8 to 12x10:** effort 7 takes 81-89% of thorough's time and effort 6 takes 70%. Effort 6 at λ 0.5 was
+  0.007-0.019 dB short at 10x10 and 12x10. The default λ there (2 / 3.5 / 4.5) costs effort 5 0.06-0.08 dB.
+  The full pass at a low λ is short too: effort 5 `-l 0.5` was 0.011-0.047 dB short in 72-96% of the time (EPYC
+  9V45, 44259644556). Even `-l 0` was 0.015-0.055 dB short, so the gap there is the base encode.
+- **12x12:** effort 7 with the light pass at λ 1 beats thorough on PSNR, SSIM and both sizes (30.800 /
+  30.796 dB, .91332 / .91305, Zstd 0.843 / 0.853 bpt) but took 110% of its time on a Xeon 6975P (28.41 /
+  25.75 s, 44266863592). On the EPYC 7763 run above, effort 7 at λ 0.5 took 74% of thorough's time (38.37 /
+  51.79 s), with Zstd files 0.5% larger (0.857 / 0.853 bpt). How much time thorough takes, compared with
+  mipple, depends on the CPU.
+
 Scoring astcenc's files exposed a decoder bug, fixed: a 2- or 3-partition block may spell equal CEMs the long
 way (with the extra CEM bits below the weights), and the decoder read those blocks with the short form's
 endpoint range. mipple's own files never use the long form, so earlier mipple scores are unchanged.
