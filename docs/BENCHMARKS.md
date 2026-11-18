@@ -26,8 +26,10 @@ while mipple's time includes allocating its output.
 Interleaved, fastest of 2. Effort 8 adds bc7e-style "uber" refits
 (least-squares fits from index sets with the extremes nudged inward and stretched, for every multi-subset
 mode and mode 6) and refines every mode's best encoding and its two best partition candidates before the modes
-compete; effort 9 refines every candidate. (Since then effort 8 also tries mode 4, and effort 9 searches
-p-bits by exact error instead of refining every candidate; see the ROADMAP's BC7 mode 4 item.)
+compete; effort 9 refines every candidate. (Since then effort 8 also tries mode 4, 46.018 → 46.033 dB in
+the same time (17 images up, none down; cloud A/B on an EPYC 7763, 14.32 → 14.40 s), and effort 9 searches p-bits by
+exact error and polishes the top two candidates like effort 8 instead of refining every candidate: 46.084 dB (24/24
+images up) for about 2× effort 8's time (cloud A/B: 16.04 → 28.33 s). See ARCHITECTURE.md's BC7 fast encoder.)
 
 | Config | PSNR (dB) | Time, 6 images (s) |
 | --- | --- | --- |
@@ -554,8 +556,7 @@ PNG as UE's import does (XY of the normalized RGB, to 16 bits), which reproduces
 BC7 is rerun at d242683 (cheaper BC7 RDO defaults: near search 8 deep, refinement 128, deferral margin 0.15),
 which gave up 0.1-0.4 points of each lead (from −1.9% / −1.7% / −2.3% / −3.2% at RMSE and −3.9% / −2.8% /
 −2.4% / −2.0% at SSIM) for 1.22× / 1.24× / 1.21× less time at λ 1 / 10 / 30 (GitHub-hosted AMD EPYC 7763,
-one thread, `ab.yml`). It is rerun again for the ranker's 512-block reach (was 2048; see the ROADMAP's BC7
-speed item), which gave up 0.1-0.4 points more (from −1.8% / −1.4% / −2.0% / −2.8% at RMSE and −3.8% / −2.6%
+one thread, `ab.yml`). It is rerun again for the ranker's 512-block reach (was 2048; `--local-reach`), which gave up 0.1-0.4 points more (from −1.8% / −1.4% / −2.0% / −2.8% at RMSE and −3.8% / −2.6%
 / −2.2% / −1.8% at SSIM) for 1.17× / 1.21× less time at λ 1 / 10. It is rerun once more for the luma error term
 (`--luma-weight`, default 0.25 for BC7; see the XUBC7 section), which gives up 0.0-0.4 points at RMSE for 0.4-0.9 more
 at SSIM (from −1.6% / −1.0% / −1.6% / −2.3% at RMSE and −3.6% / −2.2% / −1.7% / −1.2% at SSIM, after the
@@ -824,7 +825,7 @@ images (mipple's encode loop; process wall time for Compressonator, which includ
 | mipple effort 9 | 37.776 | 0.98104 | 3.081 | 131 |
 | Compressonator | 36.700 | 0.98103 | 3.013 | 33.6 |
 
-These times predate the faster ETC2 encoder (byte-identical output; ROADMAP). A cloud A/B (Xeon 6973P-C, Kodak
+These times predate the faster ETC2 encoder (byte-identical output; ARCHITECTURE.md). A cloud A/B (Xeon 6973P-C, Kodak
 1-12, one pinned thread) measured 1.327× less time at the default effort and 1.740× at λ 1; locally it is
 1.6-2.0× less at efforts 1-9. The table is not re-run.
 

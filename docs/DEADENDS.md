@@ -29,8 +29,10 @@ CPU times come from paired runs on the same core.
   the same wall time as 64 KiB (7.9 s), but one image at a time is still 1.6× (23.6 s against
   14.5 s for the 24), since an image has only three top-level chunks and one long level-1 chunk.
   The chunk size can't follow the batch size without changing the output, so 64 KiB stays.
-- **Splitting one block's search across threads (by back distance).** This was no faster on a
-  155H: the join for each block waits for the slowest core.
+- **Splitting one block's search across threads (by back distance).** Merged by lowest score with
+  ties to the nearest candidate, the output was identical, but it was no faster on a hybrid 155H: the
+  join for each block waits for the slowest core, and the split loses dedup and pruning (+19% CPU).
+  Rebalancing whole chunks across threads (`sched::run`) paid instead.
 - **Frozen (non-adaptive) LZ costs in the rate model.** They score even in `mipple check`
   (λ ≤ 4) but worse at λ 2-8 (−19.8% → −19.2% against the competitor).
 - **Far index-pattern reuse via refit candidates (BC1).** Refitting endpoints to index patterns from
@@ -65,7 +67,9 @@ CPU times come from paired runs on the same core.
   deferral for BC5 / BC7 / BC3, against 1.51× / 1.21× / 1.31×, for about two thirds of the BD-rate gain
   (BC5 −0.16% vs −0.27%). The cost is in deferring at all, so 0.3 stays for every format. BC7 later moved to 0.15
   (d242683) as one of three cheaper defaults: against Oodle it costs only 0.1-0.2 points of the λ 20-40
-  equal-RMSE lead for about 5% less time (cloud A/B, Kodak-24).
+  equal-RMSE lead for about 5% less time (cloud A/B, Kodak-24). BC7 deferral 0.1 on top of those defaults
+  was 1.26× / 1.29× less time than before them, against 1.22× / 1.24× at 0.15, but cut the smallest leads
+  (equal RMSE / equal SSIM) to −1.3% / −1.7%, from −1.4% / −1.8%.
 - **Averaging the per-channel smoothness terms** (k²/(k²+σ²) per channel instead of with the
   largest channel's variance). BC7 moves strongly toward RMSE (−1.9% to −2.8% size at Oodle
   Texture's RMSE) but falls behind Oodle on SSIM at λ 30-40 (+0.6% / +1.1%).
@@ -75,11 +79,13 @@ CPU times come from paired runs on the same core.
 - **Cutting refinement or the ranker's picks to save CPU.** `--refine-back 0` saves 16% CPU,
   `64` saves 12% and `--local 0` saves 26%, but each puts λ 40 SSIM behind Oodle (+0.2% to
   +1.0%). Refinement and the ranker carry real quality. (Measured when the λ 40 SSIM lead was −0.3%; with today's wider lead
-  BC7 refines 64 deep by default, see the ROADMAP's BC7 speed item.)
+  BC7 refines 64 deep by default (`RdoParams::refine_back_for`). On the way there, 96 deep was 1.034× /
+  1.045× less time than 128 at λ 1 / 10 for 0.1 point in the same cells, the same rate as 64.)
 - **A shorter far search or fewer ranker picks (cloud A/B and Oodle table, Kodak-24, at 5ab6183's
   defaults).** `--far-back 512` saved 6% at λ 1 but only 1% at λ 10, for 0.2-0.4 points of every
   λ 10-40 lead. `--local 6` saved 2% for 0.1-0.2 points. A shorter ranker reach buys far more
-  time for the same loss (see the ROADMAP's BC7 speed item).
+  time for the same loss: 512 blocks instead of 2048 is 1.17× / 1.21× less time at λ 1 / 10 with every
+  cell still ahead, and 1024 was 1.07× for 0.1-0.2 points.
 - **Far re-indexing of multi-subset heads (modes 0-3, 7).** These almost never won, and removing
   them moved every Kodak-24 delta against Oodle by 0.02% or less. Only mode-6 heads are worth
   re-indexing.
@@ -524,18 +530,18 @@ Measured on Kodak images 1-3, single thread, effort 0, unless noted. ISPC fast t
   -0.26% at 4x4 but +0.25% at 6x6 and +0.18% at 8x8. That was measured on 8 Poly Haven normal maps at
   effort 5, λ 0.1-0.3 / 1-3 / 1.5-6. At effort 0 it is only tried at 4x4, where it was +0.03% (33 maps,
   λ 0.03-1), and the default effort-5 encode took 1.1-1.5x as long (estimate, loaded machine). Not kept.
-
-## ETC2 / EAC
-
-Measured on the first 8 Kodak images (ETC2 RGBA: the twelve RGBA images of BENCHMARKS.md), effort 5,
-λ 0.5, 1 and 2.
-
 - **Halving the ASTC mode estimate's endpoint noise (c01269f).** With refinement (effort 2 and up) the
   endpoint term of the estimate at step² / 36 instead of / 18: +0.012 to +0.030 dB at effort 5 and +0.015
   to +0.057 dB at effort 2 on 8 Kodak images (`-l 0`, local), but mixed on the `mipple check` corpus
   (BD-rate -3.01% at 12x12, -0.52% / -0.61% at 8x8 / 10x8, -0.23% at 4x4, +0.09% to +0.92% at 9 of the
   other 10 footprints). Without refinement (efforts 0 and 1) 4x4 lost 0.050 dB. The decimation bias (1.5)
   was already at its best: 1 / 2 / 3 lost 0.006-0.113 dB at 6x6 and 10x8.
+
+## ETC2 / EAC
+
+Measured on the first 8 Kodak images (ETC2 RGBA: the twelve RGBA images of BENCHMARKS.md), effort 5,
+λ 0.5, 1 and 2.
+
 - **Field-swap refinement for ETC2 RGB.** `--refine-back 256` against 0 is even: sizes within 0.2% and
   PSNR within 0.02 dB at each λ, so it is off by default. It stays on for ETC2 RGBA, where the alpha half
   gains (1.2-1.7% smaller for 0.02-0.05 dB), and for EAC (RG11 2-4% smaller for 0.04-0.16 dB).
