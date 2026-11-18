@@ -34,11 +34,11 @@ const REFIT_BACK: usize = 256;
 const PASSES: usize = 1;
 
 /// Tuning runs (`--astc-tune`'s 14th and 15th values): the reweighted candidate's polish passes
-/// (`None`: not tried) and whether the refitted candidate is tried.
-pub(super) static TUNE: std::sync::OnceLock<(Option<usize>, bool)> = std::sync::OnceLock::new();
+/// (`None`: not tried) and whether the refitted candidate is tried (`None`: as the settings say).
+pub(super) static TUNE: std::sync::OnceLock<(Option<usize>, Option<bool>)> = std::sync::OnceLock::new();
 
-fn tune() -> (Option<usize>, bool) {
-    TUNE.get().copied().unwrap_or((Some(PASSES), true))
+fn tune() -> (Option<usize>, Option<bool>) {
+    TUNE.get().copied().unwrap_or((Some(PASSES), None))
 }
 
 /// A block already chosen: its bytes and, when the candidates can build on it, its fields, labels
@@ -125,6 +125,7 @@ fn prev_sym(
     fp: &Footprint,
     sym: Symbolic,
     tw: &[[u8; MAX_TEXELS]; 2],
+    refit: bool,
     spare: &mut Vec<Box<PrevSym>>,
 ) -> Option<Box<PrevSym>> {
     let p = sym.partitions as usize;
@@ -149,7 +150,7 @@ fn prev_sym(
         })
     });
     set_labels(fp, &sym, &mut b.lay);
-    b.refit = if tune().1 {
+    b.refit = if refit {
         refit_base(fp, &b.lay, gi, &sym, tw)
     } else {
         None
@@ -693,7 +694,7 @@ fn optimize_chunk(
         prevs.push(Prev {
             bytes: best.1,
             sym: if refit_back > 0 {
-                sym.and_then(|s| prev_sym(fp, s, tw, &mut spare))
+                sym.and_then(|s| prev_sym(fp, s, tw, tune().1.unwrap_or(true), &mut spare))
             } else {
                 None
             },
@@ -803,6 +804,8 @@ fn optimize_chunk_light(
     let mut dec_tw = [[0u8; MAX_TEXELS]; 2];
     let mut best_tw = [[0u8; MAX_TEXELS]; 2];
     let mut prev: Option<Box<PrevSym>> = None;
+    // Whether the previous block's weights are tried with endpoints refitted to this block.
+    let refit = tune().1.unwrap_or(p.light_refit);
     let mut prev_bytes = [0u8; 16];
     let mut prev_matched = false;
     let mut spare: Vec<Box<PrevSym>> = Vec::new();
@@ -871,25 +874,31 @@ fn optimize_chunk_light(
         if let Some(ps) = &prev {
             let v = u128::from_le_bytes(prev_bytes);
             let b0 = u128::from_le_bytes(base);
-            let mut cands = [None, None];
-            // The previous block's endpoints with weights for this block, unless the base has them.
-            let below = 128 - ps.sym.mode.weight_bits();
-            let mask = (1u128 << below) - 1;
             // The fewest bits each candidate can cost: the reweighted block keeps the previous
             // block's first `below / 8` bytes, the refitted one its last `weight_bits / 8`.
+            let below = 128 - ps.sym.mode.weight_bits();
+            let mask = (1u128 << below) - 1;
             let pm = prev_matched as usize;
             let lbs = [head_lb[pm][below / 8], tail_lb[pm][(128 - below) / 8]];
-            if b0 & mask != v & mask && tune().0.is_some() {
-                let cap = cap_for(best.0, lbs[0], limit);
-                cands[0] = reweight(fp, &t, &ps.lay, ps.gi, &ps.sym, &ps.eps, &bs, cap);
-            }
-            // Its weights with endpoints refitted to this block, unless the base has them.
-            if let Some(rb) = &ps.refit
-                && b0 & !mask != v & !mask
-            {
-                cands[1] = refit_to(fp, &t, &ps.lay, ps.gi, &ps.sym, rb, &bs, cap_for(best.0, lbs[1], limit));
-            }
-            for (k, (c, err)) in cands.into_iter().enumerate().filter_map(|(k, c)| c.map(|c| (k, c))) {
+            // Each tried after the one before it is kept, its cap from the best so far.
+            for k in 0..2 {
+                let cap = cap_for(best.0, lbs[k], limit);
+                let c = if k == 0 {
+                    // The previous block's endpoints with weights for this block, unless the base
+                    // has them.
+                    if b0 & mask == v & mask || tune().0.is_none() {
+                        continue;
+                    }
+                    reweight(fp, &t, &ps.lay, ps.gi, &ps.sym, &ps.eps, &bs, cap)
+                } else {
+                    // Its weights with endpoints refitted to this block, unless the base has them.
+                    let Some(rb) = &ps.refit else { continue };
+                    if b0 & !mask == v & !mask {
+                        continue;
+                    }
+                    refit_to(fp, &t, &ps.lay, ps.gi, &ps.sym, rb, &bs, cap)
+                };
+                let Some((c, err)) = c else { continue };
                 // Not written if it loses even at its fewest bits.
                 if err as u64 > limit || score(err as u64, lbs[k]) >= best.0 {
                     continue;
@@ -928,7 +937,7 @@ fn optimize_chunk_light(
         if let Some(old) = prev.take() {
             spare.push(old);
         }
-        prev = sym.and_then(|s| prev_sym(fp, s, tw, &mut spare));
+        prev = sym.and_then(|s| prev_sym(fp, s, tw, refit, &mut spare));
         prev_bytes = best.1;
     }
     if let (Some(level), Some(original), true) = (p.verify_zstd_level, original, stats.changed > 0) {

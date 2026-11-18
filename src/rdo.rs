@@ -166,9 +166,14 @@ pub struct RdoParams {
     /// ASTC: run the light pass's quick form, set by [`RdoParams::light_astc`] when it leaves
     /// `max_back` and `refine_back` at 1, at 4x4-8x5 (up to 40 texels). Each block tries only the
     /// previous block: copied whole, its endpoints with this block's weights, and its weights with
-    /// endpoints refitted to this block. Rates come from a proxy rather than the LZ model's parse
-    /// (see `astc::encode::rdo`).
+    /// endpoints refitted to this block (see [`RdoParams::light_refit`]). Rates come from a proxy
+    /// rather than the LZ model's parse (see `astc::encode::rdo`).
     pub light: bool,
+    /// Whether the light pass tries the previous block's weights with endpoints refitted to this
+    /// block; [`RdoParams::light_astc`] leaves it off at effort 0 below 36 texels (4x4-6x5), where
+    /// it was 4.5% of the encode time for 0.01-0.05% of the size (Kodak 24). At 6x6 and 8x5 it
+    /// gains 0.08% and 1.2% (effort 0's λ is higher there), so it stays.
+    pub light_refit: bool,
 }
 
 impl Default for RdoParams {
@@ -209,6 +214,7 @@ impl Default for RdoParams {
             normal_map: false,
             normal_weight: 4.0,
             light: false,
+            light_refit: true,
         }
     }
 }
@@ -254,14 +260,13 @@ impl RdoParams {
             return self;
         }
         let (max_back, refine_back) = (self.max_back.or(Some(1)), self.refine_back.or(Some(1)));
+        let (bw, bh) = format.block_dims();
         Self {
             lambda: Self::astc_default_lambda(format, effort),
             max_back,
             refine_back,
-            light: max_back == Some(1) && refine_back == Some(1) && {
-                let (bw, bh) = format.block_dims();
-                bw * bh <= LIGHT_MAX_TEXELS
-            },
+            light: max_back == Some(1) && refine_back == Some(1) && bw * bh <= LIGHT_MAX_TEXELS,
+            light_refit: effort > 0 || bw * bh >= 36,
             ..self
         }
     }

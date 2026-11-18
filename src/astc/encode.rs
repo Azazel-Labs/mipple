@@ -2440,7 +2440,7 @@ pub fn set_tune(spec: &str) -> Result<(), String> {
     }
     let alts = v.get(12).map_or(2, |&a| a as u8);
     if let Some(&rw) = v.get(13) {
-        let _ = rdo::TUNE.set(((rw >= 0.0).then_some(rw as usize), v.get(14).is_none_or(|&r| r != 0.0)));
+        let _ = rdo::TUNE.set(((rw >= 0.0).then_some(rw as usize), v.get(14).map(|&r| r != 0.0)));
     }
     v.truncate(12);
     let u = |i: usize| v[i] as usize;
