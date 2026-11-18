@@ -22,7 +22,7 @@ use crate::format::Format;
 use crate::ranker::bc4::{Rank1, RankSrc1};
 use crate::ranker::bc5::{RankBlock, RankSrc};
 use crate::ranker::bc7::{RankBlock7, RankSrc7};
-use crate::surface::{Block, block_sse};
+use crate::surface::{Block, Rgba, block_sse};
 
 /// λ of ASTC's default light RDO pass by footprint texel count ([`RdoParams::default_for`]);
 /// footprints between interpolate linearly ([`RdoParams::astc_default_lambda`]).
@@ -1722,14 +1722,20 @@ const NORMAL_Z2_MIN: f32 = 1.0 / 16.0;
 /// sees a third of the squared normal error, so this weights the error of the lit output. 1 for a
 /// flat normal, growing as normals tilt.
 fn normal_factor(src: &Block, strength: f32) -> f32 {
+    normal_factor_of(src, 0, 1, strength)
+}
+
+/// [`normal_factor`] of texels with X in channel `cx` and Y in channel `cy`, any number of them
+/// (ASTC footprints; ASTC normal maps keep Y in alpha).
+pub(crate) fn normal_factor_of(src: &[Rgba], cx: usize, cy: usize, strength: f32) -> f32 {
     let mut s = 0f32;
     for t in src {
-        let x = t[0] as f32 / 127.5 - 1.0;
-        let y = t[1] as f32 / 127.5 - 1.0;
+        let x = t[cx] as f32 / 127.5 - 1.0;
+        let y = t[cy] as f32 / 127.5 - 1.0;
         let r2 = x * x + y * y;
         s += r2 / (2.0 * (1.0 - r2).max(NORMAL_Z2_MIN));
     }
-    1.0 + strength * s / 16.0
+    1.0 + strength * s / src.len() as f32
 }
 
 /// Per-block distortion multipliers from neighbourhood smoothness, in the spirit of x264's
@@ -3759,6 +3765,7 @@ mod tests {
             effort: crate::format::DEFAULT_EFFORT,
             reduce_entropy: true,
             srgb: false,
+            luma_alpha: false,
         };
         let (src, mut blocks) = crate::pipeline::encode_base(&surf, format, opts);
         let (src, blocks) = (&src[..4096], &mut blocks[..4096]);

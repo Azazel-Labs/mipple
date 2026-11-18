@@ -146,6 +146,7 @@ pub fn read(bytes: &[u8]) -> Result<EncodedTexture> {
         width,
         height,
         levels,
+        swizzle: None,
     })
 }
 

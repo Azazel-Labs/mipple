@@ -17,8 +17,8 @@
 //! real Zstd does not shrink goes back to its base encoding.
 
 use super::{
-    Footprint, Layout, MAX_TEXELS, NO_CCS, TexelBuf, Texels, polish_parts, quantize, read_block, refit, round_pos,
-    sym_endpoints, tables,
+    Footprint, Layout, MAX_TEXELS, NO_CCS, TexelBuf, Texels, is_gray, polish_parts, quantize, read_block, refit,
+    round_pos, sym_endpoints, tables,
 };
 use crate::astc::lanes::{F32x4, I16x8, I32x4};
 use crate::astc::{COLOR_UNQUANT, PartitionFn, Symbolic, color_range, decode_block, decode_symbolic_tw};
@@ -117,8 +117,8 @@ fn set_labels(fp: &Footprint, sym: &Symbolic, lay: &mut Layout) {
 }
 
 /// `sym`'s fields, labels and grid, if the candidates can build on them: up to three partitions,
-/// each luminance (0), direct (8, 12), base+offset (9, 13) or base+scale (6, 10), as the encoder
-/// writes. `tw` holds its weights infilled to the texels, as its decode left them. Filled in one of
+/// each luminance (0), luminance+alpha (4, 5), direct (8, 12), base+offset (9, 13) or base+scale
+/// (6, 10), as the encoder writes. `tw` holds its weights infilled to the texels, as its decode left them. Filled in one of
 /// `spare`'s boxes if it has one (all from `fp`, so their labels past its texels are blank).
 #[allow(clippy::vec_box, reason = "spare recycles the boxes it hands out")]
 fn prev_sym(
@@ -132,7 +132,7 @@ fn prev_sym(
     if p > 3
         || sym.cems[..p]
             .iter()
-            .any(|&c| !matches!(c, 0 | 6 | 8 | 9 | 10 | 12 | 13))
+            .any(|&c| !matches!(c, 0 | 4 | 5 | 6 | 8 | 9 | 10 | 12 | 13))
     {
         return None;
     }
@@ -180,10 +180,13 @@ fn refit_base(
     let planes = 1 + sym.mode.dual as usize;
     let mut w = [[0u8; MAX_TEXELS]; 2];
     w[..planes].copy_from_slice(&tw[..planes]);
-    // Refitted endpoints are written direct: RGB (CEM 8) for RGB heads, RGBA (CEM 12) for the rest.
+    // Refitted endpoints are written direct: RGB (CEM 8) for RGB heads, luminance+alpha (CEM 4)
+    // for luminance+alpha heads, RGBA (CEM 12) for the rest.
     let p = sym.partitions as usize;
     let cem = if sym.cems[..p].iter().all(|c| matches!(c, 0 | 6 | 8 | 9)) {
         8
+    } else if sym.cems[..p].iter().all(|c| matches!(c, 4 | 5)) {
+        4
     } else {
         12
     };
@@ -233,6 +236,13 @@ fn reweight(
     let planes = 1 + sym.mode.dual as usize;
     let ccs = lay.ccs;
     let count = lay.count as usize;
+    // A luminance+alpha block's error leaves out green and blue, so other endpoints' would not be
+    // what it counts.
+    if t.used != (1 << t.ch) - 1 && !sym.cems[..count].iter().all(|c| matches!(c, 4 | 5)) {
+        return None;
+    }
+    // The channels on the first plane that the error counts.
+    let on1 = |c: usize| c != ccs && t.counts(c);
     // A texel decodes to its weight's point on the segment rounded per channel, within 0.5 of it
     // in each channel: so within `slack` of the segment over the first plane's channels, and its
     // error is at least its distance from the segment less that.
@@ -261,14 +271,14 @@ fn reweight(
         let (e0, e1) = eps[p];
         let mu: [f64; 4] = std::array::from_fn(|c| sx[p][c] as f64 / m[p] as f64);
         let (mut dot, mut len2) = (0f64, 0f64);
-        for c in (0..4).filter(|&c| c != ccs) {
+        for c in (0..4).filter(|&c| on1(c)) {
             let d = (e1[c] - e0[c]) as f64;
             dot += (mu[c] - e0[c] as f64) * d;
             len2 += d * d;
         }
         let f = if len2 > 0.0 { (dot / len2).clamp(0.0, 1.0) } else { 0.0 };
         let d2: f64 = (0..4)
-            .filter(|&c| c != ccs)
+            .filter(|&c| on1(c))
             .map(|c| (mu[c] - e0[c] as f64 - f * (e1[c] - e0[c]) as f64).powi(2))
             .sum();
         mean_lb += m[p] as f64 * (d2.sqrt() - slack as f64).max(0.0).powi(2);
@@ -280,7 +290,7 @@ fn reweight(
     let mut inv = [0f32; 3];
     for p in 0..count {
         let (e0, e1) = eps[p];
-        let len2: i32 = (0..4).filter(|&c| c != ccs).map(|c| (e1[c] - e0[c]).pow(2)).sum();
+        let len2: i32 = (0..4).filter(|&c| on1(c)).map(|c| (e1[c] - e0[c]).pow(2)).sum();
         inv[p] = if len2 > 0 { 64.0 / len2 as f32 } else { 0.0 };
     }
     // Each partition's first endpoint and span, the span zero in the second plane's channel (so
@@ -295,10 +305,10 @@ fn reweight(
             e0f[p][c] = e0[c] as f32;
             df[p][c] = (e1[c] - e0[c]) as f32;
             e0i[p][c] = e0[c];
-            di[p][c] = if c == ccs { 0 } else { e1[c] - e0[c] };
+            di[p][c] = if on1(c) { e1[c] - e0[c] } else { 0 };
         }
     }
-    let mask: [f32; 4] = std::array::from_fn(|c| if c == ccs { 0.0 } else { 1.0 });
+    let mask: [f32; 4] = std::array::from_fn(|c| if on1(c) { 1.0 } else { 0.0 });
     let mut lb = 0f32;
     let mut u = [0f32; MAX_TEXELS];
     let mut u2 = [0f32; MAX_TEXELS];
@@ -414,6 +424,11 @@ fn refit_to(
     let tb = tables();
     let w = &rb.w;
     let cem = rb.cem;
+    // A luminance+alpha block's error leaves out green and blue: only luminance+alpha endpoints
+    // decode them as it assumes.
+    if t.used != (1 << t.ch) - 1 && cem != 4 {
+        return None;
+    }
     let p = sym.partitions as usize;
     let mut out = sym.clone();
     if sym.cems[..p].iter().any(|&c| c != cem) {
@@ -422,7 +437,11 @@ fn refit_to(
     }
     let cq = out.color_quant as usize;
     let (cqt, cu) = (&tb.cq[cq], &COLOR_UNQUANT[cq]);
-    let nv = if cem == 12 { 4 } else { 3 };
+    let nv = match cem {
+        4 => 2,
+        12 => 4,
+        _ => 3,
+    };
     // With the weights held, no endpoints fit better than each channel's least-squares line (not
     // clamped to the color range), and decoding moves each texel at most 0.5 per channel from its
     // line point, so at most sqrt(n) over the block. The weights' sums are the earlier block's;
@@ -449,7 +468,7 @@ fn refit_to(
     }
     let mut res = 0f64;
     for pi in 0..count {
-        for c in 0..4 {
+        for c in (0..4).filter(|&c| t.counts(c)) {
             let ws = &rb.sums[pi][(c == lay.ccs) as usize];
             let (n, sw, sww) = (ws[0] as f64, ws[1] as f64, ws[2] as f64);
             let (sx, sxw, sxx) = (sx[pi][c] as f64, sxw[pi][c] as f64, sxx[pi][c] as f64);
@@ -480,6 +499,12 @@ fn refit_to(
     let inv = |f: &[f32; 4]| [2.0 * f[0] - f[2], 2.0 * f[1] - f[2], f[2], f[3]];
     let sum = |c: &[u8; 8], odd: usize| (0..3).map(|ch| cu[c[2 * ch + odd] as usize] as i32).sum::<i32>();
     for (p, (f0, f1)) in fits.iter().enumerate().take(lay.count as usize) {
+        if cem == 4 {
+            // Luminance and alpha, as written: no ordering to keep.
+            let o = [at(f0[0]), at(f1[0]), at(f0[3]), at(f1[3])];
+            out.colors[4 * p..4 * p + 4].copy_from_slice(&o);
+            continue;
+        }
         let (i0, i1) = (inv(f0), inv(f1));
         let direct: [u8; 8] = std::array::from_fn(|i| at(if i % 2 == 0 { f0 } else { f1 }[i / 2 % 4]));
         let contracted: [u8; 8] = std::array::from_fn(|i| at(if i % 2 == 0 { i1 } else { i0 }[i / 2 % 4]));
@@ -532,6 +557,28 @@ fn sse(a: &[Rgba], b: &[Rgba]) -> u64 {
     s as u64
 }
 
+/// Squared error in red and alpha, two texels at a time: a luminance+alpha block's (green and blue
+/// decode to red), the X and Y of a normal map stored as `rrrg`.
+fn sse_la(a: &[Rgba], b: &[Rgba]) -> u64 {
+    let n = a.len().min(b.len());
+    let mut s = 0u32;
+    for (x, y) in a[..n].iter().zip(&b[..n]) {
+        s += (x[0] as i32 - y[0] as i32).pow(2) as u32 + (x[3] as i32 - y[3] as i32).pow(2) as u32;
+    }
+    s as u64
+}
+
+/// A block's distortion weight: [`smooth_factor`], and for a normal map's luminance+alpha block
+/// [`crate::rdo::normal_factor_of`] of its X (red) and Y (alpha).
+fn block_factor(bs: &BlockSums, n: usize, px: &[Rgba], la: bool, p: &RdoParams) -> f64 {
+    let f = smooth_factor(bs, n, p);
+    if la && p.normal_weight > 0.0 {
+        f * crate::rdo::normal_factor_of(px, 0, 3, p.normal_weight) as f64
+    } else {
+        f
+    }
+}
+
 /// [`crate::rdo`]'s distortion weight for smooth blocks, over this footprint's texels.
 fn smooth_factor(bs: &BlockSums, n: usize, p: &RdoParams) -> f64 {
     // Each channel's variance from its exact integer sums: (n Σx² - (Σx)²) / n².
@@ -567,7 +614,8 @@ fn optimize_chunk(
     model.set_literals(data);
     let lambda = p.lambda as f64;
     let ratio2 = (p.max_rms_ratio as f64).powi(2);
-    let floor = (n * 4) as f64 * (p.min_rms as f64).powi(2);
+    // Per counted channel.
+    let floor = n as f64 * (p.min_rms as f64).powi(2);
     let original = p.verify_zstd_level.map(|_| data.to_vec());
     let mut stats = RdoStats {
         blocks: count,
@@ -594,10 +642,13 @@ fn optimize_chunk(
         let bi = first + i;
         read_block(s, bw, bh, (bi % nx) as u32, (bi / nx) as u32, &mut px);
         // All four channels counted: a copied block may carry alpha the source lacks, or lack
-        // alpha the source has.
-        let t = tbuf.texels(&px, 4);
+        // alpha the source has. A normal map's gray blocks count X and Y once each.
+        let la = p.normal_map && is_gray(&px);
+        let t = if la { tbuf.texels_la(&px) } else { tbuf.texels(&px, 4) };
+        let sse = if la { sse_la } else { sse };
+        let floor = floor * t.used.count_ones() as f64;
         let bs = BlockSums::of(&t);
-        let smooth = smooth_factor(&bs, n, p);
+        let smooth = block_factor(&bs, n, &px, la, p);
         let score = |err: u64, bits: f32| smooth * err as f64 / 16.0 + lambda * bits as f64;
         let base: [u8; 16] = data[i * 16..i * 16 + 16].try_into().unwrap();
         // Read once: the decode and (if the block stays) the fields later blocks build on.
@@ -636,8 +687,12 @@ fn optimize_chunk(
             if seen.insert(u128::from_le_bytes(prevs[j].bytes)) {
                 // The error is at least each channel's summed difference squared over the texels
                 // (Cauchy-Schwarz): too much, and `consider` would reject it, so skip the decode.
-                let lb =
-                    (0..4).map(|c| ((bs.sx[c] - dsums[j][c]) as f64).powi(2)).sum::<f64>() / n as f64 * (1.0 - 1e-9);
+                let lb = (0..4)
+                    .filter(|&c| t.counts(c))
+                    .map(|c| ((bs.sx[c] - dsums[j][c]) as f64).powi(2))
+                    .sum::<f64>()
+                    / n as f64
+                    * (1.0 - 1e-9);
                 let floor = if model.may_continue(&prevs[j].bytes) {
                     0.0
                 } else {
@@ -820,7 +875,8 @@ fn optimize_chunk_light(
     let tail_lb: [[f32; 17]; 2] = std::array::from_fn(|r| std::array::from_fn(|t| lb(r == 1, 0, t)));
     let lambda = p.lambda as f64;
     let ratio2 = (p.max_rms_ratio as f64).powi(2);
-    let floor = (n * 4) as f64 * (p.min_rms as f64).powi(2);
+    // Per counted channel.
+    let floor = n as f64 * (p.min_rms as f64).powi(2);
     let original = p.verify_zstd_level.map(|_| data.to_vec());
     let mut stats = RdoStats {
         blocks: count,
@@ -849,9 +905,12 @@ fn optimize_chunk_light(
     for i in 0..count {
         let bi = first + i;
         read_block(s, bw, bh, (bi % nx) as u32, (bi / nx) as u32, &mut px);
-        let t = tbuf.texels(&px, 4);
+        let la = p.normal_map && is_gray(&px);
+        let t = if la { tbuf.texels_la(&px) } else { tbuf.texels(&px, 4) };
+        let sse = if la { sse_la } else { sse };
+        let floor = floor * t.used.count_ones() as f64;
         let bs = BlockSums::of(&t);
-        let smooth = smooth_factor(&bs, n, p);
+        let smooth = block_factor(&bs, n, &px, la, p);
         let score = |err: u64, bits: f32| smooth * err as f64 / 16.0 + lambda * bits as f64;
         // A prefix of 3 or more bytes shared with the previous block is one match, and so is such
         // a suffix; the bytes between are literals. Also returns whether there was a match.
@@ -1080,7 +1139,7 @@ mod tests {
                 let (mut changed, mut before, mut after) = (0, 0.0, 0.0);
                 for s in &images {
                     let (bw, bh) = format.block_dims();
-                    let mut data = super::super::encode_surface(s, bw, bh, true, 0);
+                    let mut data = super::super::encode_surface(s, bw, bh, true, 0, false);
                     let st = optimize(format, s, true, &mut data, &p);
                     changed += st.changed;
                     before += st.est_bits_before;

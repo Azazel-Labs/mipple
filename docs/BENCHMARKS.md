@@ -1247,8 +1247,78 @@ rate-quality curve (BD-rate against w = 0, λ 0 to 16) it is better on all three
 | **4** (default) | **-1.16%** | **-0.14%** | **-0.57%** | **-1.17%** | **-0.15%** | **-0.58%** |
 | 8 | -1.07% | +0.06% | -0.58% | | | |
 
-λ 0 (no RDO) is unchanged. The weight only applies to BC5 and EAC RG11 (signed or not) with
-`--role normal`; other formats store Z or a swizzle and keep plain RGB error.
+λ 0 (no RDO) is unchanged. The weight applies to BC5, EAC RG11 (signed or not) and ASTC with
+`--role normal`; other formats store Z and keep plain RGB error.
+
+### ASTC normal maps
+
+ASTC has no two-channel format. With `--role normal` mipple stores X in red, green and blue and Y
+in alpha (`rrrg`, the layout of astcenc `-normal`), after the mips are built. Every block is then
+gray, so the encoder writes luminance+alpha endpoints (CEM 4): one to three partitions, or one
+partition with Y on its own weight plane. The block error counts X and Y once each. The shader
+samples `.ga` (`.ra` is the same) and rebuilds Z = sqrt(1 - X² - Y²). KTX2 files carry the
+`KTXswizzle` entry `ga01`, so a loader that applies it sees X/Y in `.rg`. `decode --normal`,
+`compare --normal`, `score --normal`, `bench` and the PSNR `encode` reports all read this layout.
+Base+offset luminance+alpha (CEM 5) did not pay, so it is not tried (see DEADENDS).
+
+The RDO weight carries over to both of ASTC's RDO passes. BD-rate of w = 4 against w = 0 on the
+33 maps of `test-images/polyhaven/*_nor.png` (1024², Zstd-19, effort 0):
+
+| Pass | λ | lit | RG PSNR | angle |
+| --- | --- | --- | --- | --- |
+| Light (default), 4x4 | 0.03-1 | -0.35% | -0.21% | -0.09% |
+| Light (default), 6x6 | 0.1-3 | -0.57% | -0.38% | -0.23% |
+| Full (`-l λ`), 4x4 | 0.03-1 | -0.42% | -0.22% | -0.06% |
+| Full (`-l λ`), 6x6 | 0.1-3 | -0.64% | -0.34% | -0.18% |
+| Full (`-l λ`), 8x8 | 0.5-6 | -0.83% | -0.46% | -0.27% |
+
+Against astcenc 5.7.1 `-normal` (`astcenc-avx2 -cl IN OUT 6x6 -medium -normal -j 1`), on the
+same 33 maps at mipple's defaults (light RDO, `--role normal`, one thread). Lit PSNR is pooled MSE,
+angle is the mean angular error in degrees, and bpt is Zstd-19 of the block data. Time is the
+summed encode time, relative to astcenc `-fast` on the same footprint. It was measured locally,
+interleaved, on the first 8 maps (one thread, summed `Coding time` / mipple `encode` time), so read it as an estimate. "RGB" is 76ccee2, which encoded the
+normal's XYZ as an RGB texture:
+
+| Footprint | Encoder | lit dB | angle ° | bpt | time vs `-fast` |
+| --- | --- | --- | --- | --- | --- |
+| 4x4 | astcenc `-fast` | 34.77 | 1.345 | 7.045 | 1.00 |
+| 4x4 | astcenc `-medium` | 36.34 | 1.117 | 7.137 | 2.51 |
+| 4x4 | mipple RGB (76ccee2), effort 0 | 33.87 | 1.506 | 6.811 |  |
+| 4x4 | mipple RGB (76ccee2), effort 5 | 34.24 | 1.419 | 6.965 |  |
+| 4x4 | mipple effort 0 | 35.95 | 1.204 | 6.998 | 0.33 |
+| 4x4 | mipple effort 2 | 36.27 | 1.135 | 7.083 | 1.11 |
+| 4x4 | mipple effort 5 (default) | 36.35 | 1.125 | 7.121 | 4.90 |
+| 6x6 | astcenc `-fast` | 27.58 | 3.080 | 3.251 | 1.00 |
+| 6x6 | astcenc `-medium` | 28.11 | 2.875 | 3.309 | 1.97 |
+| 6x6 | astcenc `-thorough` | 28.18 | 2.843 | 3.333 | 4.31 |
+| 6x6 | mipple RGB (76ccee2), effort 0 | 26.97 | 3.282 | 3.090 |  |
+| 6x6 | mipple RGB (76ccee2), effort 5 | 27.44 | 3.120 | 3.226 |  |
+| 6x6 | mipple effort 0 | 27.48 | 3.058 | 3.173 | 0.20 |
+| 6x6 | mipple effort 2 | 27.80 | 2.944 | 3.221 | 0.80 |
+| 6x6 | mipple effort 5 (default) | 28.14 | 2.862 | 3.283 | 2.97 |
+| 8x8 | astcenc `-fast` | 24.97 | 4.190 | 1.798 | 1.00 |
+| 8x8 | astcenc `-medium` | 25.34 | 3.965 | 1.846 | 3.13 |
+| 8x8 | mipple RGB (76ccee2), effort 0 | 24.48 | 4.381 | 1.618 |  |
+| 8x8 | mipple RGB (76ccee2), effort 5 | 24.84 | 4.174 | 1.819 |  |
+| 8x8 | mipple effort 0 | 24.79 | 4.192 | 1.648 | 0.34 |
+| 8x8 | mipple effort 2 | 25.03 | 4.033 | 1.818 | 1.06 |
+| 8x8 | mipple effort 5 (default) | 25.36 | 3.930 | 1.857 | 4.55 |
+
+Effort 0 beats astcenc `-fast` at 4x4 by 1.2 dB with smaller files. At 6x6 and 8x8 it is 0.10 /
+0.18 dB lower with files 2.4% / 8.3% smaller; against the light pass's own λ slope that puts it
+about 0.06 / 0.13 dB behind at equal size, for a fifth to a third of the time. Effort 2, at 0.8-1.1x
+`-fast`'s time, is ahead of it on lit PSNR (+1.50 / +0.22 / +0.06 dB) and angle at every footprint,
+with files within ±1.1%. Effort 5 matches or edges out `-medium` (+0.01 to +0.03 dB, files -0.8% to
++0.6%), but at 1.5-2x its time. The full RDO raises effort 0's quality as well as cutting bits (at
+6x6, `-e 0 -l 1` gives 2.77 bpt at 27.69 dB, against the light pass's 3.17 bpt at 27.48 dB), but
+it takes 3.7x `-fast`'s time.
+
+**Unpack convention.** The metrics, the mip filter and Z reconstruction map a byte to
+`x/127.5 - 1`, which is the usual shader `2x - 1` with x = byte/255. Under it, byte 128 is +0.0039
+rather than 0, so a flat (128, 128) normal is tilted by about 0.3°. Castaño's fix, `(255x -
+128)/127`, maps 128 to exactly 0 and 1/255 to -1. mipple stores the bytes it is given and does not
+change them. The unpack is up to the shader and should match how the map was baked. The tilt
+shifts source and decoded normals alike, so it changes the reported errors by well under 1%.
 
 ## Lossless field split (`--prep`)
 

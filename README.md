@@ -116,10 +116,13 @@ When a change is meant to move the numbers, run the check, read the table, and i
 wanted, re-run with `--update-baseline` and commit the new CSV with the change. CI runs `mipple check` on Linux.
 
 Tell `encode` what the texture holds with `--role albedo|normal|mask` (default albedo). `normal` (or `--normal`)
-is linear with renormalized mips, and for `-f bc5` / `eac-rg11` the RDO weighs each block by how far its X/Y
-error moves the rebuilt unit normal (−1.2% BD-rate on lit PSNR; `--normal-weight`, see
-[BENCHMARKS](docs/BENCHMARKS.md#normal-map-rdo---role-normal)). `mask` is linear with alpha as data (`-f bc4` for
-one channel). Albedo is sRGB where the format has an sRGB variant; `--linear` / `--srgb` override any role.
+is linear with renormalized mips, and for `-f bc5` / `eac-rg11` / ASTC the RDO weighs each block by how far its
+X/Y error moves the rebuilt unit normal (−1.2% BD-rate on lit PSNR for BC5; `--normal-weight`, see
+[BENCHMARKS](docs/BENCHMARKS.md#normal-map-rdo---role-normal)). ASTC normal maps hold X in RGB and Y in alpha
+(`rrrg`, luminance+alpha endpoints, the layout of astcenc `-normal`): the shader reads X/Y from `.ga` and rebuilds
+Z, and KTX2 files carry `KTXswizzle` `ga01` for loaders that map them to `.rg`. `decode --normal` writes the
+rebuilt XYZ. `mask` is linear with alpha as data (`-f bc4` for one channel). Albedo is sRGB where the format
+has an sRGB variant; `--linear` / `--srgb` override any role.
 
 ## Opening in VS Code
 

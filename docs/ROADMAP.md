@@ -327,7 +327,10 @@ Open for v0.9.x:
   types, as Oodle does; an NVIDIA FLIP metric in `bench`.
 - [x] **Normal maps:** `--role albedo|normal|mask`; BC5 / EAC RG11 RDO weighs each block by how far its X/Y
   error moves the rebuilt unit normal (−1.2% BD-rate on lit PSNR, better RG PSNR and angle too), and `bench`
-  reports lit PSNR. Still open: per-channel weights for `mask`, and ASTC normal maps (X/Y in RG or LA).
+  reports lit PSNR. ASTC stores X/Y as luminance+alpha (`rrrg`, `KTXswizzle` `ga01`) with the same RDO
+  weight (−0.35 to −0.83% BD-rate on lit PSNR); effort 5 matches astcenc `-normal -medium` at 1.5-2x its
+  time. Still open: per-channel weights for `mask`, and closing effort 0's 0.06-0.13 dB gap to `-fast`
+  at 6x6 and 8x8.
 - [ ] **Mesh-aware texel density:** read the model a texture is mapped to (glTF first) and, from each
   triangle's UV-to-surface scale, get every texel's world-space density (texels per metre). With a usual
   viewing distance, field of view and screen resolution, that gives on-screen texels per pixel. Uses:

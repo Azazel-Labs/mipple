@@ -105,6 +105,7 @@ fn dds(blocks: &[[u8; 16]], dxgi: u32) -> Vec<u8> {
             height: 4 * MODE_VALUES.len() as u32,
             data: blocks.concat(),
         }],
+        swizzle: None,
     };
     let mut out = mipple::dds::write(&tex).unwrap();
     out[128..132].copy_from_slice(&dxgi.to_le_bytes());

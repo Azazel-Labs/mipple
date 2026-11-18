@@ -189,6 +189,9 @@ pub fn write(
     let dfd = build_dfd(tex.format, tex.srgb, supercompressed);
     let mut kvd = Vec::new();
     // Keys must be sorted by their byte values.
+    if let Some(s) = &tex.swizzle {
+        push_kv(&mut kvd, "KTXswizzle", s);
+    }
     push_kv(&mut kvd, "KTXwriter", &format!("mipple v{}", env!("CARGO_PKG_VERSION")));
     if let Some(p) = writer_params {
         push_kv(&mut kvd, "KTXwriterScParams", p);
@@ -330,6 +333,11 @@ pub fn read(bytes: &[u8]) -> Result<EncodedTexture> {
         .find(|(k, _)| k == PREP_KEY)
         .map(|(_, v)| v.chars().map(|c| c == '1').collect())
         .unwrap_or_default();
+    let swizzle = h
+        .key_values
+        .iter()
+        .find(|(k, _)| k == "KTXswizzle")
+        .map(|(_, v)| v.clone());
     let mut levels = Vec::with_capacity(h.levels.len());
     for (li, &(off, len, _)) in h.levels.iter().enumerate() {
         let shift = u32::try_from(li).unwrap_or(u32::MAX);
@@ -377,5 +385,6 @@ pub fn read(bytes: &[u8]) -> Result<EncodedTexture> {
         width: h.width,
         height: h.height,
         levels,
+        swizzle,
     })
 }

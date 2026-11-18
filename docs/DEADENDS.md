@@ -519,6 +519,11 @@ Measured on Kodak images 1-3, single thread, effort 0, unless noted. ISPC fast t
   1.014x at 5x5 / 4x4 / 6x6 effort 0 and 0.991x at 5x5 with RDO off (cloud A/B 44254519970, EPYC 7763,
   Kodak 24): within noise. The bound loop was a small part of reweight's time (its polish and quantize
   are the rest), and the lists were a few small allocations per block.
+- **Base+offset luminance+alpha (CEM 5) for normal maps.** With `--role normal` ASTC blocks hold X/Y as
+  luminance+alpha (CEM 4). Trying CEM 5 on the final weights, as RGB tries CEM 9, gave lit-PSNR BD-rate
+  -0.26% at 4x4 but +0.25% at 6x6 and +0.18% at 8x8. That was measured on 8 Poly Haven normal maps at
+  effort 5, λ 0.1-0.3 / 1-3 / 1.5-6. At effort 0 it is only tried at 4x4, where it was +0.03% (33 maps,
+  λ 0.03-1), and the default effort-5 encode took 1.1-1.5x as long (estimate, loaded machine). Not kept.
 
 ## ETC2 / EAC
 

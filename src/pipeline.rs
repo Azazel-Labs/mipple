@@ -106,6 +106,7 @@ impl EncodeOptions {
             effort: self.effort,
             reduce_entropy: self.entropy.resolve(self.rdo.lambda),
             srgb: self.srgb && self.format.supports_srgb(),
+            luma_alpha: self.normal_map && self.format.is_astc(),
         }
     }
 
@@ -165,6 +166,26 @@ pub struct EncodedTexture {
     pub width: u32,
     pub height: u32,
     pub levels: Vec<Level>,
+    /// How a sampler should map the stored channels to RGBA, as KTX2's `KTXswizzle` spells it
+    /// (`None`: as stored). An ASTC normal map's is [`ASTC_NORMAL_SWIZZLE`].
+    pub swizzle: Option<String>,
+}
+
+/// The `KTXswizzle` of an ASTC normal map, stored as `rrrg` (X in red, green and blue, Y in alpha):
+/// X and Y to red and green, blue 0 and alpha 1. A shader reading the stored channels takes X from
+/// green and Y from alpha (`.ga`), as for astcenc's `-normal`.
+pub const ASTC_NORMAL_SWIZZLE: &str = "ga01";
+
+/// An ASTC normal map's stored layout, `rrrg`: X (red) in red, green and blue, Y (green) in alpha.
+/// The ASTC encoder writes these gray blocks as luminance+alpha (CEM 4 and 5), whose endpoints
+/// spend nothing on a blue channel, and a dual-plane block gives X and Y separate weights, as BC5
+/// does. [`decode_blocks`] undoes it.
+pub fn astc_normal_swizzle(s: &Surface) -> Surface {
+    Surface {
+        pixels: s.pixels.iter().map(|p| [p[0], p[0], p[0], p[1]]).collect(),
+        width: s.width,
+        height: s.height,
+    }
 }
 
 /// Timing and RDO statistics for one encode.
@@ -308,7 +329,7 @@ fn encode_surface_raw(surface: &Surface, format: Format, opts: BlockOpts) -> Vec
         Format::EacRg11Snorm => crate::eac::encode_surface(surface, (0, 2), crate::eac::Kind::R11Snorm, opts.effort),
         crate::format::astc!() => {
             let (bw, bh) = format.block_dims();
-            crate::astc::encode::encode_surface(surface, bw, bh, opts.srgb, opts.effort)
+            crate::astc::encode::encode_surface(surface, bw, bh, opts.srgb, opts.effort, opts.luma_alpha)
         }
         Format::Bc7 => crate::bc7::fast::encode_surface(
             surface,
@@ -378,6 +399,9 @@ pub fn prepare<'a>(surface: &'a Surface, opts: &EncodeOptions) -> Vec<Cow<'a, Su
     } else {
         vec![top]
     };
+    if opts.block_opts().luma_alpha {
+        return levels.iter().map(|l| Cow::Owned(astc_normal_swizzle(l))).collect();
+    }
     if !transparency {
         return levels;
     }
@@ -618,6 +642,7 @@ fn encode_with<B: FnMut(usize, &Surface) -> Option<Vec<u8>>>(
                 width,
                 height,
                 levels,
+                swizzle: opts.block_opts().luma_alpha.then(|| ASTC_NORMAL_SWIZZLE.to_owned()),
             };
             (tex, report)
         })
@@ -681,6 +706,7 @@ pub fn encode_hdr(surface: &crate::hdr::HdrSurface, opts: &EncodeOptions) -> (En
         width: surface.width,
         height: surface.height,
         levels,
+        swizzle: None,
     };
     (tex, report)
 }
@@ -692,12 +718,23 @@ pub fn decode_level_hdr(tex: &EncodedTexture, level: usize) -> crate::hdr::HdrSu
     crate::bc6h::decode_surface(&l.data, l.width, l.height, tex.format.is_signed())
 }
 
-/// Decodes raw blocks back to an image. For BC5 with `normal_map`, Z is reconstructed into blue.
-/// `srgb` is the decode mode, which only ASTC's decode depends on (other formats ignore it).
+/// Decodes raw blocks back to an image. For BC5 with `normal_map`, Z is reconstructed into blue;
+/// for ASTC with `normal_map`, the stored `rrrg` layout ([`astc_normal_swizzle`]) comes back as X in
+/// red (read from green, as a shader would), Y in green (from alpha), Z reconstructed in blue and
+/// alpha 255. `srgb` is the decode mode, which only ASTC's decode depends on (other formats ignore
+/// it).
 pub fn decode_blocks(format: Format, data: &[u8], width: u32, height: u32, srgb: bool, normal_map: bool) -> Surface {
     if format.is_astc() {
         let (bw, bh) = format.block_dims();
-        return crate::astc::decode_rgba(data, width, height, bw, bh, srgb);
+        let mut s = crate::astc::decode_rgba(data, width, height, bw, bh, srgb);
+        if normal_map {
+            for p in &mut s.pixels {
+                let (x, y) = (p[1], p[3]);
+                let v = normal_from_rg(x, y);
+                *p = [x, y, ((v[2] + 1.0) * 127.5 + 0.5) as u8, 255];
+            }
+        }
+        return s;
     }
     let mut s = Surface::new(width, height);
     let n = format.block_bytes();
@@ -737,6 +774,26 @@ mod tests {
         assert!(!mask.srgb && !mask.normal_map);
         // Formats without an sRGB variant stay linear as albedo.
         assert!(!EncodeOptions::new(Format::Bc5).with_role(Role::Albedo).srgb);
+    }
+
+    /// An ASTC normal map is stored `rrrg` as luminance+alpha blocks, says so in KTX2's
+    /// `KTXswizzle`, and decodes with `normal_map` back to X and Y in red and green.
+    #[test]
+    fn astc_normal_maps_store_x_and_y_as_luminance_alpha() {
+        let src = crate::synth::normal_rocks(64);
+        let opts = EncodeOptions::new(Format::Astc6x6).with_role(Role::Normal);
+        let (tex, _) = encode(&src, &opts);
+        assert_eq!(tex.swizzle.as_deref(), Some(ASTC_NORMAL_SWIZZLE));
+        let raw = crate::astc::decode_rgba(&tex.levels[0].data, 64, 64, 6, 6, false);
+        assert!(raw.pixels.iter().all(|p| p[0] == p[1] && p[1] == p[2]));
+        let ktx = crate::ktx2::write(&tex, Some(3), None, crate::ktx2::PrepMode::Off).unwrap();
+        let back = crate::ktx2::read(&ktx).unwrap();
+        assert_eq!(back.swizzle.as_deref(), Some(ASTC_NORMAL_SWIZZLE));
+        let dec = decode_level(&back, 0, true);
+        let lit = crate::metrics::normal_lit_psnr(&src, &dec);
+        assert!(lit > 30.0, "lit PSNR {lit}");
+        // Colour textures keep their layout and no swizzle.
+        assert_eq!(encode(&src, &EncodeOptions::new(Format::Astc6x6)).0.swizzle, None);
     }
 
     /// Textures encoded together, and on any number of threads, come out as each encoded alone: the

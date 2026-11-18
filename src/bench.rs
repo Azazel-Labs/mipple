@@ -5,7 +5,7 @@
 
 use crate::format::{BlockOpts, EntropyMode, Format};
 use crate::metrics;
-use crate::pipeline::{EncodedTexture, decode_blocks, flatten, rdo_bases};
+use crate::pipeline::{EncodedTexture, astc_normal_swizzle, decode_blocks, flatten, rdo_bases};
 use crate::rdo::{self, RdoParams, RdoStats};
 use crate::surface::Surface;
 use anyhow::{Context, Result};
@@ -118,9 +118,16 @@ pub fn deflate_len(data: &[u8], level: u32) -> Result<usize> {
 
 /// (PSNR over stored channels, SSIM, normal angular error) for a decoded image.
 pub fn quality(format: Format, source: &Surface, dec: &Surface, normal: bool) -> (f64, f64, Option<f64>) {
-    let channels = format.metric_channels(source.has_alpha());
+    // An ASTC normal map keeps X and Y only ([`decode_blocks`] puts them back in red and green).
+    let xy = normal && format.is_astc();
+    let channels = if xy {
+        vec![0, 1]
+    } else {
+        format.metric_channels(source.has_alpha())
+    };
     let psnr = metrics::psnr(source, dec, &channels);
     let ssim = match format {
+        _ if xy => (metrics::ssim_channel(source, dec, 0) + metrics::ssim_channel(source, dec, 1)) / 2.0,
         Format::Bc1
         | Format::Bc3
         | Format::Bc6h
@@ -145,6 +152,8 @@ pub struct Score {
     pub psnr: f64,
     pub ssim: f64,
     pub normal_deg: Option<f64>,
+    /// Lit-output PSNR ([`metrics::normal_lit_psnr`]) when scored as a normal map.
+    pub lit_db: Option<f64>,
     pub raw_bytes: usize,
     pub zstd_bytes: usize,
     pub deflate_bytes: usize,
@@ -178,6 +187,7 @@ pub fn score(
         psnr,
         ssim,
         normal_deg,
+        lit_db: normal.then(|| metrics::normal_lit_psnr(source, &dec)),
         raw_bytes: data.len(),
         zstd_bytes,
         deflate_bytes,
@@ -248,6 +258,12 @@ pub fn run_images(
             let mut base_used = [false; 4];
             // The decode mode ASTC encodes for (other formats ignore it).
             let srgb = format.default_srgb() && !normal;
+            // An ASTC normal map is encoded in the `rrrg` layout `mipple encode` stores.
+            let la = normal && format.is_astc();
+            let swizzled = la.then(|| astc_normal_swizzle(surface));
+            let enc_surface = swizzled.as_ref().unwrap_or(surface);
+            let swizzled_src = swizzled.as_ref().map(Surface::blocks);
+            let enc_src = swizzled_src.as_ref().unwrap_or(&src);
             for &lambda in &cfg.lambdas {
                 let reduce = cfg.entropy.resolve(lambda);
                 // ASTC's RDO pass starts from its plain encode.
@@ -260,8 +276,9 @@ pub fn run_images(
                         effort: cfg.effort,
                         reduce_entropy: reduce,
                         srgb,
+                        luma_alpha: la,
                     };
-                    let (base, alts) = rdo_bases(surface, &src, format, opts, rdo_on);
+                    let (base, alts) = rdo_bases(enc_surface, enc_src, format, opts, rdo_on);
                     *slot = Some((base, alts, t0.elapsed().as_secs_f64()));
                 }
                 let (base, alts, base_secs) = slot.as_ref().unwrap();
@@ -278,7 +295,7 @@ pub fn run_images(
                 let t1 = Instant::now();
                 let (stats, data) = if params.enabled() && format.is_astc() {
                     let mut data = flatten(format, &blocks);
-                    let stats = crate::astc::encode::rdo::optimize(format, surface, srgb, &mut data, &params);
+                    let stats = crate::astc::encode::rdo::optimize(format, enc_surface, srgb, &mut data, &params);
                     (stats, data)
                 } else if params.enabled() {
                     let stats = rdo::optimize_with_alt(format, &src, &mut blocks, alts, &w, &params);

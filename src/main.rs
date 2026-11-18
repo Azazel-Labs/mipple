@@ -35,7 +35,9 @@ enum Cmd {
         /// Mip level to decode.
         #[arg(long, default_value_t = 0)]
         level: usize,
-        /// Reconstruct Z (blue) for BC5 normal maps.
+        /// Normal map: reconstruct Z (blue) for BC5, and for ASTC read the `rrrg` layout of
+        /// `--role normal` and astcenc's `-normal` (X from green, Y from alpha) back to X and Y in red
+        /// and green with Z in blue.
         #[arg(long)]
         normal: bool,
         #[command(flatten)]
@@ -76,6 +78,7 @@ enum Cmd {
         #[arg(long)]
         secs: Option<f64>,
         /// Print one CSV row: label,image,format,width,height,psnr,ssim,normal_deg,raw,zstd,deflate,zstd_bpt,deflate_bpt,secs
+        /// (with --normal, lit PSNR as an extra last column)
         #[arg(long)]
         csv: bool,
         #[command(flatten)]
@@ -172,7 +175,7 @@ struct RdoArgs {
     /// ... but always allow this RMS error per channel.
     #[arg(long, default_value_t = 3.0)]
     min_rms: f32,
-    /// Normal maps stored as X and Y (BC5, EAC RG11): how strongly each block's error is weighted by
+    /// Normal maps stored as X and Y (BC5, EAC RG11, ASTC): how strongly each block's error is weighted by
     /// how far it moves the reconstructed unit normal (1 = first-order normal error, 0 = plain XY
     /// error).
     #[arg(long, default_value_t = 4.0)]
@@ -481,7 +484,7 @@ fn main() -> Result<()> {
             let s = bench::score(&src, &tex, normal, zstd_level, deflate_level)?;
             if csv {
                 println!(
-                    "{},{},{},{},{},{:.4},{:.5},{},{},{},{},{:.4},{:.4},{}",
+                    "{},{},{},{},{},{:.4},{:.5},{},{},{},{},{:.4},{:.4},{}{}",
                     label.unwrap_or_default(),
                     source.file_name().and_then(|n| n.to_str()).unwrap_or("?"),
                     tex.format,
@@ -496,12 +499,16 @@ fn main() -> Result<()> {
                     s.zstd_bpt,
                     s.deflate_bpt,
                     secs.map(|t| format!("{t:.6}")).unwrap_or_default(),
+                    s.lit_db.map(|d| format!(",{d:.4}")).unwrap_or_default(),
                 );
             } else {
                 println!("{} vs {}: {}", encoded.display(), source.display(), tex.format);
                 println!("  PSNR {:.3} dB, SSIM {:.5}", s.psnr, s.ssim);
                 if let Some(d) = s.normal_deg {
                     println!("  normal angular error {d:.3}°");
+                }
+                if let Some(d) = s.lit_db {
+                    println!("  normal lit PSNR {d:.3} dB");
                 }
                 println!(
                     "  raw {} bytes, zstd-{} {} bytes ({:.3} bpt), deflate-{} {} bytes ({:.3} bpt)",
@@ -602,6 +609,7 @@ fn load_encoded(path: &std::path::Path, astc: AstcDecodeArgs) -> Result<mipple::
                 height: f.height,
                 data: f.blocks,
             }],
+            swizzle: None,
         })
     } else {
         ktx2::read(&bytes)
@@ -907,7 +915,12 @@ fn write_encoded(
 
     let raw: usize = tex.levels.iter().map(|l| l.data.len()).sum();
     let dec = pipeline::decode_level(tex, 0, opts.normal_map);
-    let channels = a.format.metric_channels(surface.has_alpha());
+    // An ASTC normal map keeps only X and Y (decoded back to red and green, Z reconstructed).
+    let channels = if opts.block_opts().luma_alpha {
+        vec![0, 1]
+    } else {
+        a.format.metric_channels(surface.has_alpha())
+    };
     let texels: f64 = tex.levels.iter().map(|l| l.width as f64 * l.height as f64).sum();
     println!(
         "{} -> {}: {}x{} {}{}, {} level(s)",

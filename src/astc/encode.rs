@@ -43,14 +43,14 @@ struct Grid {
     /// partitions of RGB (CEM 8), RGBA (CEM 12), RGB base+scale (CEM 6), and RGB with one or two
     /// partitions base+scale and the rest direct; `u8::MAX` where the mode leaves too few bits.
     modes: Vec<(BlockMode, [[u8; 5]; 3])>,
-    /// Dual-plane block modes on this grid, with the endpoint range for one partition of RGB and
-    /// RGBA.
-    dual: Vec<(BlockMode, [u8; 2])>,
-    /// The modes for each kind of layout (`est_kind`, then `SCALE_KIND` for base+scale RGB), by
-    /// increasing weight noise.
-    est: [Vec<Est>; 14],
+    /// Dual-plane block modes on this grid, with the endpoint range for one partition of RGB,
+    /// RGBA and luminance+alpha (CEM 4).
+    dual: Vec<(BlockMode, [u8; 3])>,
+    /// The modes for each kind of layout (`est_kind`, then `SCALE_KIND` for base+scale RGB, then
+    /// `LA_DUAL_KIND`), by increasing weight noise.
+    est: [Vec<Est>; KINDS],
     /// `est`'s noise terms as lanes, for scoring a kind's modes at once.
-    lanes: [EstLanes; 14],
+    lanes: [EstLanes; KINDS],
 }
 
 /// The most modes of one kind on one grid (one per weight range).
@@ -228,6 +228,17 @@ fn est_kind(count: u8, dual: bool, ce: usize) -> usize {
 /// add `count - 1`.
 const SCALE_KIND: usize = 8;
 
+/// The index into `Grid::est` for one partition of luminance+alpha (CEM 4) on two planes. On one
+/// plane CEM 4 has as many values as base+scale RGB, so as its ranges: `SCALE_KIND` and up, column
+/// [`LA_COLUMN`] of `Grid::modes`.
+const LA_DUAL_KIND: usize = 14;
+
+/// The kinds of layout in `Grid::est`.
+const KINDS: usize = 15;
+
+/// The column of `Grid::modes` (one plane) and `Grid::dual` (two) with luminance+alpha's range.
+const LA_COLUMN: usize = 2;
+
 /// The index into `Grid::est` and the endpoint kind (the column of `Grid::modes`) for variant
 /// `v` of a layout of `count` partitions: base+scale RGB in every partition (1), or in one (2) or
 /// two (3) of them.
@@ -336,7 +347,7 @@ impl Footprint {
         for gy in 2..=bh {
             for gx in 2..=bw {
                 let mut modes: Vec<(BlockMode, [[u8; 5]; 3])> = Vec::new();
-                let mut dual: Vec<(BlockMode, [u8; 2])> = Vec::new();
+                let mut dual: Vec<(BlockMode, [u8; 3])> = Vec::new();
                 for &bm in &all {
                     if bm.gx as u32 != gx || bm.gy as u32 != gy {
                         continue;
@@ -351,8 +362,9 @@ impl Footprint {
                         color_range(bm, p, &cems).unwrap_or(u8::MAX)
                     };
                     if bm.dual {
-                        if !dual.iter().any(|e| e.0 == bm) && cq(1, 8) != u8::MAX {
-                            dual.push((bm, [cq(1, 8), cq(1, 12)]));
+                        // CEM 4 fits wherever CEM 8 does, and in modes too short for it.
+                        if !dual.iter().any(|e| e.0 == bm) && cq(1, 4) != u8::MAX {
+                            dual.push((bm, [cq(1, 8), cq(1, 12), cq(1, 4)]));
                         }
                     } else if !modes.iter().any(|e| e.0 == bm) {
                         modes.push((
@@ -422,8 +434,8 @@ impl Footprint {
                     noise * wstep * wstep / 12.0 + round
                 };
                 let est = std::array::from_fn(|kind| {
-                    let mut v: Vec<Est> = if (6..SCALE_KIND).contains(&kind) {
-                        let ce = kind - 6;
+                    let mut v: Vec<Est> = if (6..SCALE_KIND).contains(&kind) || kind == LA_DUAL_KIND {
+                        let ce = if kind == LA_DUAL_KIND { LA_COLUMN } else { kind - 6 };
                         (dual.iter().enumerate())
                             .filter(|(_, m)| m.1[ce] != u8::MAX)
                             .map(|(mi, m)| Est {
@@ -649,6 +661,9 @@ struct Texels<'a> {
     xl: &'a [[i16; MAX_TEXELS]; 4],
     n: usize,
     ch: usize,
+    /// The channels the error counts, a bit each: all `ch` of them, or for a luminance+alpha block
+    /// ([`Texels::la`]) red and alpha only, since its green and blue always decode to its red.
+    used: u8,
 }
 
 /// The memory [`Texels`] point into, kept from block to block: each block fills its texels (and
@@ -686,14 +701,53 @@ impl TexelBuf {
             xl: &self.xl,
             n,
             ch,
+            used: (1 << ch) - 1,
         }
     }
+
+    /// `px`'s texels (red = green = blue in each) as a luminance+alpha block, the X and Y of a
+    /// normal map stored as `rrrg`: errors count red and alpha once each, and green and blue are
+    /// zero in `f` and `xl`, so the moments, axes and clusters are those of (X, Y). Green and blue
+    /// decode to red, so whatever reads them must skip them ([`Texels::counts`]).
+    fn texels_la<'a>(&'a mut self, px: &'a [Rgba]) -> Texels<'a> {
+        let n = px.len();
+        for (i, p) in px.iter().enumerate() {
+            debug_assert!(p[0] == p[1] && p[1] == p[2]);
+            self.f[i] = [p[0] as f32, 0.0, 0.0, p[3] as f32];
+            self.xl[0][i] = p[0] as i16;
+            self.xl[1][i] = 0;
+            self.xl[2][i] = 0;
+            self.xl[3][i] = p[3] as i16;
+        }
+        for x in &mut self.xl {
+            x[n..n.next_multiple_of(8)].fill(0);
+        }
+        Texels {
+            px,
+            f: &self.f,
+            xl: &self.xl,
+            n,
+            ch: 4,
+            used: 0b1001,
+        }
+    }
+}
+
+/// Whether every texel has red = green = blue: a luminance+alpha block.
+pub(crate) fn is_gray(px: &[Rgba]) -> bool {
+    px.iter().all(|p| p[0] == p[1] && p[1] == p[2])
 }
 
 /// No channel on a second weight plane.
 const NO_CCS: usize = 4;
 
 impl Texels<'_> {
+    /// Whether the error counts channel `c`.
+    #[inline]
+    fn counts(&self, c: usize) -> bool {
+        self.used >> c & 1 != 0
+    }
+
     /// The decoded block's squared error for the endpoints (0..=255) of partitions 0..`count`,
     /// texel labels `lab` (as lanes: -1 past `n`) and texel weights (0..=64: `w`, and `w2` in
     /// channel `ccs`), eight texels at a time. A texel decodes to `(64 e0 + 32 + w (e1 - e0)) >> 6`
@@ -714,6 +768,9 @@ impl Texels<'_> {
         let nl = self.n.next_multiple_of(8);
         let mut err = 0u32;
         for c in 0..self.ch {
+            if !self.counts(c) {
+                continue;
+            }
             let w = if c == ccs { w2 } else { w };
             let bp: [I16x8; 3] = std::array::from_fn(|p| I16x8::splat((64 * eps[p].0[c] + 32) as i16));
             let sp: [I16x8; 3] = std::array::from_fn(|p| I16x8::splat((eps[p].1[c] - eps[p].0[c]) as i16));
@@ -752,6 +809,9 @@ impl Texels<'_> {
         let pm = I16x8::splat(p as i16);
         let mut acc = I32x4::zero();
         for c in 0..self.ch {
+            if !self.counts(c) {
+                continue;
+            }
             let w = if c == ccs { w2 } else { w };
             let b = I16x8::splat((64 * e.0[c] + 32) as i16);
             let s = I16x8::splat((e.1[c] - e.0[c]) as i16);
@@ -1163,7 +1223,9 @@ fn polish_in<const W: bool, const E: bool>(
     // The plane that drives channel `c`; per plane, a mask of the channel lanes it drives (lanes
     // 0..4 and 4..8 are the same four channels).
     let plane_of = |c: usize| (c == ccs) as usize;
-    let mask = PLANE_MASKS[ch - 1][ccs].map(I16x8::from_array);
+    let used = t.used;
+    let mask = PLANE_MASKS[ch - 1][ccs]
+        .map(|m| I16x8::from_array(std::array::from_fn(|l| m[l] & -((used >> (l % 4) & 1) as i16))));
     // Each texel's infill sum (16 times its weight, plus the rounding 8), so a grid point's step
     // moves its texels' sums by its tap weight times the step.
     for (pl, sp) in sums.iter_mut().enumerate().take(planes) {
@@ -1311,7 +1373,7 @@ fn polish_in<const W: bool, const E: bool>(
                     // Partition `p`'s error over every channel with endpoints `e`.
                     let part_err = |e: &([i32; 4], [i32; 4])| -> i32 {
                         let mut acc = I32x4::zero();
-                        for c in 0..ch {
+                        for c in (0..ch).filter(|&c| t.counts(c)) {
                             let pl = plane_of(c);
                             let (b, s) = (
                                 I16x8::splat((64 * e.0[c] + 32) as i16),
@@ -1704,15 +1766,16 @@ struct QuadSums {
 }
 
 impl QuadSums {
-    /// Makes this `t`'s table: the runs past its texels are left as they were, and not read.
-    fn fill(&mut self, t: &Texels) {
+    /// Makes this `t`'s table of channels `chans` (red, green, blue; for luminance+alpha red,
+    /// alpha and a zero channel): the runs past its texels are left as they were, and not read.
+    fn fill(&mut self, t: &Texels, chans: [usize; 3]) {
         let q = self;
         q.groups = t.n.div_ceil(4);
         for g in 0..q.groups {
             q.tab[g][0] = [0; 10];
             let v: [[u32; 10]; 4] = std::array::from_fn(|j| {
                 let i = 4 * g + j;
-                let [r, gr, b] = [0, 1, 2].map(|c| t.xl[c][i] as u32);
+                let [r, gr, b] = chans.map(|c| t.xl[c][i] as u32);
                 [(i < t.n) as u32, r, gr, b, r * r, r * gr, r * b, gr * gr, gr * b, b * b]
             });
             for m in 1..16usize {
@@ -2026,13 +2089,16 @@ fn try_candidate(
             if cem == 8 {
                 e[3] = 255;
             }
+            if cem == 4 {
+                (e[1], e[2]) = (e[0], e[0]);
+            }
             e
         };
         let (mut e0, mut e1) = (un(c0), un(c1));
         // Endpoints whose second sum is lower decode with blue contraction. One partition can
         // swap them and invert the weights; with several, the weights are shared, so fall back to
-        // the partition's mean color.
-        if e1[0] + e1[1] + e1[2] < e0[0] + e0[1] + e0[2] {
+        // the partition's mean color. Luminance+alpha endpoints decode as written.
+        if cem != 4 && e1[0] + e1[1] + e1[2] < e0[0] + e0[1] + e0[2] {
             if lay.count == 1 {
                 std::mem::swap(&mut c0, &mut c1);
                 std::mem::swap(&mut e0, &mut e1);
@@ -2057,11 +2123,17 @@ fn try_candidate(
     }
     let parts = lay.count as usize;
     let mut colors = [0u8; 18];
-    let nv = if cem == 12 { 4 } else { 3 };
+    // The channels with values, in order: luminance (red) and alpha for CEM 4.
+    let chans: &[usize] = match cem {
+        4 => &[0, 3],
+        12 => &[0, 1, 2, 3],
+        _ => &[0, 1, 2],
+    };
+    let nv = chans.len();
     for p in 0..parts {
-        for ch in 0..nv {
-            colors[2 * nv * p + 2 * ch] = cc[p].0[ch];
-            colors[2 * nv * p + 2 * ch + 1] = cc[p].1[ch];
+        for (k, &ch) in chans.iter().enumerate() {
+            colors[2 * nv * p + 2 * k] = cc[p].0[ch];
+            colors[2 * nv * p + 2 * k + 1] = cc[p].1[ch];
         }
     }
     let keep = |eps: &[([i32; 4], [i32; 4]); 3], cems: [u8; 4], cq: u8, colors: &[u8; 18], best: &mut Best| -> u32 {
@@ -2119,9 +2191,11 @@ fn try_candidate(
     };
     // The same weights with base+offset endpoints (same range: as many values) and base+scale
     // endpoints (a finer range: fewer values), if `alts` is set; all base+scale is the candidate itself.
+    // Luminance+alpha tries neither: it has no base+scale mode, and base+offset (CEM 5) bought
+    // nothing on normal maps (docs/DEADENDS.md).
     let scale_cem = if cem == 12 { 10 } else { 6 };
     let tries = [cem + 1, scale_cem];
-    let tries = match (scale != 0, alts > 0) {
+    let tries = match (scale != 0, alts > 0 && cem != 4) {
         (true, _) => &tries[1..],
         (false, true) => &tries[..],
         (false, false) => &tries[..0],
@@ -2670,16 +2744,25 @@ fn effort_table(effort: u8, texels: usize) -> Effort {
 
 /// Encodes one block of `fp`'s footprint (row-major texels). `srgb` changes nothing: eight-bit
 /// endpoints decode to the same values either way (see `Texels::error`).
-pub fn encode_block(fp: &Footprint, px: &[Rgba], srgb: bool, effort: u8) -> [u8; 16] {
+pub fn encode_block(fp: &Footprint, px: &[Rgba], srgb: bool, effort: u8, la: bool) -> [u8; 16] {
     let _ = srgb;
     let n = fp.texels();
     debug_assert_eq!(px.len(), n);
     if px.iter().all(|&p| p == px[0]) {
         return void_extent(px[0]);
     }
-    let alpha = px.iter().any(|p| p[3] != 255);
-    let cem = if alpha { 12u8 } else { 8 };
-    let ce = alpha as usize;
+    // Luminance+alpha (CEM 4) where asked for and the block is gray: one partition on two planes,
+    // alpha on the second, or one to three on one plane.
+    let la = la && is_gray(px);
+    let alpha = la || px.iter().any(|p| p[3] != 255);
+    let cem = if la {
+        4
+    } else if alpha {
+        12u8
+    } else {
+        8
+    };
+    let ce = if la { LA_COLUMN } else { alpha as usize };
     let es = effort_settings(effort, n);
     let mut scratch = SCRATCH.take().unwrap_or_default();
     let Scratch {
@@ -2695,7 +2778,11 @@ pub fn encode_block(fp: &Footprint, px: &[Rgba], srgb: bool, effort: u8) -> [u8;
         ranked,
         by,
     } = &mut *scratch;
-    let t = texels.texels(px, if alpha { 4 } else { 3 });
+    let t = if la {
+        texels.texels_la(px)
+    } else {
+        texels.texels(px, if alpha { 4 } else { 3 })
+    };
     layouts.reset(n);
     // One partition's moments and principal axis, shared by the one-partition layouts and k-means.
     let lab1: [i16; MAX_TEXELS] = std::array::from_fn(|i| if i < n { 0 } else { -1 });
@@ -2704,8 +2791,11 @@ pub fn encode_block(fp: &Footprint, px: &[Rgba], srgb: bool, effort: u8) -> [u8;
     let axis1 = dominant(&cov);
     layouts.next().fill(&t, 1, 0, &lab1, NO_CCS, &ms1, Some(axis1));
     // The texels' mean squared distance from their line, per channel.
-    let off_line = layouts.all()[0].orth / (n * t.ch) as f32;
-    if es.dual > 0 && off_line >= es.line[2] {
+    let off_line = layouts.all()[0].orth / (n * t.used.count_ones() as usize) as f32;
+    if la && es.dual > 0 && off_line >= es.line[2] {
+        // Alpha alone can go on the second plane: CEM 4 shares red, green and blue.
+        layouts.next().fill(&t, 1, 0, &lab1, 3, &ms1, None);
+    } else if es.dual > 0 && off_line >= es.line[2] {
         // Channels for the second plane, those leaving the rest closest to a line first: the
         // variance of the other channels off their dominant axis.
         let mut off: Vec<(f32, usize, [f32; 4])> = (0..t.ch)
@@ -2753,7 +2843,21 @@ pub fn encode_block(fp: &Footprint, px: &[Rgba], srgb: bool, effort: u8) -> [u8;
                 by.insert(at, (o, i));
                 by.truncate(want);
             };
-            if t.ch == 3 {
+            if t.ch == 3 || la {
+                // Luminance+alpha as red, alpha and a zero channel: green and blue are zero.
+                let chans = if la { [0, 3, 1] } else { [0, 1, 2] };
+                let pick = |m: &Moments| Moments {
+                    n: m.n,
+                    s: std::array::from_fn(|a| if a < 3 { m.s[chans[a]] } else { 0 }),
+                    ss: std::array::from_fn(|a| {
+                        std::array::from_fn(|b| {
+                            let (x, y) = (chans[a.min(2)], chans[b.min(2)]);
+                            if a < 3 && b < 3 { m.ss[x.min(y)][x.max(y)] } else { 0 }
+                        })
+                    }),
+                };
+                let total = if la { pick(&ms1[0]) } else { ms1[0] };
+                let axis = if la { [axis1[0], axis1[3], axis1[1], 0.0] } else { axis1 };
                 let q = quad.get_or_insert_with(|| {
                     Box::new(QuadSums {
                         tab: [[[0; 10]; 16]; MAX_TEXELS / 4],
@@ -2761,7 +2865,7 @@ pub fn encode_block(fp: &Footprint, px: &[Rgba], srgb: bool, effort: u8) -> [u8;
                     })
                 });
                 if !have_quad {
-                    q.fill(&t);
+                    q.fill(&t, chans);
                     have_quad = true;
                 }
                 let (nw, stride) = (fp.nw, fp.nw * (pi + 1));
@@ -2770,7 +2874,7 @@ pub fn encode_block(fp: &Footprint, px: &[Rgba], srgb: bool, effort: u8) -> [u8;
                         let i = chunk[l.min(chunk.len() - 1)];
                         &parts.masks[i * stride..(i + 1) * stride]
                     });
-                    let o = off_lines_rgb(&t, q, masks, nw, k, &ms1[0], &axis1);
+                    let o = off_lines_rgb(&t, q, masks, nw, k, &total, &axis);
                     for (&i, o) in chunk.iter().zip(o) {
                         keep(o, i);
                     }
@@ -2830,7 +2934,11 @@ pub fn encode_block(fp: &Footprint, px: &[Rgba], srgb: bool, effort: u8) -> [u8;
         let (bw, bh) = (fp.bw as usize, fp.bh as usize);
         // Squared color per unit of weight squared, over the block.
         let span = lay.scale[..n].iter().sum::<f32>() + if dual { n as f32 * lay.scale2 } else { 0.0 };
-        let kind = est_kind(lay.count, dual, ce);
+        let kind = match (la, dual) {
+            (false, _) => est_kind(lay.count, dual, ce),
+            (true, true) => LA_DUAL_KIND,
+            (true, false) => SCALE_KIND + lay.count as usize - 1,
+        };
         spans.push((span, kind));
         let calib: [f32; 4] = std::array::from_fn(|v| calibration(n, lay.count, v, dual));
         // The last score's bits: no estimate above it goes in.
@@ -2982,7 +3090,13 @@ pub fn encode_block(fp: &Footprint, px: &[Rgba], srgb: bool, effort: u8) -> [u8;
             let mut uu2 = [0f32; MAX_TEXELS];
             for i in 0..n {
                 let (e0, e1) = eps[lay.labels[i] as usize];
-                let d: [f32; 4] = std::array::from_fn(|c| if c == lay.ccs { 0.0 } else { (e1[c] - e0[c]) as f32 });
+                let d: [f32; 4] = std::array::from_fn(|c| {
+                    if c == lay.ccs || !t.counts(c) {
+                        0.0
+                    } else {
+                        (e1[c] - e0[c]) as f32
+                    }
+                });
                 let dd: f32 = d[..t.ch].iter().map(|x| x * x).sum();
                 uu[i] = if dd < 1.0 {
                     lay.u[i]
@@ -3109,8 +3223,9 @@ fn read_block(s: &Surface, bw: u32, bh: u32, bx: u32, by: u32, out: &mut [Rgba])
     }
 }
 
-/// Encodes a surface as ASTC `bw` × `bh` blocks, in parallel, raster order.
-pub fn encode_surface(s: &Surface, bw: u32, bh: u32, srgb: bool, effort: u8) -> Vec<u8> {
+/// Encodes a surface as ASTC `bw` × `bh` blocks, in parallel, raster order. With `la`, gray
+/// blocks are encoded as luminance+alpha (a normal map stored as `rrrg`); see [`encode_block`].
+pub fn encode_surface(s: &Surface, bw: u32, bh: u32, srgb: bool, effort: u8, la: bool) -> Vec<u8> {
     use rayon::prelude::*;
     let fp = Footprint::get(bw, bh);
     let (nx, ny) = (s.width.div_ceil(bw), s.height.div_ceil(bh));
@@ -3122,7 +3237,7 @@ pub fn encode_surface(s: &Surface, bw: u32, bh: u32, srgb: bool, effort: u8) -> 
             (0..nx)
                 .flat_map(|bx| {
                     read_block(s, bw, bh, bx, by, &mut px);
-                    encode_block(fp, &px, srgb, effort)
+                    encode_block(fp, &px, srgb, effort, la)
                 })
                 .collect::<Vec<u8>>()
         })
@@ -3202,7 +3317,7 @@ mod tests {
         for f in files.iter().filter(|f| f.extension().is_some_and(|e| e == "png")) {
             let src = Surface::load(f).unwrap();
             let t0 = std::time::Instant::now();
-            let data = pool.install(|| encode_surface(&src, bw, bh, false, effort));
+            let data = pool.install(|| encode_surface(&src, bw, bh, false, effort, false));
             secs += t0.elapsed().as_secs_f64();
             if let Ok(dir) = std::env::var("MIPPLE_ASTC_OUT") {
                 let f2 = super::super::file::AstcFile {
@@ -3263,7 +3378,7 @@ mod tests {
         let fp = Footprint::new(6, 6);
         let px = vec![[12, 200, 77, 255]; 36];
         let mut out = vec![[0u8; 4]; 36];
-        decode_block(&encode_block(&fp, &px, false, 0), 6, 6, false, &mut out);
+        decode_block(&encode_block(&fp, &px, false, 0, false), 6, 6, false, &mut out);
         assert_eq!(out, px);
     }
 
@@ -3288,7 +3403,7 @@ mod tests {
                 })
                 .collect();
             let mut out = vec![[0u8; 4]; n];
-            decode_block(&encode_block(&fp, &px, false, 5), bw, bh, false, &mut out);
+            decode_block(&encode_block(&fp, &px, false, 5, false), bw, bh, false, &mut out);
             let e = sse(&px, &out) as f64 / (n * 3) as f64;
             assert!(e < 4.0, "{bw}x{bh}: mse {e}");
         }
@@ -3313,10 +3428,10 @@ mod tests {
                 })
                 .collect();
             let mut out = vec![[0u8; 4]; 36];
-            decode_block(&encode_block(&fp, &px, false, 0), 6, 6, false, &mut out);
+            decode_block(&encode_block(&fp, &px, false, 0, false), 6, 6, false, &mut out);
             assert!(!out.contains(&ERROR));
             e0 += sse(&px, &out);
-            decode_block(&encode_block(&fp, &px, false, 9), 6, 6, false, &mut out);
+            decode_block(&encode_block(&fp, &px, false, 9, false), 6, 6, false, &mut out);
             e9 += sse(&px, &out);
         }
         assert!(e9 <= e0, "{e9} > {e0}");

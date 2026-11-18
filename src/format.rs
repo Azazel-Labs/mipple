@@ -60,6 +60,10 @@ pub struct BlockOpts {
     /// so its encoder needs to know which one the texture will be read with. Other formats ignore
     /// it.
     pub srgb: bool,
+    /// ASTC only: encode gray blocks (red = green = blue) as luminance+alpha, CEM 4 and 5: a
+    /// normal map stored as `rrrg` (X in red, green and blue, Y in alpha; see
+    /// [`crate::pipeline::EncodeOptions::normal_map`]). Other formats ignore it.
+    pub luma_alpha: bool,
 }
 
 impl BlockOpts {
@@ -79,6 +83,7 @@ impl From<u8> for BlockOpts {
             effort,
             reduce_entropy: false,
             srgb: false,
+            luma_alpha: false,
         }
     }
 }
