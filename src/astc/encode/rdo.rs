@@ -20,7 +20,7 @@ use super::{
     Footprint, Layout, MAX_TEXELS, NO_CCS, TexelBuf, Texels, polish_parts, quantize, read_block, refit, round_pos,
     sym_endpoints, tables,
 };
-use crate::astc::lanes::{I16x8, I32x4};
+use crate::astc::lanes::{F32x4, I16x8, I32x4};
 use crate::astc::{COLOR_UNQUANT, PartitionFn, Symbolic, color_range, decode_block, decode_symbolic_tw};
 use crate::format::Format;
 use crate::rdo::{LzModel, LzState, RdoParams, RdoStats, bit_budget, match_len_bits};
@@ -302,22 +302,64 @@ fn reweight(
     let mut lb = 0f32;
     let mut u = [0f32; MAX_TEXELS];
     let mut u2 = [0f32; MAX_TEXELS];
-    for i in 0..n {
-        let p = lay.labels[i] as usize;
-        let (e0, e1) = eps[p];
-        let x = t.px[i].map(i32::from);
-        let mut dot = 0i32;
-        for c in 0..4 {
-            dot += (x[c] - e0i[p][c]) * di[p][c];
+    if ccs == NO_CCS {
+        // One plane: each texel's term four at a time, each lane rounding as the two-plane loop
+        // below does (the dot product is of integers, exact in f32), summed into `lb` in texel
+        // order, so the bound and where it stops are the scalar loop's.
+        let cols = |a: &[[f32; 4]; 3], p: [usize; 4]| F32x4::transpose(p.map(|p| F32x4::from_array(a[p])));
+        let (zero, top, slack4, step) = (
+            F32x4::zero(),
+            F32x4::splat(64.0),
+            F32x4::splat(slack),
+            F32x4::splat(1.0 / 64.0),
+        );
+        let one = (cols(&e0f, [0; 4]), cols(&df, [0; 4]), F32x4::splat(inv[0]));
+        for i in (0..n).step_by(4) {
+            let (e0, d, iv) = if count == 1 {
+                one
+            } else {
+                let p: [usize; 4] = std::array::from_fn(|l| if i + l < n { lay.labels[i + l] as usize } else { 0 });
+                (cols(&e0f, p), cols(&df, p), F32x4::from_array(p.map(|p| inv[p])))
+            };
+            let x = F32x4::transpose(std::array::from_fn(|l| F32x4::from_array(t.f[i + l])));
+            let mut dot = zero;
+            for c in 0..4 {
+                dot = dot.add(x[c].sub(e0[c]).mul(d[c]));
+            }
+            // `zero.max(v)` keeps a -0.0 as `f32::clamp` does.
+            let uu = top.min(zero.max(dot.mul(iv)));
+            uu.store(&mut u[i..]);
+            let s = uu.mul(step);
+            let mut d2 = zero;
+            for c in 0..4 {
+                let r = x[c].sub(e0[c]).sub(s.mul(d[c]));
+                d2 = d2.add(r.mul(r));
+            }
+            let e = d2.sqrt().sub(slack4).max(zero);
+            for v in e.mul(e).to_array().into_iter().take(n - i) {
+                lb += v;
+                if lb > max_err {
+                    return None;
+                }
+            }
         }
-        u[i] = (dot as f32 * inv[p]).clamp(0.0, 64.0);
-        let mut d2 = 0f32;
-        for c in 0..4 {
-            let r = t.f[i][c] - e0f[p][c] - u[i] * (1.0 / 64.0) * df[p][c];
-            d2 += r * r * mask[c];
-        }
-        lb += (d2.sqrt() - slack).max(0.0).powi(2);
-        if ccs < NO_CCS {
+    } else {
+        // Two planes.
+        for i in 0..n {
+            let p = lay.labels[i] as usize;
+            let (e0, e1) = eps[p];
+            let x = t.px[i].map(i32::from);
+            let mut dot = 0i32;
+            for c in 0..4 {
+                dot += (x[c] - e0i[p][c]) * di[p][c];
+            }
+            u[i] = (dot as f32 * inv[p]).clamp(0.0, 64.0);
+            let mut d2 = 0f32;
+            for c in 0..4 {
+                let r = t.f[i][c] - e0f[p][c] - u[i] * (1.0 / 64.0) * df[p][c];
+                d2 += r * r * mask[c];
+            }
+            lb += (d2.sqrt() - slack).max(0.0).powi(2);
             let d = e1[ccs] - e0[ccs];
             u2[i] = if d != 0 {
                 (64.0 * (x[ccs] - e0[ccs]) as f32 / d as f32).clamp(0.0, 64.0)
@@ -326,9 +368,9 @@ fn reweight(
             };
             let r = x[ccs] as f32 - e0[ccs] as f32 - u2[i] * (1.0 / 64.0) * d as f32;
             lb += (r.abs() - 0.5).max(0.0).powi(2);
-        }
-        if lb > max_err {
-            return None;
+            if lb > max_err {
+                return None;
+            }
         }
     }
     let mut out = sym.clone();

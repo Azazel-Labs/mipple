@@ -188,6 +188,53 @@ mod imp {
         pub fn le_mask(self, o: Self) -> u32 {
             unsafe { _mm_movemask_ps(_mm_cmple_ps(self.0, o.0)) as u32 }
         }
+
+        #[inline]
+        pub fn from_array(v: [f32; 4]) -> Self {
+            Self(unsafe { _mm_loadu_ps(v.as_ptr()) })
+        }
+
+        #[inline]
+        pub fn to_array(self) -> [f32; 4] {
+            let mut v = [0f32; 4];
+            unsafe { _mm_storeu_ps(v.as_mut_ptr(), self.0) };
+            v
+        }
+
+        /// Per lane, `self` if it is greater than `o`, else `o`.
+        #[inline]
+        pub fn max(self, o: Self) -> Self {
+            Self(unsafe { _mm_max_ps(self.0, o.0) })
+        }
+
+        /// Per lane, `self` if it is less than `o`, else `o`.
+        #[inline]
+        pub fn min(self, o: Self) -> Self {
+            Self(unsafe { _mm_min_ps(self.0, o.0) })
+        }
+
+        /// Correctly rounded, as `f32::sqrt`.
+        #[inline]
+        pub fn sqrt(self) -> Self {
+            Self(unsafe { _mm_sqrt_ps(self.0) })
+        }
+
+        /// Rows to columns: lane `j` of result `i` is lane `i` of `r[j]`.
+        #[inline]
+        pub fn transpose(r: [Self; 4]) -> [Self; 4] {
+            unsafe {
+                let a = _mm_unpacklo_ps(r[0].0, r[1].0);
+                let b = _mm_unpacklo_ps(r[2].0, r[3].0);
+                let c = _mm_unpackhi_ps(r[0].0, r[1].0);
+                let d = _mm_unpackhi_ps(r[2].0, r[3].0);
+                [
+                    Self(_mm_movelh_ps(a, b)),
+                    Self(_mm_movehl_ps(b, a)),
+                    Self(_mm_movelh_ps(c, d)),
+                    Self(_mm_movehl_ps(d, c)),
+                ]
+            }
+        }
     }
 }
 
@@ -358,6 +405,44 @@ mod imp {
         #[inline]
         pub fn le_mask(self, o: Self) -> u32 {
             (0..4).map(|l| ((self.0[l] <= o.0[l]) as u32) << l).sum()
+        }
+
+        #[inline]
+        pub fn from_array(v: [f32; 4]) -> Self {
+            Self(v)
+        }
+
+        #[inline]
+        pub fn to_array(self) -> [f32; 4] {
+            self.0
+        }
+
+        /// Per lane, `self` if it is greater than `o`, else `o`.
+        #[inline]
+        pub fn max(self, o: Self) -> Self {
+            Self(std::array::from_fn(
+                |l| if self.0[l] > o.0[l] { self.0[l] } else { o.0[l] },
+            ))
+        }
+
+        /// Per lane, `self` if it is less than `o`, else `o`.
+        #[inline]
+        pub fn min(self, o: Self) -> Self {
+            Self(std::array::from_fn(
+                |l| if self.0[l] < o.0[l] { self.0[l] } else { o.0[l] },
+            ))
+        }
+
+        /// Correctly rounded, as `f32::sqrt`.
+        #[inline]
+        pub fn sqrt(self) -> Self {
+            Self(self.0.map(f32::sqrt))
+        }
+
+        /// Rows to columns: lane `j` of result `i` is lane `i` of `r[j]`.
+        #[inline]
+        pub fn transpose(r: [Self; 4]) -> [Self; 4] {
+            std::array::from_fn(|i| Self(std::array::from_fn(|j| r[j].0[i])))
         }
     }
 }

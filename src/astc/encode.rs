@@ -2276,32 +2276,32 @@ fn kmeans(t: &Texels, k: usize, axis: &[f32; 4], mean: &[f32; 4]) -> [[u64; 3]; 
 
 /// The `want` patterns that best agree with clustering `km` (most texels in the same partition,
 /// under the best relabelling), best first, ties to the lower index.
-fn rank_patterns(fp: &Footprint, k: usize, km: &[[u64; 3]; 3], n: u32, want: usize) -> Vec<usize> {
+fn rank_patterns(fp: &Footprint, k: usize, km: &[[u64; 3]; 3], n: u32, want: usize, out: &mut Vec<usize>) {
     #[cfg(target_arch = "x86_64")]
     if std::arch::is_x86_feature_detected!("popcnt") {
         // SAFETY: the CPU has POPCNT.
-        return unsafe { rank_patterns_popcnt(fp, k, km, n, want) };
+        return unsafe { rank_patterns_popcnt(fp, k, km, n, want, out) };
     }
-    rank_patterns_generic(fp, k, km, n, want)
+    rank_patterns_generic(fp, k, km, n, want, out);
 }
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "popcnt")]
-fn rank_patterns_popcnt(fp: &Footprint, k: usize, km: &[[u64; 3]; 3], n: u32, want: usize) -> Vec<usize> {
-    rank_patterns_generic(fp, k, km, n, want)
+fn rank_patterns_popcnt(fp: &Footprint, k: usize, km: &[[u64; 3]; 3], n: u32, want: usize, out: &mut Vec<usize>) {
+    rank_patterns_generic(fp, k, km, n, want, out);
 }
 
 #[inline(always)]
-fn rank_patterns_generic(fp: &Footprint, k: usize, km: &[[u64; 3]; 3], n: u32, want: usize) -> Vec<usize> {
+fn rank_patterns_generic(fp: &Footprint, k: usize, km: &[[u64; 3]; 3], n: u32, want: usize, out: &mut Vec<usize>) {
     match fp.nw {
-        1 => rank_scan::<1>(&fp.parts(k - 2).masks, k, km, n, want),
-        2 => rank_scan::<2>(&fp.parts(k - 2).masks, k, km, n, want),
-        _ => rank_scan::<3>(&fp.parts(k - 2).masks, k, km, n, want),
+        1 => rank_scan::<1>(&fp.parts(k - 2).masks, k, km, n, want, out),
+        2 => rank_scan::<2>(&fp.parts(k - 2).masks, k, km, n, want, out),
+        _ => rank_scan::<3>(&fp.parts(k - 2).masks, k, km, n, want, out),
     }
 }
 
 #[inline(always)]
-fn rank_scan<const NW: usize>(pm: &[u64], k: usize, km: &[[u64; 3]; 3], n: u32, want: usize) -> Vec<usize> {
+fn rank_scan<const NW: usize>(pm: &[u64], k: usize, km: &[[u64; 3]; 3], n: u32, want: usize, out: &mut Vec<usize>) {
     // Each pattern's misses (at most `n`, so under 256), then a counting sort by (misses, index).
     let mut miss = [0u8; 1024];
     let mut hist = [0u16; 256];
@@ -2346,15 +2346,18 @@ fn rank_scan<const NW: usize>(pm: &[u64], k: usize, km: &[[u64; 3]; 3], n: u32, 
             break;
         }
     }
-    let mut out = vec![0usize; total];
+    // The first `want` of them, in that order.
+    out.clear();
+    out.resize(total.min(want), 0);
     for (i, &m) in miss[..count].iter().enumerate() {
         if m as usize <= thr {
-            out[at[m as usize] as usize] = i;
+            let a = at[m as usize] as usize;
+            if a < want {
+                out[a] = i;
+            }
             at[m as usize] += 1;
         }
     }
-    out.truncate(want);
-    out
 }
 
 /// Candidates whose decimation error is measured, per candidate encoded, unless an effort level
@@ -2689,6 +2692,8 @@ pub fn encode_block(fp: &Footprint, px: &[Rgba], srgb: bool, effort: u8) -> [u8;
         measured,
         decimated,
         finals,
+        ranked,
+        by,
     } = &mut *scratch;
     let t = texels.texels(px, if alpha { 4 } else { 3 });
     layouts.reset(n);
@@ -2734,12 +2739,12 @@ pub fn encode_block(fp: &Footprint, px: &[Rgba], srgb: bool, effort: u8) -> [u8;
             continue;
         }
         let km = kmeans(&t, k, &axis1, &mean1);
-        let mut ranked = rank_patterns(fp, k, &km, n as u32, want.max(es.rerank));
+        rank_patterns(fp, k, &km, n as u32, want.max(es.rerank), ranked);
         if es.rerank > want {
             // The best `want` patterns by score, in order, ties to the earlier place in `ranked`:
             // each pattern's (score, index), kept sorted as they come (in place order, so a later
             // equal score sorts after).
-            let mut by: Vec<(f32, usize)> = Vec::with_capacity(want + 1);
+            by.clear();
             let mut keep = |o: f32, i: usize| {
                 if by.len() == want && o.total_cmp(&by[want - 1].0).is_ge() {
                     return;
@@ -2771,11 +2776,12 @@ pub fn encode_block(fp: &Footprint, px: &[Rgba], srgb: bool, effort: u8) -> [u8;
                     }
                 }
             } else {
-                for &i in &ranked {
+                for &i in ranked.iter() {
                     keep(off_lines(&Moments::of(&t, &pats[i].lab, k as u8), k, t.ch), i);
                 }
             }
-            ranked = by.into_iter().map(|e| e.1).collect();
+            ranked.clear();
+            ranked.extend(by.iter().map(|e| e.1));
         }
         for &i in ranked.iter().take(want) {
             let ms = Moments::of(&t, &pats[i].lab, k as u8);
@@ -3050,6 +3056,8 @@ struct Scratch {
     measured: Vec<(u16, u16, f32)>,
     decimated: Vec<[[f32; 64]; 2]>,
     finals: Vec<(u32, Symbolic, (usize, usize))>,
+    ranked: Vec<usize>,
+    by: Vec<(f32, usize)>,
 }
 
 /// A block's layouts, their memory kept from block to block: each refilled in place (see
