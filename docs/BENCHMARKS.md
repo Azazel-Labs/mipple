@@ -1180,6 +1180,28 @@ cloud bench 44264020722, EPYC 7763). Each cell is mipple / thorough:
   51.79 s), with Zstd files 0.5% larger (0.857 / 0.853 bpt). How much time thorough takes, compared with
   mipple, depends on the CPU.
 
+At c01269f (the mode estimate's weight noise no longer overstates few-level weight ranges) effort 5 closes
+the base-encode gap: with the light pass at λ 0.5 it beats thorough on all five columns at 8x8 to 12x10, and
+at λ 1 at 12x12, in 43-68% of its time (same setup, one run each: 8x8 44303801693 EPYC 7763, 10x8 and 10x10
+44303775415 EPYC 9V45, 12x10 44303788999 Xeon 6975P, 12x12 44307695655 EPYC 9V74). Each cell is mipple /
+thorough:
+
+| footprint | mipple setting | PSNR dB | SSIM | Zstd-19 bpt | Deflate-9 bpt | time s |
+| --- | --- | --- | --- | --- | --- | --- |
+| 8x8 | effort 5 light λ 0.5 | 34.692 / 34.635 | .96652 / .96589 | 1.879 / 1.917 | 1.887 / 1.926 | 27.69 / 40.82 |
+| 10x8 | effort 5 light λ 0.5 | 33.493 / 33.438 | .95497 / .95402 | 1.523 / 1.543 | 1.528 / 1.550 | 14.79 / 24.72 |
+| 10x10 | effort 5 light λ 0.5 | 32.416 / 32.361 | .94108 / .93992 | 1.226 / 1.239 | 1.230 / 1.243 | 13.90 / 26.73 |
+| 12x10 | effort 5 light λ 0.5 | 31.618 / 31.565 | .92885 / .92737 | 1.025 / 1.030 | 1.027 / 1.032 | 17.06 / 25.33 |
+| 12x12 | effort 5 light λ 1 | 30.847 / 30.796 | .91462 / .91305 | 0.842 / 0.853 | 0.843 / 0.856 | 17.57 / 41.09 |
+
+- **RDO off:** effort 5 `-l 0` is now 0.053-0.063 dB ahead of thorough at 8x8 to 12x12 with higher SSIM,
+  files 0.3-1.3% larger after Zstd (the ee1dd5a runs had it 0.015-0.055 dB behind at 10x8 and up).
+- **12x12 at λ 0.5:** 30.849 dB and .91476, but files 0.4% larger after Zstd (0.856 / 0.853 bpt), so λ 1.
+  At λ 1.5 / 2 it still leads (30.843 / 30.838 dB) with files 2.8% / 4.3% smaller.
+- **Effort 4 light λ 0.5:** 0.015-0.023 dB short of thorough at 8x8 to 12x12, in 27-36% of its time.
+- **6x6:** effort 5 light λ 0.5 leads on PSNR (+0.056 dB) and both sizes but trails on SSIM (.98653 /
+  .98664); the effort 4 `-l 0.1` win above still holds the footprint.
+
 Scoring astcenc's files exposed a decoder bug, fixed: a 2- or 3-partition block may spell equal CEMs the long
 way (with the extra CEM bits below the weights), and the decoder read those blocks with the short form's
 endpoint range. mipple's own files never use the long form, so earlier mipple scores are unchanged.

@@ -530,6 +530,12 @@ Measured on Kodak images 1-3, single thread, effort 0, unless noted. ISPC fast t
 Measured on the first 8 Kodak images (ETC2 RGBA: the twelve RGBA images of BENCHMARKS.md), effort 5,
 λ 0.5, 1 and 2.
 
+- **Halving the ASTC mode estimate's endpoint noise (c01269f).** With refinement (effort 2 and up) the
+  endpoint term of the estimate at step² / 36 instead of / 18: +0.012 to +0.030 dB at effort 5 and +0.015
+  to +0.057 dB at effort 2 on 8 Kodak images (`-l 0`, local), but mixed on the `mipple check` corpus
+  (BD-rate -3.01% at 12x12, -0.52% / -0.61% at 8x8 / 10x8, -0.23% at 4x4, +0.09% to +0.92% at 9 of the
+  other 10 footprints). Without refinement (efforts 0 and 1) 4x4 lost 0.050 dB. The decimation bias (1.5)
+  was already at its best: 1 / 2 / 3 lost 0.006-0.113 dB at 6x6 and 10x8.
 - **Field-swap refinement for ETC2 RGB.** `--refine-back 256` against 0 is even: sizes within 0.2% and
   PSNR within 0.02 dB at each λ, so it is off by default. It stays on for ETC2 RGBA, where the alpha half
   gains (1.2-1.7% smaller for 0.02-0.05 dB), and for EAC (RG11 2-4% smaller for 0.04-0.16 dB).
