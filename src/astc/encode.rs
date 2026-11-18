@@ -206,6 +206,14 @@ fn mix_rows_n<const NV: usize>(out: &mut [f32], nr: usize, nk: usize, m: &[f32],
     }
 }
 
+/// How much of a level the weight-noise estimate adds to each weight range (see `Grid::est`): 1
+/// would be the uniform-weight optimum, 0 the full-span step. At effort 5 on 8 Kodak images,
+/// against 0: +0.007 / +0.014 / +0.056 / +0.080 / +0.114 dB at 4x4 / 6x6 / 8x8 / 10x8 / 12x12
+/// (0.8 is within 0.004 dB of it, 1 is 0.004-0.028 dB lower), effort 2 +0.027 / +0.030 / +0.075
+/// dB at 4x4 / 6x6 / 10x8; the few-level weights it lets through (2 levels on 6-7% of blocks at
+/// 10x8 for astcenc thorough, 0.1% before) also shrink Zstd output a little.
+const WEIGHT_STEP_SHRINK: f32 = 0.7;
+
 /// A block mode's noise terms for the estimate.
 #[derive(Clone, Copy)]
 struct Est {
@@ -429,8 +437,12 @@ impl Footprint {
                     .sum::<f32>()
                     / n as f32;
                 let round = if identity { 0.0 } else { 1.0 / 12.0 };
+                // The weight step as if `levels - 1 + WEIGHT_STEP_SHRINK` levels spanned the
+                // ideal weights: the refit pulls the endpoints inside the texels' extremes (for
+                // uniform weights, by half a step each end), so few levels cost less than their
+                // full-span step says.
                 let wn = |bm: &BlockMode| {
-                    let wstep = 64.0 / (RANGES[bm.quant as usize] as f32 - 1.0);
+                    let wstep = 64.0 / (RANGES[bm.quant as usize] as f32 - 1.0 + WEIGHT_STEP_SHRINK);
                     noise * wstep * wstep / 12.0 + round
                 };
                 let est = std::array::from_fn(|kind| {
