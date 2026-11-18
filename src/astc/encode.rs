@@ -1054,18 +1054,20 @@ fn quant_scale(f0: &[f32; 4], f1: &[f32; 4], alpha: bool, cq: usize, out: &mut [
 /// four channels at the step down and the step up; for an endpoint step, eight texels of the
 /// partition in one channel.
 fn polish(t: &Texels, lay: &Layout, grid: &Grid, sym: &mut Symbolic, passes: usize) -> u32 {
-    polish_parts::<true, true>(t, lay, grid, sym, passes)
+    polish_parts::<true, true>(t, lay, grid, sym, passes, u32::MAX).expect("no cap")
 }
 
 /// [`polish`] stepping only the weights (`W`), only the endpoints (`E`), or both. Labels and the
-/// partition count are all it reads of `lay`.
+/// partition count are all it reads of `lay`. `None`, with `sym` unpolished, if the block's error
+/// before any step is above `cap`.
 fn polish_parts<const W: bool, const E: bool>(
     t: &Texels,
     lay: &Layout,
     grid: &Grid,
     sym: &mut Symbolic,
     passes: usize,
-) -> u32 {
+    cap: u32,
+) -> Option<u32> {
     POLISH.with_borrow_mut(|b| {
         let b = b.get_or_insert_with(|| {
             Box::new(PolishBuf {
@@ -1078,7 +1080,7 @@ fn polish_parts<const W: bool, const E: bool>(
                 errp: [[0; MAX_TEXELS]; 2],
             })
         });
-        polish_in::<W, E>(b, t, lay, grid, sym, passes)
+        polish_in::<W, E>(b, t, lay, grid, sym, passes, cap)
     })
 }
 
@@ -1132,7 +1134,8 @@ fn polish_in<const W: bool, const E: bool>(
     grid: &Grid,
     sym: &mut Symbolic,
     passes: usize,
-) -> u32 {
+    cap: u32,
+) -> Option<u32> {
     let PolishBuf {
         sums,
         xs,
@@ -1234,6 +1237,10 @@ fn polish_in<const W: bool, const E: bool>(
         for i in 0..n {
             errp[pl][i] = texel_err(&base, &slope, i, pl, sums[pl][i] >> 4);
         }
+    }
+    // Steps rarely bring a block from above the cap to under it: not tried.
+    if cap != u32::MAX && errp[..planes].iter().map(|e| e[..n].iter().sum::<i32>()).sum::<i32>() as u32 > cap {
+        return None;
     }
     let nv = if sym.cems[0] == 12 { 4 } else { 3 };
     // Direct endpoints (CEM 8 / 12) step one channel of one endpoint per code; other modes step
@@ -1413,7 +1420,7 @@ fn polish_in<const W: bool, const E: bool>(
             }
         }
     }
-    errp[..planes].iter().map(|e| e[..n].iter().sum::<i32>()).sum::<i32>() as u32
+    Some(errp[..planes].iter().map(|e| e[..n].iter().sum::<i32>()).sum::<i32>() as u32)
 }
 
 /// A partitioning of the block's texels, the channel on a second weight plane if any, and the

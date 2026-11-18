@@ -199,7 +199,8 @@ fn refit_base(
 
 /// `sym` with weights chosen for `t`: each texel projected onto its partition's endpoint segment,
 /// decimated to the grid, quantized and polished with the endpoints held. Returns it and its error,
-/// or `None` if no weights for these endpoints can bring the error down to `max_err`.
+/// or `None` if no weights for these endpoints can bring the error down to `max_err` (or the
+/// quantized weights are above it before polishing).
 #[expect(
     clippy::too_many_arguments,
     reason = "the earlier block's parts and the texels' sums"
@@ -326,13 +327,20 @@ fn reweight(
         &u2[..n],
         &mut out.weights,
     );
-    let err = polish_parts::<true, false>(t, lay, grid, &mut out, PASSES);
+    let err = polish_parts::<true, false>(
+        t,
+        lay,
+        grid,
+        &mut out,
+        PASSES,
+        max_err.min(u32::MAX as f32 / 2.0) as u32,
+    )?;
     Some((out, err))
 }
 
 /// `sym` with endpoints refitted to `t` for its weights, quantized and polished with the weights
 /// held. Returns it and its error, or `None` if no endpoints for these weights can bring the error
-/// down to `max_err`.
+/// down to `max_err` (or the quantized endpoints are above it before polishing).
 #[expect(
     clippy::too_many_arguments,
     reason = "the earlier block's parts and the texels' sums"
@@ -441,7 +449,14 @@ fn refit_to(
         );
         out.colors[2 * nv * p..2 * nv * (p + 1)].copy_from_slice(&o[..2 * nv]);
     }
-    let err = polish_parts::<false, true>(t, lay, grid, &mut out, PASSES);
+    let err = polish_parts::<false, true>(
+        t,
+        lay,
+        grid,
+        &mut out,
+        PASSES,
+        max_err.min(u32::MAX as f32 / 2.0) as u32,
+    )?;
     Some((out, err))
 }
 
