@@ -506,6 +506,11 @@ Measured on Kodak images 1-3, single thread, effort 0, unless noted. ISPC fast t
   endpoint modes alone, 0.94-0.97x for +0.026 / +0.021 / +0.011 dB. Polish 2 instead of 3 saved no time
   locally (later passes stop early). At most 5% for about 0.03 dB, against a 4-13% gap to astcenc fast and
   a 0.05-0.14 dB lead, so effort 0 keeps its settings.
+- **A lighter light pass at effort 0, timed in the cloud.** With `--astc-tune`'s 14th and 15th values on one
+  SHA (Kodak-24 effort 0, one thread, 5x4 / 5x5 / 6x5): no polish in the reweighted candidate was
+  1.009-1.013x (Xeon 6975P) for files 0.27% larger; no reweighted candidate at all was 1.10x (EPYC 7763)
+  for files 1.9% larger. Both stay. Dropping the refitted candidate (1.045x for 0.01-0.05% larger) was kept
+  at 4x4-6x5 (`RdoParams::light_refit`).
 
 ## ETC2 / EAC
 

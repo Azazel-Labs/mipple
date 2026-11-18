@@ -271,7 +271,15 @@ Open for v0.9.x:
       Kodak-24 (local, one thread).
     - Tried and dropped: a lighter effort-0 search at 5x4-6x5 paid for with a lower λ. The search cuts cost
       0.016-0.153 dB, and a lower λ buys back only 0.012-0.021 dB for files 0.7-1.6% larger (DEADENDS).
-      Next: a cheaper polish and base search at 17-30 texels, output identical or better.
+    - ISE packing in 64-bit words (4c8b1a4); light-pass candidates that cannot win skipped before they are
+      written (440c8a9: 1.018-1.028× at 5x4-6x5, cloud A/B 44191868149, 24/24 identical) or polished
+      (ccd79ee: 1.025-1.027× at 5x4-8x8, cloud A/B 44205118060, EPYC 9V74, files +0.002-0.004% at 5x4-6x5);
+      and no refitted candidate at effort 0 below 36 texels (07ed5d3: 1.051-1.056× at 5x4-6x5, cloud A/B
+      44237101083, EPYC 7763, files 0.01-0.05% larger).
+    - At afdc3b8 (cloud bench 44237114084, EPYC 9V74, Kodak-24, one pinned thread) effort 0 is faster than
+      fast at 5x4 (2.21 / 2.38 s), 5x5 (2.19 / 2.22) and 6x5 (2.16 / 2.28), with higher PSNR (+0.05 / +0.09
+      / +0.14 dB) and SSIM and smaller files after Zstd and Deflate, except Zstd at 6x5 (3.828 against
+      3.825 bpt). Left: that 0.08%, and a re-run of 4x4 and 6x6 at the current commit.
   - [ ] A GPU kernel, a SIMD batch encoder, HDR.
 - [x] ETC2 / EAC for mobile fallbacks: ETC2 RGB (all five modes), ETC2 RGBA8 and EAC R11 / RG11 (unsigned),
   KTX2 only, with the RDO pass. On Kodak, one thread, effort 0 is 0.37 dB ahead of Compressonator in an
