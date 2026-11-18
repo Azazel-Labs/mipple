@@ -41,12 +41,16 @@ const ASTC_DEFAULT_LAMBDA: [(f32, f32); 7] = [
     (144.0, 6.0),
 ];
 
-/// Effort 0's floor on [`ASTC_DEFAULT_LAMBDA`], by texel count (0 below 36: 4x4-6x6 keep the base λ).
-/// Effort 0's plain encode is coarser, so the light pass can trade more rate before PSNR drops
-/// below astcenc's fast preset. On Kodak-24 (cloud, one thread) these λ beat fast on PSNR, SSIM,
-/// Zstd-19 and Deflate-9 size and time at 8x5-10x8; the base λ there left files larger than fast's.
+/// Effort 0's floor on [`ASTC_DEFAULT_LAMBDA`], by texel count (0 elsewhere below 36: 4x4-5x5 and
+/// 6x6 keep the base λ). Effort 0's plain encode is coarser, so the light pass can trade more rate
+/// before PSNR drops below astcenc's fast preset. On Kodak-24 (cloud, one thread) these λ beat fast
+/// on PSNR, SSIM, Zstd-19 and Deflate-9 size and time at 8x5-10x8; the base λ there left files
+/// larger than fast's. At 6x5 the base λ (0.219) left Zstd files 0.08% larger than fast's at
+/// +0.14 dB; 0.26 makes them 0.41% smaller than that for 0.008 dB (Kodak-24, local).
 /// Effort 1 and up keep the base table, which already beats astcenc's thorough preset.
-const ASTC_E0_LAMBDA: [(f32, f32); 6] = [
+const ASTC_E0_LAMBDA: [(f32, f32); 8] = [
+    (25.0, 0.0),
+    (30.0, 0.26),
     (36.0, 0.0),
     (40.0, 0.85),
     (48.0, 1.5),
@@ -4168,6 +4172,8 @@ mod tests {
         let l0 = |f| RdoParams::astc_default_lambda(f, 0);
         for (f, want, want0) in [
             (Format::Astc4x4, 0.03, 0.03),
+            (Format::Astc5x5, 0.03 + 0.27 * 9.0 / 20.0, 0.03 + 0.27 * 9.0 / 20.0),
+            (Format::Astc6x5, 0.03 + 0.27 * 14.0 / 20.0, 0.26),
             (Format::Astc6x6, 0.3, 0.3),
             (Format::Astc8x5, 0.3 + 0.2 * 4.0 / 28.0, 0.85),
             (Format::Astc8x6, 0.3 + 0.2 * 12.0 / 28.0, 1.5),
