@@ -513,6 +513,12 @@ Measured on Kodak images 1-3, single thread, effort 0, unless noted. ISPC fast t
   1.009-1.013x (Xeon 6975P) for files 0.27% larger; no reweighted candidate at all was 1.10x (EPYC 7763)
   for files 1.9% larger. Both stay. Dropping the refitted candidate (1.045x for 0.01-0.05% larger) was kept
   at 4x4-6x5 (`RdoParams::light_refit`).
+- **Vectorizing the light RDO pass's reweight bound, and no per-block lists in the pattern ranking**
+  (ee1dd5a, kept: output identical). The reweight candidate's per-texel lower bound four texels at a
+  time, and rank_scan / the line-fit rerank writing into per-thread scratch, came to 1.003x / 1.005x /
+  1.014x at 5x5 / 4x4 / 6x6 effort 0 and 0.991x at 5x5 with RDO off (cloud A/B 44254519970, EPYC 7763,
+  Kodak 24): within noise. The bound loop was a small part of reweight's time (its polish and quantize
+  are the rest), and the lists were a few small allocations per block.
 
 ## ETC2 / EAC
 
