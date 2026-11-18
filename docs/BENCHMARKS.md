@@ -1116,6 +1116,24 @@ against fast, with the previous default as the base row:
 - **8x5 and 6x6:** ahead on PSNR, SSIM and both sizes (Zstd 0.2% smaller), level on time (1.48 vs 1.47 s and
   1.51 vs 1.48 s here; 2.40 vs 2.48 s for 8x5 on an EPYC 7763).
 
+At a10e278 (effort 0's λ 0.26 at 6x5; light-pass candidates skipped before they are written or polished; no
+refitted candidate below 36 texels at effort 0) the light pass is cheap enough that effort 0 beats astcenc
+fast on all five columns from 4x4 to 6x6. Two runs on cloud EPYC 7763s (same setup, with Intel ISPC fast): 4x4
+and 6x6 at de44939 (44239094693, identical output at those footprints) and 5x4-6x5 at a10e278 (44241505134):
+
+| footprint | ISPC fast | astcenc fast | mipple effort 0 |
+| --- | --- | --- | --- |
+| 4x4 | 43.790 / .99677 / 7.286 / 7.431 / 2.21 | 44.580 / .99722 / 7.216 / 7.362 / 3.06 | 44.685 / .99747 / 7.039 / 7.201 / 2.35 |
+| 5x4 | 42.204 / .99521 / 5.884 / 5.984 / 2.11 | 42.679 / .99577 / 5.853 / 5.974 / 2.32 | 42.732 / .99605 / 5.636 / 5.748 / 2.12 |
+| 5x5 | 40.532 / .99236 / 4.741 / 4.813 / 2.02 | 40.697 / .99290 / 4.625 / 4.719 / 2.15 | 40.788 / .99338 / 4.550 / 4.626 / 2.11 |
+| 6x5 | 39.010 / .98873 / 3.976 / 4.028 / 1.82 | 39.080 / .98912 / 3.825 / 3.902 / 2.21 | 39.211 / .98999 / 3.812 / 3.871 / 2.08 |
+| 6x6 | 37.563 / .98365 / 3.332 / 3.368 / 1.69 | 37.657 / .98337 / 3.205 / 3.262 / 2.48 | 37.660 / .98512 / 3.189 / 3.230 / 1.93 |
+
+- **Against astcenc fast:** +0.003 to +0.13 dB, higher SSIM, files 0.3-3.7% smaller after Zstd (0.8-3.8% after
+  Deflate), in 77-98% of its time.
+- **Against ISPC fast:** +0.10 to +0.90 dB with files 3.4-4.3% smaller after Zstd (3.1-4.1% after Deflate),
+  but 1.00-1.14× its time.
+
 Scoring astcenc's files exposed a decoder bug, fixed: a 2- or 3-partition block may spell equal CEMs the long
 way (with the extra CEM bits below the weights), and the decoder read those blocks with the short form's
 endpoint range. mipple's own files never use the long form, so earlier mipple scores are unchanged.

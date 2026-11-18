@@ -251,7 +251,7 @@ Open for v0.9.x:
     on PSNR, SSIM, Zstd and Deflate size and time at once (BENCHMARKS.md, e570c02). Effort 0 has its
     own floor on λ from 8x5 to 10x8 (0.85-3), so it beats fast on all five there too, level on time at 8x5
     (BENCHMARKS.md, b7b5f20).
-  - [ ] Effort 0's default light pass against fast's time at 4x4-6x6. At 1e03746 (cloud bench 44094984522,
+  - [x] Effort 0's default light pass against fast's time at 4x4-6x6. At 1e03746 (cloud bench 44094984522,
     EPYC 9V45, Kodak-24, one pinned thread) it wins PSNR and SSIM at every footprint and both sizes except
     Zstd at 6x5 (3.826 against 3.825 bpt, at +0.14 dB), and it is faster than fast at 4x4 (1.65 against
     1.88 s) and 6x6 (1.29 / 1.45), but still slower at 5x4 (1.47 / 1.41), 5x5 (1.48 / 1.29) and 6x5
@@ -279,7 +279,14 @@ Open for v0.9.x:
     - At afdc3b8 (cloud bench 44237114084, EPYC 9V74, Kodak-24, one pinned thread) effort 0 is faster than
       fast at 5x4 (2.21 / 2.38 s), 5x5 (2.19 / 2.22) and 6x5 (2.16 / 2.28), with higher PSNR (+0.05 / +0.09
       / +0.14 dB) and SSIM and smaller files after Zstd and Deflate, except Zstd at 6x5 (3.828 against
-      3.825 bpt). Left: that 0.08%, and a re-run of 4x4 and 6x6 at the current commit.
+      3.825 bpt).
+    - Effort 0's λ at 6x5 raised from 0.219 to 0.26 (a10e278). Done: on one EPYC 7763 runner (Kodak-24,
+      one pinned thread) effort 0 beats astcenc fast on PSNR, SSIM, Zstd-19 and Deflate-9 size and time at
+      once at every footprint from 4x4 to 6x6: 4x4 2.35 / 3.06 s and 6x6 1.93 / 2.48 at de44939 (cloud
+      bench 44239094693); 5x4 2.12 / 2.32, 5x5 2.11 / 2.15 and 6x5 2.08 / 2.21 at a10e278 (cloud bench
+      44241505134), with 6x5 now 3.812 against 3.825 bpt after Zstd. Intel ISPC fast is faster at 4x4,
+      5x4, 5x5 and 6x5 (2.21, 2.11, 2.02, 1.82 s), but 0.20-0.90 dB behind, with effort 0's files 3.4-4.2%
+      smaller after Zstd.
   - [ ] A GPU kernel, a SIMD batch encoder, HDR.
 - [x] ETC2 / EAC for mobile fallbacks: ETC2 RGB (all five modes), ETC2 RGBA8 and EAC R11 / RG11 (unsigned),
   KTX2 only, with the RDO pass. On Kodak, one thread, effort 0 is 0.37 dB ahead of Compressonator in an
