@@ -491,25 +491,13 @@ fn sse(a: &[Rgba], b: &[Rgba]) -> u64 {
 }
 
 /// [`crate::rdo`]'s distortion weight for smooth blocks, over this footprint's texels.
-fn smooth_factor(px: &[Rgba], p: &RdoParams) -> f64 {
-    let n = px.len() as f32;
-    // The four channels side by side, each summed in texel order as one at a time would.
-    let mut sum = [0f32; 4];
-    for t in px {
-        for c in 0..4 {
-            sum[c] += t[c] as f32;
-        }
-    }
-    let mean = sum.map(|s| s / n);
-    let mut var = [0f32; 4];
-    for t in px {
-        for c in 0..4 {
-            var[c] += (t[c] as f32 - mean[c]).powi(2);
-        }
-    }
-    let max_std = var.iter().fold(0f32, |m, &v| m.max((v / n).sqrt()));
-    let k2 = p.smooth_std * p.smooth_std;
-    (1.0 + (p.smooth_scale - 1.0) * k2 / (k2 + max_std * max_std)) as f64
+fn smooth_factor(bs: &BlockSums, n: usize, p: &RdoParams) -> f64 {
+    // Each channel's variance from its exact integer sums: (n Σx² - (Σx)²) / n².
+    let n = n as i64;
+    let num = (0..4).fold(0i64, |m, c| m.max(n * bs.sxx[c] as i64 - (bs.sx[c] as i64).pow(2)));
+    let var = num as f64 / (n * n) as f64;
+    let k2 = (p.smooth_std * p.smooth_std) as f64;
+    1.0 + (p.smooth_scale - 1.0) as f64 * k2 / (k2 + var)
 }
 
 #[expect(clippy::too_many_arguments, reason = "one chunk's surface, position and settings")]
@@ -567,7 +555,7 @@ fn optimize_chunk(
         // alpha the source has.
         let t = tbuf.texels(&px, 4);
         let bs = BlockSums::of(&t);
-        let smooth = smooth_factor(&px, p);
+        let smooth = smooth_factor(&bs, n, p);
         let score = |err: u64, bits: f32| smooth * err as f64 / 16.0 + lambda * bits as f64;
         let base: [u8; 16] = data[i * 16..i * 16 + 16].try_into().unwrap();
         // Read once: the decode and (if the block stays) the fields later blocks build on.
@@ -821,7 +809,7 @@ fn optimize_chunk_light(
         read_block(s, bw, bh, (bi % nx) as u32, (bi / nx) as u32, &mut px);
         let t = tbuf.texels(&px, 4);
         let bs = BlockSums::of(&t);
-        let smooth = smooth_factor(&px, p);
+        let smooth = smooth_factor(&bs, n, p);
         let score = |err: u64, bits: f32| smooth * err as f64 / 16.0 + lambda * bits as f64;
         // A prefix of 3 or more bytes shared with the previous block is one match, and so is such
         // a suffix; the bytes between are literals. Also returns whether there was a match.
