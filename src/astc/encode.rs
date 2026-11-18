@@ -2427,17 +2427,21 @@ struct Effort {
 static TUNE: std::sync::OnceLock<Effort> = std::sync::OnceLock::new();
 
 /// Tuning runs (the CLI's hidden `--astc-tune`): replaces every effort's search settings with
-/// `p2,p3,candidates,refine,polish,dual,line2,line3,line_dual,shortlist,rerank,top[,alts]`
-/// (alts 2 when left out; rerank not halved above 16 texels). Only the first call counts.
+/// `p2,p3,candidates,refine,polish,dual,line2,line3,line_dual,shortlist,rerank,top[,alts[,rw,rf]]`
+/// (alts 2 when left out; rerank not halved above 16 texels); `rw` and `rf` are the light RDO
+/// pass's reweight polish passes (negative: no reweight) and refit (0 off). Only the first call counts.
 pub fn set_tune(spec: &str) -> Result<(), String> {
     let mut v = spec
         .split(',')
         .map(|x| x.trim().parse::<f64>().map_err(|e| format!("--astc-tune {x:?}: {e}")))
         .collect::<Result<Vec<f64>, _>>()?;
     if v.len() < 12 {
-        return Err(format!("--astc-tune needs 12 or 13 values, got {}", v.len()));
+        return Err(format!("--astc-tune needs 12 to 15 values, got {}", v.len()));
     }
     let alts = v.get(12).map_or(2, |&a| a as u8);
+    if let Some(&rw) = v.get(13) {
+        let _ = rdo::TUNE.set(((rw >= 0.0).then_some(rw as usize), v.get(14).is_none_or(|&r| r != 0.0)));
+    }
     v.truncate(12);
     let u = |i: usize| v[i] as usize;
     let _ = TUNE.set(Effort {

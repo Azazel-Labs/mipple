@@ -33,6 +33,14 @@ const REFIT_BACK: usize = 256;
 /// Polish passes over the re-chosen half of a candidate.
 const PASSES: usize = 1;
 
+/// Tuning runs (`--astc-tune`'s 14th and 15th values): the reweighted candidate's polish passes
+/// (`None`: not tried) and whether the refitted candidate is tried.
+pub(super) static TUNE: std::sync::OnceLock<(Option<usize>, bool)> = std::sync::OnceLock::new();
+
+fn tune() -> (Option<usize>, bool) {
+    TUNE.get().copied().unwrap_or((Some(PASSES), true))
+}
+
 /// A block already chosen: its bytes and, when the candidates can build on it, its fields, labels
 /// and grid.
 struct Prev {
@@ -141,7 +149,11 @@ fn prev_sym(
         })
     });
     set_labels(fp, &sym, &mut b.lay);
-    b.refit = refit_base(fp, &b.lay, gi, &sym, tw);
+    b.refit = if tune().1 {
+        refit_base(fp, &b.lay, gi, &sym, tw)
+    } else {
+        None
+    };
     for (q, e) in b.eps.iter_mut().enumerate() {
         *e = if q < p {
             sym_endpoints(&sym, q)
@@ -332,7 +344,7 @@ fn reweight(
         lay,
         grid,
         &mut out,
-        PASSES,
+        tune().0.unwrap_or(PASSES),
         max_err.min(u32::MAX as f32 / 2.0) as u32,
     )?;
     Some((out, err))
@@ -867,7 +879,7 @@ fn optimize_chunk_light(
             // block's first `below / 8` bytes, the refitted one its last `weight_bits / 8`.
             let pm = prev_matched as usize;
             let lbs = [head_lb[pm][below / 8], tail_lb[pm][(128 - below) / 8]];
-            if b0 & mask != v & mask {
+            if b0 & mask != v & mask && tune().0.is_some() {
                 let cap = cap_for(best.0, lbs[0], limit);
                 cands[0] = reweight(fp, &t, &ps.lay, ps.gi, &ps.sym, &ps.eps, &bs, cap);
             }
