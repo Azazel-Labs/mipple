@@ -87,7 +87,7 @@ Goal: meet or beat the quality and speed of the best open encoders per format, t
 - [ ] **ETC2 / EAC:** a SIMD batch encoder (eight blocks per call, as BC1 / BC6H; what it would widen is the
   scalar glue between kernels, which must keep its order to stay byte-identical) and a GPU kernel.
 - [ ] **BC6H and BC3 GPU kernels.** A BC6H kernel was tried and not merged: its exact-integer CPU path was
-  1.15-1.32× slower (DEADENDS, branch `wt/bc6h-gpu`).
+  1.15-1.32× slower (DEADENDS).
 - [ ] **Competitors:** add bc7g to `scripts/compete.py` when it ships (unreleased, checked 2026-11-16).
   NVTT 3 sits behind an NVIDIA developer login, so it stays a manual download.
 
@@ -97,7 +97,9 @@ Goal: meet or beat the quality and speed of the best open encoders per format, t
   types, as Oodle does; an NVIDIA FLIP metric in `bench`.
 - [ ] **Mesh-aware texel density:** read the model a texture is mapped to (glTF first) and, from each
   triangle's UV-to-surface scale, get every texel's world-space density (texels per metre). With a usual
-  viewing distance, field of view and screen resolution, that gives on-screen texels per pixel. Uses:
+  viewing distance, field of view and screen resolution, that gives on-screen texels per pixel, the
+  view model [farthing](https://github.com/Azazel-Labs/farthing) uses to size LODs and impostors
+  (`texel_density` per triangle, `world_error_to_pixels`); its crate could supply glTF loading. Uses:
   - A density report and heatmap: over- and under-dense UV islands, and texels no triangle maps to.
   - Error weights for RDO and the base encoders. Unmapped texels (gutters, unused space) weigh zero
     beyond the bleed the mips need. Magnified regions get more bits and minified regions fewer.

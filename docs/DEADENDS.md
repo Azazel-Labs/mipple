@@ -345,7 +345,7 @@ mipple effort 0 scores 45.18 dB in 0.385 s. (The 20-image results are in BENCHMA
   core (local, loaded machine; an estimate), with unchanged quality. On a 4096x2048 HDR image the
   kernel on an Intel Arc iGPU against 20 CPU threads: effort 0 82 vs 34 ms, effort 1 132 vs 138 ms,
   effort 2 173 vs 232 ms. A small win at effort 2 does not pay for a slower CPU path everywhere.
-  Not merged; the work is on branch `wt/bc6h-gpu` (cda1db4). On the way, solving the exact
+  Not merged (the branch, cda1db4, was deleted on 2026-11-18). On the way, solving the exact
   least-squares refit's slope on the 9-bit cut of each texel alone (without the slope on the bits
   the cut drops) lost 1.36 dB (BC6H) and 3.39 dB (BC6H_SF16) on ui_alpha at λ 0.
 
