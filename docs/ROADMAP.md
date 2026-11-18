@@ -302,6 +302,13 @@ Open for v0.9.x:
 - [x] **Normal maps:** `--role albedo|normal|mask`; BC5 / EAC RG11 RDO weighs each block by how far its X/Y
   error moves the rebuilt unit normal (−1.2% BD-rate on lit PSNR, better RG PSNR and angle too), and `bench`
   reports lit PSNR. Still open: per-channel weights for `mask`, and ASTC normal maps (X/Y in RG or LA).
+- [ ] **Mesh-aware texel density:** read the model a texture is mapped to (glTF first) and, from each
+  triangle's UV-to-surface scale, get every texel's world-space density (texels per metre). With a usual
+  viewing distance, field of view and screen resolution, that gives on-screen texels per pixel. Uses:
+  - A density report and heatmap: over- and under-dense UV islands, and texels no triangle maps to.
+  - Error weights for RDO and the base encoders. Unmapped texels (gutters, unused space) weigh zero
+    beyond the bleed the mips need. Magnified regions get more bits and minified regions fewer.
+  - A suggested top resolution: drop the mips that are never sampled at the usual distance.
 - [ ] **Analytical mode prediction** (bc7f): closed-form SSE estimates (line-fit residual + endpoint/weight
   quantization noise) to choose mode pairs (1 vs 3, 0 vs 2, 4 vs 5) without trial encodes. See
   `docs/research/bc7f-bc7g.md`.
