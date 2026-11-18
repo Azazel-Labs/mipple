@@ -269,7 +269,7 @@ in the earlier runs).
 | bc7e u0 | 41.79 | 38.05 | mipple e1 (43.34 dB, 72.37 Mpix/s) | ✓ |
 | bc7e u2 | 45.40 | 2.37 | mipple e5 (45.46 dB, 4.02 Mpix/s) | ✓ |
 | bc7e u4 | 45.70 | 1.22 | mipple e6 (45.71 dB, 1.36 Mpix/s) | ✓ |
-| bc7e u6 | 46.08 | 0.14 | ✗ | best is mipple e9, 0.17 dB short |
+| bc7e u6 | 46.08 | 0.14 | ✗ | best is mipple e9, 0.17 dB short (at this run; effort 8 now beats it, see "BC7 top efforts vs bc7e u6" above and the Kodak-24 run below) |
 | bc7f:fastest | 41.35 | 43.53 | mipple e0 (41.62 dB, 155.22 Mpix/s) | ✓ |
 | bc7f:faster | 41.35 | 41.10 | mipple e0 (41.62 dB, 155.22 Mpix/s) | ✓ |
 | bc7f:fast | 42.99 | 30.60 | mipple e1 (43.34 dB, 72.37 Mpix/s) | ✓ |
